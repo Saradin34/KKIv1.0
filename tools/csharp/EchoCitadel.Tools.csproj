@@ -1,0 +1,45 @@
+<!-- =====================================================================
+   ЭХО-ЦИТАДЕЛЬ — проверочный стенд C#-порта.
+   Собирает ЧИСТОЕ ядро (Core/AI/Data — без UnityEngine) как консольное
+   приложение .NET 8 и позволяет:
+     1) компилировать порт компилятором, а не «на глаз»;
+     2) сверить ГПСЧ и логику с TypeScript-двишком (режим «verify»);
+     3) прогнать матчи на C# и сравнить винрейты с отчётом
+        docs/balance/faction_report.csv (режим «balance», порог 2.5 п.п.).
+   Unity-специфичные скрипты (UI/, Visuals/, Factions/) сюда НЕ входят:
+   они проверяются компилятором Unity.
+   Запуск:  dotnet run -c Release (аргумент verify)
+   ===================================================================== -->
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>EchoCitadel.Tools</RootNamespace>
+    <AssemblyName>EchoCitadelVerify</AssemblyName>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <!-- порт обязан быть чистым: предупреждения видим, но не падаем на них -->
+    <NoWarn>CS1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- компилируем исходники прямо из дерева Unity-проекта:
+         один и тот же файл и для Unity, и для проверки -->
+    <Compile Include="../../unity/EchoCitadel/Assets/Scripts/Core/**/*.cs" />
+    <Compile Include="../../unity/EchoCitadel/Assets/Scripts/Data/**/*.cs" />
+    <Compile Include="../../unity/EchoCitadel/Assets/Scripts/AI/**/*.cs" />
+    <!-- Unity-only: MonoBehaviour / ScriptableObject — не в headless-стенде. -->
+    <Compile Remove="../../unity/EchoCitadel/Assets/Scripts/Core/EchoBoot.cs" />
+    <Compile Remove="../../unity/EchoCitadel/Assets/Scripts/Data/CardDataSO.cs" />
+    <!-- GameEngine.cs собирается, только когда порт ядра завершён:
+         файл пишется частями, а стенд обязан оставаться зелёным.
+         Снять исключение после готовности всех частей движка. -->
+    <Compile Remove="../../unity/EchoCitadel/Assets/Scripts/Core/GameEngine.cs"
+             Condition="!Exists('../../unity/EchoCitadel/Assets/Scripts/Core/.engine-complete')" />
+  </ItemGroup>
+
+</Project>

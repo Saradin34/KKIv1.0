@@ -1,0 +1,18 @@
+# Изображения
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.webp
+*.svg
+*.ico
+*.tif
+*.tiff
+*.avif
+*.heic
+*.raw
+server/data/
+
+node_modules/
+build/

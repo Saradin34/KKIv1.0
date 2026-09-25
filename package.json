@@ -1,0 +1,42 @@
+{
+  "name": "echo-citadel",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build:proto": "esbuild src/ui/prototype.ts --bundle --format=iife --target=es2020 --outfile=prototype/prototype.js && node -e \"require('fs').copyFileSync('src/ui/prototype.css','prototype/prototype.css')\"",
+    "proto": "node tools/serve.js --port 5173",
+    "audit:abilities": "esbuild tools/audit_abilities.ts --bundle --platform=node --format=cjs --outfile=build/audit_abilities.js --log-level=error && node build/audit_abilities.js",
+    "art:sync": "node tools/sync_art.js",
+    "smoke": "node tools/smoke_prototype.js --turns 12",
+    "typecheck": "tsc --noEmit",
+    "verify:cs": "bash tools/csharp/verify.sh",
+    "build:cs": "bash tools/csharp/verify.sh --build-only",
+    "art:process": "python3 tools/process_art.py",
+    "locale": "python3 tools/make_locale.py && python3 tools/translate_en.py",
+    "locale:check": "python3 tools/locale_check.py",
+    "e2e:locale": "node tools/e2e_locale.js",
+    "server:match": "esbuild server/match_server.ts --bundle --platform=node --format=cjs --outfile=build/match_server.js --log-level=error && node build/match_server.js",
+    "server:meta": "esbuild server/meta_server.ts --bundle --platform=node --format=cjs --external:pg-native --outfile=build/meta_server.js --log-level=error && node build/meta_server.js",
+    "balance": "esbuild tools/balance/run_balance.ts --bundle --platform=node --format=cjs --outfile=build/run_balance.js --log-level=error && node build/run_balance.js --matches 10000 --seed 20260903",
+    "autonerf": "python3 tools/autonerf.py",
+    "dashboard": "python3 tools/make_dashboard.py"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "Эхо-Цитадель — ККИ (движок правил на TypeScript, автобалансировщик, HTML-прототип, порт в Unity C#)",
+  "devDependencies": {
+    "@types/node": "^26.4.1",
+    "@types/ws": "^8.5.12",
+    "esbuild": "^0.28.2",
+    "jsdom": "^29.1.1",
+    "playwright": "^1.63.0",
+    "typescript": "^7.0.2"
+  },
+  "private": true,
+  "dependencies": {
+    "pg": "^8.23.0",
+    "ws": "^8.18.0"
+  }
+}

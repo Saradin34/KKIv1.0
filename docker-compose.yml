@@ -1,0 +1,108 @@
+# =====================================================================
+#  Эхо-Цитадель — прод-стенд (LAUNCH план: Docker Compose-прод)
+#    web     — веб-прототип      :5173
+#   meta    — meta-server       :8081 (профили, auth scrypt, telemetry,
+#                                      rate-limit, snapshot → volume metadata;
+#                                      DATABASE_URL → PG-адаптер вместо файлов)
+#    match   — матч-сервер ws    :8080
+#    db      — PostgreSQL 16     (schema.sql: профили/коллекции/матчи/лор/дашборды)
+#    cache   — Redis 7           (roadmap: сессии матчмейкинга)
+#    backup  — ежедневный бэкап: pg_dump + snapshot.json + accounts.json → volume backups
+#
+#  Запуск:  docker compose up -d --build
+#  Бэкапы:  docker compose exec backup /bin/sh /backup.sh     # вручную, вне цикла
+#  Восстановление БД:
+#    gunzip -c backups/db_<stamp>.sql.gz | docker compose exec -T db psql -U echo -d echo_citadel
+#  Rate-limit: env meta → RATE_LIMIT=0 отключает (по умолчанию on: auth10/мин, POST60/мин)
+# =====================================================================
+services:
+  web:
+    build:
+      context: .
+      target: runtime-proto
+    ports: ["5173:5173"]
+    depends_on: [meta]
+    restart: unless-stopped
+
+  meta:
+    build:
+      context: .
+      target: runtime-meta
+    ports: ["8081:8081"]
+    environment:
+      RATE_LIMIT: "60"            # "0" — отключить лимиты (dev)
+      # PG-адаптер: при заданном DATABASE_URL аккаунты/профили/ники/телеметрия
+      # живут в PostgreSQL (accounts/sessions/game_profiles/nick_registry/telemetry_log);
+      # без него — файловый режим (snapshot.json + accounts.json).
+      DATABASE_URL: "postgres://echo:echo@db:5432/echo_citadel"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - metadata:/app/server/data  # snapshot.json + accounts.json переживают рестарт (файл. режим)
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8081/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+
+  match:
+    build:
+      context: .
+      target: runtime-match
+    ports: ["8080:8080"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: echo
+      POSTGRES_PASSWORD: echo
+      POSTGRES_DB: echo_citadel
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./server/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    ports: ["5432:5432"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U echo -d echo_citadel"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  cache:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    restart: unless-stopped
+
+  # Ежедневный бэкап: цикл24ч (первый прогон сразу при старте), ротация7 дней
+  backup:
+    image: postgres:16-alpine
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: echo
+    volumes:
+      - ./server/backup.sh:/backup.sh:ro
+      - backups:/backups
+      - metadata:/metadata:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while true; do
+          sh /backup.sh || true
+          sleep 86400
+        done
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  backups:
+  metadata:

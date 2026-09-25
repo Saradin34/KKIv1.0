@@ -1,0 +1,60 @@
+{
+  "coefs": {
+    "Aurites": {
+      "bodyMul": 0.867626296514019,
+      "spellMul": 0.867626296514019,
+      "runeMul": 0.867626296514019,
+      "passiveMul": 0.47441133499146865
+    },
+    "Necrus": {
+      "bodyMul": 1.139818251836041,
+      "spellMul": 1.139818251836041,
+      "runeMul": 1.139818251836041,
+      "passiveMul": 1.4003409428281637
+    },
+    "Terramorph": {
+      "bodyMul": 1.1328830074331857,
+      "spellMul": 1.1328830074331857,
+      "runeMul": 1.1328830074331857,
+      "passiveMul": 1.369843105975076
+    },
+    "Pyromancer": {
+      "bodyMul": 1.2769402873332218,
+      "spellMul": 1.2769402873332218,
+      "runeMul": 1.2769402873332218,
+      "passiveMul": 1.8234716063764957
+    },
+    "Ethereal": {
+      "bodyMul": 0.8525003424264997,
+      "spellMul": 0.8525003424264997,
+      "runeMul": 0.8525003424264997,
+      "passiveMul": 0.5584677051228607
+    }
+  },
+  "finalWinRates": {
+    "Aurites": 0.4707142857142857,
+    "Necrus": 0.4928571428571429,
+    "Terramorph": 0.5157142857142857,
+    "Pyromancer": 0.5114285714285715,
+    "Ethereal": 0.5092857142857142
+  },
+  "games": {
+    "Aurites": 1400,
+    "Necrus": 1400,
+    "Terramorph": 1400,
+    "Pyromancer": 1400,
+    "Ethereal": 1400
+  },
+  "draws": 0,
+  "rounds": 45,
+  "perPair": 56,
+  "finalPerPair": 140,
+  "convergedAt": 14,
+  "ema": {
+    "Aurites": 0.5108184063487999,
+    "Necrus": 0.46791288325441827,
+    "Terramorph": 0.5134163037435612,
+    "Pyromancer": 0.5057817305213805,
+    "Ethereal": 0.50207067613184
+  }
+}

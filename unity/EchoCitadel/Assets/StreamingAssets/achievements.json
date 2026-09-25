@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "comment": "Достижения (спека «2. Профиль» п.2.5). Единый источник: читает AchievementSystem.cs (Unity); прототип держит тот же список в ACH_DEFS (prototype.ts). condition.type: wins|packs|bosses. icon: ico_ach_N.png (0 мечи, 4 корона, 2 книга, 5 венок).",
+  "achievements": [
+    {
+      "id": "first_win",
+      "name": "Первая победа",
+      "description": "Выиграйте свой первый матч в «Эхо-Цитадели».",
+      "condition": { "type": "wins", "value": 1 },
+      "reward": { "shards": 100, "gems": 0, "frame": "", "avatar": "" },
+      "icon": "ico_ach_0.png"
+    },
+    {
+      "id": "win10",
+      "name": "10 побед",
+      "description": "Одержите 10 побед в матчах.",
+      "condition": { "type": "wins", "value": 10 },
+      "reward": { "shards": 200, "gems": 0, "frame": "silver", "avatar": "" },
+      "icon": "ico_ach_4.png"
+    },
+    {
+      "id": "packs10",
+      "name": "10 бустеров открыто",
+      "description": "Откройте 10 бустеров.",
+      "condition": { "type": "packs", "value": 10 },
+      "reward": { "shards": 200, "gems": 0, "frame": "", "avatar": "lich" },
+      "icon": "ico_ach_2.png"
+    },
+    {
+      "id": "mythic",
+      "name": "Все боссы кампании побеждены",
+      "description": "Победите боссов всех пяти фракций в кампании.",
+      "condition": { "type": "bosses", "value": 5 },
+      "reward": { "shards": 500, "gems": 50, "frame": "", "avatar": "" },
+      "icon": "ico_ach_5.png"
+    }
+  ]
+}

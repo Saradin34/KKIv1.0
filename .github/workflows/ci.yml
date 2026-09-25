@@ -1,0 +1,39 @@
+name: ci
+on:
+  push: { branches: [main] }
+  pull_request:
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm }
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm run build:proto
+      - run: npm run smoke
+      - run: npm run audit:abilities
+      - name: balance corridor
+        run: |
+          ./node_modules/.bin/esbuild tools/balance/run_balance.ts --bundle --platform=node --format=cjs --outfile=build/run_balance.js --log-level=error
+          node build/run_balance.js --matches 2000 | tee balance.log
+          grep -q "❌" balance.log && exit 1 || exit 0
+      - uses: actions/upload-artifact@v4
+        with: { name: balance-reports, path: docs/balance/ }
+  servers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm }
+      - run: npm ci --no-audit --no-fund
+      - name: bundle match & meta servers
+        run: |
+          ./node_modules/.bin/esbuild server/match_server.ts --bundle --platform=node --format=cjs --outfile=build/match_server.js --log-level=error
+          ./node_modules/.bin/esbuild server/meta_server.ts --bundle --platform=node --format=cjs --outfile=build/meta_server.js --log-level=error
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t echo-citadel .

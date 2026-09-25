@@ -1,0 +1,15 @@
+{
+ "ui:bg_arena_board": "9946e10440820a35e6f433d2edd212427ae2a5745f2ed8d5fee02e67ea561f1d",
+ "ui:bg_battlefield": "e6e7d542decb3e40f888d0e370af087c56ab623e72fb8412178e990e6c7b60f5",
+ "renorm:unity/EchoCitadel/Assets/Resources/Cards/Aurites/aur_01.png": "f1e5b3da4f377bdc4281530e8396c9881275ca98d343ab59af34e85b9b81fcc4",
+ "renorm:unity/EchoCitadel/Assets/Resources/Cards/Aurites/aur_14.png": "eea3c6ee73e20ed279b49a562d51e51fcced4ef8f09aab5359c8dc2805cb0d4c",
+ "renorm:unity/EchoCitadel/Assets/Resources/Cards/Ethereal/eth_01.png": "d89448e3fd0cd305b8d742f0232f1bdedd33dcc921de02c4eb93fe395360b8e1",
+ "renorm:unity/EchoCitadel/Assets/Resources/Cards/Ethereal/eth_15.png": "fe76aa19d5d1ff8c1ad070ef3333d1c050e78e4bdea1f0719faee996a400c56f",
+ "renorm:unity/EchoCitadel/Assets/Resources/Cards/Necrus/nec_01.png": "3147e2194a6376295713c5cb01069f3e9d6f6e5118ea4bbcd1696bcf8ddc6b77",
+ "renorm:unity/EchoCitadel/Assets/Resources/Cards/Necrus/nec_15.png": "60aefdd5642b64fe152bb5ed9868cd9b908522cf5c04e87aad849fb9e7fa772c",
+ "renorm:unity/EchoCitadel/Assets/Resources/Cards/Pyromancer/pyr_01.png": "8d2aea8b21d748e21eaaeefab9a2687bf6c1f7b7361474d0d67c4a9f361088de",
+ "renorm:unity/EchoCitadel/Assets/Resources/Cards/Pyromancer/pyr_14.png": "a02a646d2f29bdec92b6972edb77e97ed910ee803414ce2968f81a5058d50968",
+ "renorm:unity/EchoCitadel/Assets/Resources/Cards/Terramorph/ter_01.png": "f1aa43d8e23d0d861e92c525aa97baea4a626331f0b14bc1a0770881f36a3ee2",
+ "renorm:unity/EchoCitadel/Assets/Resources/Cards/Terramorph/ter_14.png": "7f6dd7761c406e31ba3127c5ebd0f531a19d5c4b53de9fe495e5814f037099b4",
+ "renorm:unity/EchoCitadel/Assets/Resources/Cards/_Tokens/tkn_spark.png": "b2113695fc1fc4e2673f51784dc6544611f0f6160b03a8022ccddf012984dce7"
+}

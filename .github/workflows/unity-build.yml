@@ -1,0 +1,31 @@
+# CI/CD Unity: каждый коммит в main собирает билды и кладёт их в закрытый тест.
+# Секреты репозитория: UNITY_LICENSE (GameCI), UNITY_EMAIL, UNITY_PASSWORD.
+name: unity-build
+on:
+  push: { branches: [main], paths: ['unity/**', 'src/engine/**'] }
+jobs:
+  build:
+    strategy:
+      matrix:
+        target: [Windows, Android]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: unity/EchoCitadel/Library
+          key: unity-library-${{ hashFiles('unity/EchoCitadel/Packages/manifest.json') }}
+      - uses: game-ci/unity-builder@v3
+        env:
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+        with:
+          projectPath: unity/EchoCitadel
+          targetPlatform: ${{ matrix.target == 'Windows' && 'StandaloneWindows64' || 'Android' }}
+          buildsPath: builds
+      - uses: actions/upload-artifact@v4
+        with: { name: build-${{ matrix.target }}, path: builds }
+  # Дальше по цепи: TestFlight (iOS) / Google Play Internal Testing (Android).
+  # Android: google-games-services? нет — используем r0adkll/upload-google-play@v1
+  # с треком internal и secret SERVICE_ACCOUNT_JSON (см. docs/DEPLOYMENT.md §5).

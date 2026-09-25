@@ -1,0 +1,42 @@
+{
+  "_comment": [
+    "Коэффициенты авто-балансировки фракций (ТЗ п.8.2).",
+    "ПОДОБРАНЫ АВТОМАТИЧЕСКИ решателем tools/balance/solve_balance.ts",
+    "на основе симуляции матрицы матч-апов 5x5 движком правил (src/engine).",
+    "Цель: винрейт каждой фракции в коридоре 45-55% (ТЗ п.10.8).",
+    "bodyMul  — множитель суммарных статов существ;",
+    "spellMul — множитель числовых параметров заклинаний;",
+    "runeMul  — множитель числовых параметров рун."
+  ],
+  "_note": "промежуточное состояние решателя",
+  "Aurites": {
+    "bodyMul": 0.8676,
+    "spellMul": 0.8676,
+    "runeMul": 0.8676,
+    "passiveMul": 0.08
+  },
+  "Necrus": {
+    "bodyMul": 1.1398,
+    "spellMul": 1.1398,
+    "runeMul": 1.1398,
+    "passiveMul": 3.5
+  },
+  "Terramorph": {
+    "bodyMul": 1.1329,
+    "spellMul": 1.1329,
+    "runeMul": 1.1329,
+    "passiveMul": 0.12
+  },
+  "Pyromancer": {
+    "bodyMul": 1.2769,
+    "spellMul": 1.2769,
+    "runeMul": 1.2769,
+    "passiveMul": 1.8235
+  },
+  "Ethereal": {
+    "bodyMul": 0.8525,
+    "spellMul": 0.8525,
+    "runeMul": 0.8525,
+    "passiveMul": 4.5
+  }
+}

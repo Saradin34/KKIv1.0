@@ -1,0 +1,2155 @@
+/* Игровые шрифты (кириллица+латиница): Philosopher — дисплейный, Alegreya — читабельный корпус */
+@font-face {
+  font-family: 'Alegreya';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url(fonts/alegreya-400-cyrillic.woff2) format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+@font-face {
+  font-family: 'Alegreya';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url(fonts/alegreya-400-latin.woff2) format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Alegreya';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url(fonts/alegreya-700-cyrillic.woff2) format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+@font-face {
+  font-family: 'Alegreya';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url(fonts/alegreya-700-latin.woff2) format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Philosopher';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url(fonts/philosopher-400-cyrillic.woff2) format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+@font-face {
+  font-family: 'Philosopher';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url(fonts/philosopher-400-latin.woff2) format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Philosopher';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url(fonts/philosopher-700-cyrillic.woff2) format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+@font-face {
+  font-family: 'Philosopher';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url(fonts/philosopher-700-latin.woff2) format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+/* =====================================================================
+   ЭХО-ЦИТАДЕЛЬ — визуальный слой прототипа (src/ui/prototype.css)
+   ---------------------------------------------------------------------
+   Надстройка поверх базовых стилей из index.html (которые оставлены
+   инлайном, чтобы прототип работал и по file://). Этот файл отвечает за
+   «дорогую» картинку и является CSS-эквивалентом Unity-стека из
+   docs/VISUAL_STACK.md:
+
+     раздел 4 (Volume)        → #postGrade / #postVignette / #postGrain,
+                                переменные палитры (Split Toning)
+     раздел 1-2 (сцена, стол)  → #backdrop (4 параллакс-слоя), #tableSurface
+     раздел 5 (материал карт)  → .card .foil, .card .spec, .card .innerframe,
+                                фойл по редкости, 3D-тилт
+     раздел 6 (VFX)            → ключевые кадры для src/ui/vfx.ts
+
+   Все значения вынесены в переменные: смена палитры = смена одной строки.
+   ===================================================================== */
+
+:root{
+  /* Split Toning: фиолетовая тень / золотой свет (как в URP Volume) */
+  --grade-shadow:#2A2438;
+  --grade-highlight:#D8B45A;
+  --bloom-tint:#FFE6B0;
+
+  /* материал стола */
+  --stone-1:#171a24;
+  --stone-2:#0e1017;
+  --stone-edge:#2b2f3f;
+
+  /* глубина резкости: дальний ряд мягче */
+  --dof-far:1.1px;
+  --dof-near:0.6px;
+
+  /* размер карты в руке/коллекции — «как в MTG»: крупный читаемый текст */
+  --card-w:clamp(158px, 12.4vw, 190px);
+  --card-h:calc(var(--card-w) * 266 / 190);
+}
+
+/* =====================================================================
+   1. СЦЕНА: 4 параллакс-слоя + поверхность стола
+   ===================================================================== */
+
+#backdrop{position:fixed;inset:-4%;z-index:0;pointer-events:none;overflow:hidden}
+#backdrop .bl{position:absolute;inset:0;background-size:cover;background-position:center;
+  will-change:transform;transition:opacity .6s}
+#backdrop .bl.l0{opacity:.98;filter:saturate(1.05) brightness(.95)}
+#backdrop .bl.l1{opacity:.6;filter:brightness(.78) blur(var(--dof-far))}
+#backdrop .bl.l2{opacity:.78;filter:brightness(.66) blur(calc(var(--dof-far) * .4))}
+#backdrop .bl.l3{opacity:.26;mix-blend-mode:screen;filter:blur(2px)}
+#backdrop::after{content:'';position:absolute;inset:0;
+  background:radial-gradient(ellipse at 50% 42%, transparent 30%, rgba(8,10,18,.40) 82%, #0a0d18 100%)}
+
+/* свечи: два тёплых источника света с мерцанием */
+#backdrop .candle{position:absolute;width:44vmax;height:44vmax;border-radius:50%;pointer-events:none;
+  mix-blend-mode:screen;filter:blur(28px);opacity:.40;animation:candleBreath 6.5s ease-in-out infinite}
+#backdrop .candle.c1{left:-8vmax;top:-6vmax;background:radial-gradient(circle,#ffd98a 0%,rgba(255,180,80,.28) 42%,transparent 72%)}
+#backdrop .candle.c2{right:-10vmax;bottom:-8vmax;background:radial-gradient(circle,#8fd8ff 0%,rgba(90,150,230,.22) 44%,transparent 74%);
+  animation-duration:8.2s;animation-delay:-2.4s}
+@keyframes candleBreath{0%,100%{opacity:.24;transform:scale(1)}
+  38%{opacity:.40;transform:scale(1.05)}
+  62%{opacity:.28;transform:scale(.98)}}
+
+/* поверхность стола: камень + золотая инкрустация */
+#tableSurface{position:fixed;inset:0;width:100%;height:100%;z-index:1;pointer-events:none;
+  border-radius:0;opacity:1;
+  /* непрозрачная подложка на уровне элемента: задник не проступает НИКОГДА,
+     даже если SVG-текстура не скомпонуется в браузере */
+  background:radial-gradient(ellipse at 50% 40%, #313a52 0%, #272e42 46%, #1e2434 78%, #181d2b 100%);
+  box-shadow:0 0 0 1px rgba(216,180,90,.25), 0 0 46px rgba(0,0,0,.30) inset, 0 24px 70px rgba(0,0,0,.5)}
+#tableSurface svg{width:100%;height:100%;display:block;border-radius:0}
+
+/* игровой контент поверх сцены */
+#battle{z-index:2;background:transparent}
+#board{background:transparent}
+#topbar,#bottombar{backdrop-filter:blur(7px) saturate(1.1)}
+
+/* =====================================================================
+   2. ПОСТ-ОБРАБОТКА (аналог URP Volume) — слои инжектит vfx.ts,
+      здесь только страховка и настройка
+   ===================================================================== */
+
+#postGrade{z-index:109}
+#postVignette{z-index:110}
+#postGrain{z-index:111}
+
+/* «глубина резкости»: мягче только дальняя панель героя.
+   Ряд существ НЕ размываем — читаемость доски в ККИ важнее эффекта. */
+.sideRow:first-of-type .heroPanel{filter:blur(calc(var(--dof-far) * .5)) saturate(.97)}
+/* и едва заметная на ближней кромке руки */
+#handArea{filter:blur(var(--dof-near))}
+#handArea:hover{filter:none}
+#hand:hover .card,.card:hover{filter:none !important}
+
+/* =====================================================================
+   3. МАТЕРИАЛ КАРТЫ (аналог All In 1 Sprite Shader)
+   ===================================================================== */
+
+.card{
+  border-color:rgba(216,180,90,.55);
+  box-shadow:
+    0 0 0 1px rgba(0,0,0,.85),
+    0 2px 0 rgba(255,255,255,.05) inset,
+    0 -14px 26px rgba(0,0,0,.55) inset,
+    0 10px 24px rgba(0,0,0,.72),
+    0 0 18px rgba(216,180,90,.10);
+  transform-style:preserve-3d;
+  perspective:760px;
+  background:
+    linear-gradient(180deg,rgba(255,255,255,.045),transparent 22%),
+    linear-gradient(180deg,#232840,#0c0e16 78%);
+}
+
+/* внутренняя золочёная рамка + уголки */
+.card .innerframe{position:absolute;inset:3px;border-radius:4px;pointer-events:none;z-index:4;
+  border:1px solid rgba(216,180,90,.34);
+  box-shadow:0 0 0 1px rgba(0,0,0,.55) inset, 0 0 12px rgba(216,180,90,.10) inset}
+.card .innerframe::before,.card .innerframe::after{content:'';position:absolute;width:9px;height:9px;
+  border:1px solid rgba(246,226,163,.62);pointer-events:none}
+.card .innerframe::before{left:-1px;top:-1px;border-right:0;border-bottom:0}
+.card .innerframe::after{right:-1px;bottom:-1px;border-left:0;border-top:0}
+
+/* спекулярный блик, ездящий за курсором (координаты ставит prototype.ts) */
+.card .spec{position:absolute;inset:0;pointer-events:none;z-index:5;opacity:0;transition:opacity .2s;
+  background:radial-gradient(240px circle at var(--mx,50%) var(--my,50%),
+    rgba(255,255,255,.30) 0%, rgba(255,240,200,.14) 26%, transparent 58%);
+  mix-blend-mode:screen}
+.card:hover .spec{opacity:1}
+
+/* голограмма/фойл поверх всей карты */
+.card .foil{position:absolute;inset:0;pointer-events:none;z-index:6;opacity:0;transition:opacity .25s;
+  mix-blend-mode:color-dodge}
+.card:hover .foil{opacity:1}
+
+/* --- фойл по редкости --- */
+/* Uncommon (расширение) — как Common, чтобы дым-тест и редкость не падали */
+.card.r-uncommon .foil{background:linear-gradient(115deg,transparent 34%,rgba(255,255,255,.10) 46%,transparent 58%)}
+.card.r-common .foil{background:linear-gradient(115deg,transparent 34%,rgba(255,255,255,.10) 46%,transparent 58%)}
+.card.r-rare .foil{
+  background:
+    repeating-linear-gradient(115deg,rgba(120,190,255,.16) 0 6px,rgba(255,255,255,.05) 6px 12px,transparent 12px 22px),
+    linear-gradient(115deg,transparent 30%,rgba(150,210,255,.30) 47%,transparent 62%)}
+.card.r-epic .foil{
+  background:
+    repeating-linear-gradient(115deg,rgba(200,140,255,.20) 0 5px,rgba(120,200,255,.14) 5px 10px,transparent 10px 20px),
+    linear-gradient(115deg,transparent 24%,rgba(220,170,255,.40) 44%,rgba(140,220,255,.28) 52%,transparent 70%);
+  animation:foilShift 4.5s linear infinite}
+.card.r-legendary .foil{
+  background:
+    repeating-linear-gradient(115deg,rgba(255,220,140,.28) 0 4px,rgba(255,255,255,.12) 4px 8px,rgba(255,180,80,.20) 8px 14px,transparent 14px 24px),
+    linear-gradient(115deg,transparent 18%,rgba(255,236,180,.55) 40%,rgba(255,190,90,.42) 50%,transparent 74%);
+  animation:foilShift 3.1s linear infinite}
+.card.r-legendary{box-shadow:
+    0 0 0 1px rgba(0,0,0,.85),
+    0 0 0 2px rgba(245,166,35,.42),
+    0 10px 26px rgba(0,0,0,.75),
+    0 0 30px rgba(245,166,35,.28)}
+.card.r-epic{box-shadow:
+    0 0 0 1px rgba(0,0,0,.85),
+    0 0 0 2px rgba(176,108,240,.34),
+    0 10px 26px rgba(0,0,0,.75),
+    0 0 26px rgba(176,108,240,.22)}
+@keyframes foilShift{0%{background-position:0 0,0 0}100%{background-position:220px 0,-220px 0}}
+
+/* блик по кромке при наведении (rim light) */
+.card::after{content:'';position:absolute;inset:0;border-radius:6px;pointer-events:none;z-index:7;opacity:0;
+  transition:opacity .2s;box-shadow:0 0 0 1px rgba(255,246,220,.55), 0 0 22px rgba(216,180,90,.45) inset}
+.card:hover::after{opacity:1}
+
+/* 3D-тилт ставится из JS через --rx/--ry; здесь только плавность */
+.card.tilting{transition:transform .09s linear, box-shadow .18s}
+
+/* недоступная карта: убираем фойл и блик, оставляем только «серость» */
+.card.unplayable .foil,.card.unplayable .spec,.card.unplayable::after{opacity:0 !important;animation:none}
+.card.unplayable{box-shadow:0 6px 18px rgba(0,0,0,.7)}
+
+/* =====================================================================
+   4. СУЩЕСТВА НА СТОЛЕ
+   ===================================================================== */
+
+.unit .ubody{
+  border-color:rgba(216,180,90,.34);
+  box-shadow:
+    0 0 0 1px rgba(0,0,0,.8),
+    0 -10px 20px rgba(0,0,0,.5) inset,
+    0 8px 18px rgba(0,0,0,.66),
+    0 0 14px rgba(216,180,90,.09);
+}
+/* тень-«пятно» под существом: карта лежит на столе, а не наклеена */
+.unit::before{content:'';position:absolute;left:8%;right:8%;bottom:-7px;height:12px;border-radius:50%;
+  background:radial-gradient(ellipse,rgba(0,0,0,.72),transparent 70%);filter:blur(3px);z-index:-1}
+
+.unit.targetable .ubody{border-color:var(--warn);
+  box-shadow:0 0 0 1px rgba(0,0,0,.8), 0 0 26px rgba(232,178,58,.6), 0 0 44px rgba(232,178,58,.24);
+  animation:targetPulse 1.15s ease-in-out infinite}
+@keyframes targetPulse{0%,100%{filter:brightness(1)}50%{filter:brightness(1.18)}}
+
+/* неуловимость: полупрозрачность и бирюзовый ореол */
+.unit.unblockable{opacity:.9}
+.unit.unblockable .ubody{box-shadow:0 0 0 1px rgba(0,0,0,.8), 0 0 26px rgba(63,214,200,.5), 0 8px 18px rgba(0,0,0,.6);
+  animation:ghostFlicker 2.4s ease-in-out infinite}
+@keyframes ghostFlicker{0%,100%{opacity:.9}48%{opacity:.66}62%{opacity:.94}}
+
+/* заморозка: ледяная корка */
+.unit.frozenUnit .ubody::after{content:'';position:absolute;inset:0;border-radius:5px;pointer-events:none;
+  background:linear-gradient(160deg,rgba(190,235,255,.34),rgba(120,190,240,.14) 46%,rgba(255,255,255,.24));
+  box-shadow:0 0 22px rgba(150,215,255,.55) inset, 0 0 18px rgba(120,190,240,.4);
+  mix-blend-mode:screen}
+.unit.frozenUnit .ubody::before{content:'';position:absolute;inset:0;border-radius:5px;pointer-events:none;z-index:2;
+  background:repeating-linear-gradient(112deg,rgba(255,255,255,.20) 0 1px,transparent 1px 9px)}
+
+/* Provocation: каменная окантовка */
+.unit.taunt .ubody{border-color:#8d7b4e;border-width:2px}
+
+/* щит: купол поверх существа */
+.unit.shielded .ubody::after{content:'';position:absolute;inset:-4px;border-radius:9px;pointer-events:none;
+  border:1px solid rgba(169,220,255,.65);
+  background:radial-gradient(circle at 34% 26%,rgba(200,235,255,.26),rgba(120,190,240,.07) 52%,transparent 72%);
+  box-shadow:0 0 20px rgba(150,210,255,.42), 0 0 30px rgba(150,210,255,.18) inset;
+  animation:shieldIdle 2.8s ease-in-out infinite}
+@keyframes shieldIdle{0%,100%{opacity:.72}50%{opacity:1}}
+
+.unit.exhausted{filter:grayscale(.6) brightness(.74)}
+.unit.exhausted::after{content:'';position:absolute;inset:0;border-radius:5px;pointer-events:none;
+  background:linear-gradient(180deg,rgba(10,12,20,.34),rgba(10,12,20,.5))}
+
+/* =====================================================================
+   5. РУНЫ И РИТУАЛЫ
+   ===================================================================== */
+
+.runeChip{border-color:rgba(216,180,90,.62);
+  background:radial-gradient(circle at 30% 26%,rgba(255,236,180,.26),rgba(10,10,16,.92) 68%);
+  box-shadow:0 0 0 1px rgba(0,0,0,.7), 0 0 16px rgba(216,180,90,.28), 0 0 30px rgba(216,180,90,.10) inset;
+  text-shadow:0 0 8px rgba(255,230,170,.5)}
+.runeChip .sig{filter:drop-shadow(0 0 6px rgba(255,226,160,.85))}
+.ritualChip{border-color:rgba(176,108,240,.7);
+  background:radial-gradient(circle at 30% 26%,rgba(220,180,255,.26),rgba(10,10,16,.92) 68%);
+  box-shadow:0 0 0 1px rgba(0,0,0,.7), 0 0 18px rgba(176,108,240,.34), 0 0 30px rgba(176,108,240,.12) inset}
+
+/* =====================================================================
+   6. ПАНЕЛИ ГЕРОЕВ, ФАЗЫ, КНОПКИ, ЛОГ
+   ===================================================================== */
+
+.heroPanel{border-color:rgba(216,180,90,.4);
+  background:linear-gradient(180deg,rgba(30,34,50,.92),rgba(12,14,22,.94));
+  box-shadow:0 0 0 1px rgba(0,0,0,.8), 0 0 34px rgba(0,0,0,.6) inset, 0 0 22px rgba(216,180,90,.08)}
+.heroPanel::before{content:'';position:absolute;left:0;right:0;top:0;height:2px;
+  background:linear-gradient(90deg,transparent,rgba(246,226,163,.7),transparent)}
+.heroPanel.low{animation:lowHp 1.5s ease-in-out infinite}
+.heroPanel.low::after{content:'';position:absolute;inset:0;pointer-events:none;
+  box-shadow:0 0 40px rgba(214,69,69,.55) inset;border-radius:4px}
+@keyframes lowHp{0%,100%{filter:brightness(1)}50%{filter:brightness(1.14) saturate(1.2)}}
+
+.stat{box-shadow:0 0 0 1px rgba(0,0,0,.6), 0 0 12px rgba(0,0,0,.4) inset}
+.stat.hp .ico{filter:drop-shadow(0 0 6px rgba(255,90,80,.8))}
+.stat.mana .ico{filter:drop-shadow(0 0 6px rgba(110,170,255,.85))}
+.stat.echo .ico{filter:drop-shadow(0 0 7px rgba(190,130,255,.9))}
+.stat.bump{animation:statBump .34s ease-out}
+@keyframes statBump{0%{transform:scale(1)}38%{transform:scale(1.24)}100%{transform:scale(1)}}
+
+.pstep{box-shadow:0 0 0 1px rgba(0,0,0,.6), 0 2px 8px rgba(0,0,0,.4)}
+.pstep.active{box-shadow:0 0 0 1px rgba(255,246,220,.7), 0 0 22px rgba(216,180,90,.6), 0 0 40px rgba(216,180,90,.22)}
+.pstep.active::after{content:'';position:absolute;inset:0;
+  background:linear-gradient(105deg,transparent 30%,rgba(255,255,255,.6) 46%,transparent 62%);
+  animation:sheen 2.6s linear infinite}
+@keyframes sheen{0%{transform:translateX(-120%)}60%,100%{transform:translateX(120%)}}
+
+.btn{box-shadow:0 0 0 1px rgba(0,0,0,.7), 0 3px 10px rgba(0,0,0,.5), 0 1px 0 rgba(255,255,255,.06) inset;
+  position:relative;overflow:hidden}
+.btn::after{content:'';position:absolute;inset:0;pointer-events:none;
+  background:linear-gradient(105deg,transparent 34%,rgba(255,255,255,.20) 48%,transparent 62%);
+  transform:translateX(-130%);transition:transform .55s}
+.btn:hover:not(:disabled)::after{transform:translateX(130%)}
+.btn.primary{background:linear-gradient(180deg,#54451d,#241d0c);
+  box-shadow:0 0 0 1px rgba(0,0,0,.75), 0 0 20px rgba(216,180,90,.24), 0 3px 10px rgba(0,0,0,.5)}
+
+#logPanel{background:linear-gradient(180deg,rgba(6,7,11,.86),rgba(6,7,11,.62));
+  box-shadow:0 0 0 1px rgba(0,0,0,.6), 0 0 26px rgba(0,0,0,.5) inset;
+  -webkit-mask-image:linear-gradient(180deg,transparent 0,#000 9%,#000 100%);
+  mask-image:linear-gradient(180deg,transparent 0,#000 9%,#000 100%)}
+.logline.big{text-shadow:0 0 12px rgba(216,180,90,.55)}
+.logline.dmg{text-shadow:0 0 10px rgba(255,90,70,.35)}
+
+.zone.droppable{border-color:rgba(216,180,90,.7);
+  background:radial-gradient(ellipse at center,rgba(216,180,90,.14),transparent 72%);
+  box-shadow:0 0 34px rgba(216,180,90,.16) inset, 0 0 24px rgba(216,180,90,.10);
+  animation:zonePulse 1.5s ease-in-out infinite}
+@keyframes zonePulse{0%,100%{opacity:.86}50%{opacity:1}}
+
+/* =====================================================================
+   7. МЕНЮ, МУЛЛИГАН, КОЛЛЕКЦИЯ, КОНЕЦ ИГРЫ
+   ===================================================================== */
+
+#menu{background:
+  radial-gradient(900px 620px at 50% 26%, rgba(216,180,90,.13), transparent 62%),
+  radial-gradient(1200px 700px at 50% 120%, rgba(42,36,56,.7), transparent 60%)}
+#menu h1{text-shadow:0 0 60px rgba(216,180,90,.34), 0 3px 10px rgba(0,0,0,.8)}
+.fcard{box-shadow:0 0 0 1px rgba(0,0,0,.6), 0 6px 18px rgba(0,0,0,.5)}
+.fcard .sigil{filter:drop-shadow(0 0 12px currentColor)}
+.fcard.sel{box-shadow:0 0 0 1px rgba(246,226,163,.7), 0 0 30px rgba(216,180,90,.34), 0 6px 18px rgba(0,0,0,.5)}
+
+#mulligan,#gameover{background:radial-gradient(900px 600px at 50% 40%, rgba(10,11,18,.92), rgba(4,5,9,.97))}
+#gameover h2.win{text-shadow:0 0 70px rgba(216,180,90,.8), 0 0 24px rgba(255,236,180,.6), 0 4px 12px #000}
+#gameover h2.lose{text-shadow:0 0 60px rgba(214,69,69,.7), 0 4px 12px #000}
+#goStats div{padding:.5rem .8rem;border:1px solid var(--line);border-radius:4px;
+  background:linear-gradient(180deg,rgba(24,27,40,.8),rgba(10,11,18,.8));
+  box-shadow:0 0 0 1px rgba(0,0,0,.6), 0 6px 16px rgba(0,0,0,.45)}
+
+#tooltip{box-shadow:0 0 0 1px rgba(216,180,90,.4), 0 14px 40px rgba(0,0,0,.85), 0 0 30px rgba(216,180,90,.14)}
+#tooltip::before{content:'';position:absolute;left:0;right:0;top:0;height:2px;
+  background:linear-gradient(90deg,transparent,var(--grade-highlight),transparent);opacity:.7}
+
+/* =====================================================================
+   8. ДОСТУПНОСТЬ: уважение к prefers-reduced-motion
+   ===================================================================== */
+
+@media (prefers-reduced-motion: reduce){
+  .card .foil,.pstep.active::after,.btn::after,.runeChip,.unit.unblockable .ubody,
+  .unit.shielded .ubody,.heroPanel.low,.zone.droppable,#backdrop .candle{animation:none !important}
+  #backdrop .bl{transition:none}
+  .card{transition:none}
+}
+
+/* =====================================================================
+   9. КРУПНЫЙ ПРЕДПРОСМОТР КАРТЫ (hover): не мешает drag&drop
+   ===================================================================== */
+#zoomPreview{position:fixed;z-index:260;pointer-events:none;opacity:0;transition:opacity .12s;
+  filter:drop-shadow(0 18px 34px rgba(0,0,0,.75))}
+#zoomPreview.show{opacity:1}
+#zoomPreview .card{cursor:default}
+
+/* крупная карта (предпросмотр) */
+.card.xl{width:300px;height:420px}
+.card.xl .ctitle{font-size:1rem}
+.card.xl .ctype{font-size:.7rem}
+.card.xl .ctext{font-size:.78rem;line-height:1.38;padding:.3rem .5rem 0}
+.card.xl .ctype{font-size:.68rem}
+.card.xl .cost{font-size:1.2rem}
+.card.xl .catk,.card.xxl .catk,.card.xl .chp,.card.xxl .chp{font-size:1.16rem}
+.card.xl .zflavor{margin-top:.45rem;font-style:italic;color:#9aa0b4;font-size:.72rem;line-height:1.4}
+.card.xl .zmeta{margin-top:auto;padding:.3rem .1rem 0;font-size:.64rem;letter-spacing:.12em;
+  text-transform:uppercase;color:#767c8e;text-align:center}
+
+/* =====================================================================
+   10. ПАНЕЛЬ НАСТРОЕК (⚙ / H)
+   ===================================================================== */
+#settingsPanel{position:fixed;top:46px;right:10px;z-index:330;width:262px;padding:.85rem .95rem;
+  border:1px solid var(--gold-dim);border-radius:7px;
+  background:linear-gradient(180deg,rgba(26,29,44,.98),rgba(10,11,18,.98));
+  box-shadow:0 16px 40px rgba(0,0,0,.75), 0 0 22px rgba(216,180,90,.10);
+  display:flex;flex-direction:column;gap:.5rem;font-size:.78rem}
+#settingsPanel .setTitle{font-size:.72rem;letter-spacing:.18em;text-transform:uppercase;color:var(--gold-hi)}
+#settingsPanel label{display:flex;gap:.5rem;align-items:flex-start;color:#cfd3e0;cursor:pointer;line-height:1.35}
+#settingsPanel input[type=checkbox]{accent-color:#d8b45a;margin-top:.15rem;flex:0 0 auto}
+#settingsPanel .setFoot{font-size:.64rem;color:var(--muted);border-top:1px solid var(--line);padding-top:.45rem;line-height:1.5}
+
+/* =====================================================================
+   11. ДОСТУПНОСТЬ И «ЛЁГКИЕ ЭФФЕКТЫ»
+   ===================================================================== */
+body.fxLite{--dof-far:0px;--dof-near:0px}
+body.fxLite #backdrop .candle{display:none}
+body.fxLite #backdrop .bl{transition:none;filter:brightness(.55)}
+body.fxLite .card .spec,body.fxLite .card .holo{display:none}
+body.fxLite #handArea{filter:none}
+body.fxLite .runeChip{animation:none}
+
+/* подсказки выключены */
+body.noHints #tooltip,body.noHints #zoomPreview{display:none !important}
+body.noHints .card .whyNot{display:none !important}
+body.noHints #actionHint{display:none !important}
+
+/* причина «почему нельзя разыграть» прямо на карте */
+.card .whyNot{position:absolute;left:0;right:0;bottom:0;z-index:8;pointer-events:none;
+  background:linear-gradient(180deg,transparent,rgba(5,6,10,.94) 34%);
+  color:#ffb4a8;font-size:.66rem;line-height:1.3;text-align:center;
+  padding:1.1rem .34rem .34rem;letter-spacing:.02em}
+
+/* =====================================================================
+   12. МОДАЛКА КАРТЫ: «открыть и прочитать»
+   ===================================================================== */
+#cardModal{position:fixed;inset:0;z-index:340;background:rgba(3,4,8,.88);
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.9rem;
+  backdrop-filter:blur(3px)}
+#cardModal.hidden{display:none}
+#cmBox{display:flex;gap:1.5rem;align-items:flex-start;justify-content:center;max-width:94vw}
+#cmCard{filter:drop-shadow(0 22px 44px rgba(0,0,0,.8))}
+/* самая крупная карта — модалка */
+.card.xxl{width:clamp(300px, 26vw, 380px);height:calc(clamp(300px, 26vw, 380px) * 476 / 340);cursor:default}
+.card.xxl .ctitle{font-size:1.08rem}
+.card.xxl .ctype{font-size:.74rem}
+.card.xxl .ctext{font-size:.84rem;line-height:1.42;padding:.35rem .55rem 0}
+.card.xxl .ctype{font-size:.72rem}
+.card.xxl .cost{font-size:1.26rem}
+.card.xxl .zflavor{margin-top:.5rem;font-style:italic;color:#9aa0b4;font-size:.76rem;line-height:1.45}
+.card.xxl .zmeta{margin-top:auto;padding:.35rem .1rem 0;font-size:.66rem;letter-spacing:.12em;
+  text-transform:uppercase;color:#767c8e;text-align:center}
+#cmInfo{width:min(430px,40vw);max-height:76vh;overflow-y:auto;padding:1rem 1.1rem;border-radius:7px;
+  border:1px solid var(--gold-dim);background:linear-gradient(180deg,rgba(24,27,40,.97),rgba(10,11,18,.97));
+  box-shadow:0 18px 44px rgba(0,0,0,.7);font-size:.86rem;line-height:1.65;color:#cfd3e0}
+#cmInfo .cmName{font-size:1.24rem;color:var(--gold-hi);letter-spacing:.03em;margin-bottom:.2rem}
+#cmInfo .cmType{font-size:.68rem;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:.7rem}
+#cmInfo .cmStats{display:flex;gap:.6rem;margin:.2rem 0 .7rem;font-size:.95rem}
+#cmInfo .cmStats span{padding:.14rem .5rem;border-radius:4px;border:1px solid var(--line);background:rgba(255,255,255,.03)}
+#cmInfo .cmText{white-space:pre-line}
+#cmInfo .cmKw{color:var(--gold-hi)}
+#cmInfo .cmFlavor{margin-top:.8rem;font-style:italic;color:#9aa0b4;border-left:2px solid var(--gold-dim);
+  padding-left:.7rem;font-size:.8rem;line-height:1.6}
+#cmNav{display:flex;gap:.6rem;align-items:center}
+
+/* =====================================================================
+   13. КОНСТРУКТОР КОЛОД
+   ===================================================================== */
+.tabBtn{padding:.42rem .9rem;font-size:.74rem;letter-spacing:.08em;background:transparent;color:var(--muted)}
+.tabBtn.sel{background:linear-gradient(180deg,rgba(216,180,90,.16),rgba(216,180,90,.05));color:var(--gold-hi)}
+#dbMain{flex:1;display:grid;grid-template-columns:minmax(300px,360px) 1fr;gap:1rem;
+  padding:.9rem 1rem;min-height:0}
+#dbDeckCol{display:flex;flex-direction:column;min-height:0;border:1px solid var(--line);border-radius:6px;
+  background:rgba(12,14,22,.6)}
+.dbHead{padding:.55rem .8rem;font-size:.76rem;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--gold-hi);border-bottom:1px solid var(--line)}
+#dbDeckList{flex:1;overflow-y:auto;padding:.4rem .5rem;display:flex;flex-direction:column;gap:.18rem}
+.dbRow{display:grid;grid-template-columns:2.1rem 1fr auto auto;gap:.45rem;align-items:center;
+  padding:.28rem .4rem;border-radius:4px;font-size:.76rem;color:#cfd3e0;cursor:pointer}
+.dbRow:hover{background:rgba(216,180,90,.08)}
+.dbRow .c{color:#8fb7ff;font-variant-numeric:tabular-nums;text-align:center;
+  background:rgba(30,50,90,.5);border:1px solid #2b4a7a;border-radius:3px;font-size:.7rem;padding:.05rem 0}
+.dbRow .n{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dbRow .q{color:var(--gold-hi);font-variant-numeric:tabular-nums;min-width:2.2em;text-align:right}
+.dbRow button{padding:.05rem .45rem;font-size:.72rem}
+.dbEmpty{padding:1.4rem .8rem;text-align:center;color:#4a4f61;font-size:.76rem;line-height:1.6}
+.dbCurve{display:flex;gap:.28rem;align-items:flex-end;height:64px;padding:.4rem .7rem .5rem;
+  border-top:1px solid var(--line)}
+.dbCurve .bar{flex:1;display:flex;flex-direction:column;align-items:center;gap:.15rem;height:100%;justify-content:flex-end}
+.dbCurve .bar i{display:block;width:100%;background:linear-gradient(180deg,#5b9ae8,#274b7e);border-radius:2px 2px 0 0;min-height:2px}
+.dbCurve .bar b{font-size:.6rem;color:var(--muted);font-weight:400}
+#dbPoolCol{display:flex;flex-direction:column;min-height:0}
+.dbPoolBar{display:flex;gap:.6rem;align-items:center;padding-bottom:.5rem;flex-wrap:wrap}
+#dbPoolGrid{flex:1;overflow-y:auto;display:flex;flex-wrap:wrap;gap:.8rem;padding:.4rem .3rem 1rem;
+  align-content:flex-start;justify-content:center}
+#dbPoolGrid .card{position:relative}
+#dbPoolGrid .card .dbN{position:absolute;top:.25rem;right:.25rem;z-index:9;min-width:1.5em;
+  padding:.06rem .3rem;border-radius:10px;text-align:center;font-size:.72rem;font-weight:700;
+  color:#0d1020;background:linear-gradient(180deg,#f0d489,#c9a24a);border:1px solid #8a6f2f;
+  box-shadow:0 2px 8px rgba(0,0,0,.6)}
+#dbPoolGrid .card.maxed{filter:saturate(.75) brightness(.86)}
+
+/* кнопка «описание» на карте в пуле конструктора */
+#dbPoolGrid .dbI{position:absolute;top:.28rem;left:.28rem;z-index:9;width:1.35rem;height:1.35rem;
+  border-radius:50%;border:1px solid var(--gold-dim);background:rgba(10,12,20,.85);color:var(--gold-hi);
+  font-size:.72rem;line-height:1;cursor:pointer;padding:0}
+#dbPoolGrid .dbI:hover{background:rgba(216,180,90,.25)}
+
+/* счётчик замен в муллигане */
+#mullCount{min-height:1.2em}
+#mullCards .card.swap .mark{background:rgba(20,22,32,.92);border:1px solid #6b7280}
+
+/* =====================================================================
+   14. ИНФО-БАРЫ ГЕРОЕВ (MTG Arena): жизни напротив, мана по бокам
+   ===================================================================== */
+.heroBar{position:relative;display:flex;align-items:center;gap:.9rem;padding:.42rem .9rem;border-radius:7px;
+  background:linear-gradient(180deg,rgba(44,51,74,.94),rgba(24,28,42,.96));min-height:58px}
+.heroBar .hbSide{flex:1;display:flex;align-items:center;gap:.5rem;min-width:0}
+.heroBar .hbSide.right{justify-content:flex-end}
+.hbPort{width:46px;height:46px;border-radius:50%;overflow:hidden;border:1px solid var(--gold-dim);
+  flex:0 0 auto;box-shadow:0 0 14px rgba(216,180,90,.28);background:#10131e}
+.hbPort svg{width:100%;height:100%;display:block}
+.hbId{min-width:0}
+.heroBar .heroName{font-size:.9rem;color:var(--gold-hi);letter-spacing:.05em}
+.heroBar .heroFac{font-size:.66rem;color:var(--muted);line-height:1.35;max-width:56ch;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hbHp{flex:0 0 auto;display:flex;align-items:center;gap:.4rem;font-size:1.55rem;font-weight:800;
+  color:#ffb4ac;background:radial-gradient(circle at 35% 28%,rgba(130,26,22,.9),rgba(46,10,12,.94));
+  border:1px solid #8a4038;border-radius:9px;padding:.12rem .8rem;text-shadow:0 1px 3px #000;
+  box-shadow:0 0 20px rgba(210,70,55,.35), 0 2px 8px rgba(0,0,0,.5);font-variant-numeric:tabular-nums}
+.hbHp .ico{font-size:1.15rem;filter:drop-shadow(0 0 6px rgba(255,90,80,.6))}
+.hbHp.me{color:#ffd9d4;box-shadow:0 0 20px rgba(210,70,55,.5), 0 2px 8px rgba(0,0,0,.5)}
+.heroBar.hurt{animation:hurtShake .38s}
+.heroBar.healed{box-shadow:0 0 26px rgba(95,199,122,.5)}
+.heroBar.low .hbHp{animation:hpFlash .9s infinite}
+
+/* =====================================================================
+   15. ЖИВОПИСНЫЙ АНИМИРОВАННЫЙ ФОН: дрейф слоёв, аврора, туман
+   ===================================================================== */
+#backdrop .bl.l1{animation:driftFar 52s ease-in-out infinite alternate}
+#backdrop .bl.l2{animation:driftNear 38s ease-in-out infinite alternate}
+@keyframes driftFar{
+  0%{transform:scale(1.03) translate3d(-1.4%,-.7%,0)}
+  100%{transform:scale(1.09) translate3d(1.6%,.9%,0)}}
+@keyframes driftNear{
+  0%{transform:scale(1.07) translate3d(1.8%,.5%,0)}
+  100%{transform:scale(1.01) translate3d(-1.6%,-.7%,0)}}
+
+/* северное сияние над цитаделью: две медленные ленты */
+#backdrop .aurora{position:absolute;left:-20%;right:-20%;height:38vmax;pointer-events:none;
+  mix-blend-mode:screen;filter:blur(46px);opacity:.20;will-change:transform,opacity}
+#backdrop .aurora.a1{top:-6vmax;
+  background:linear-gradient(100deg,transparent 12%,rgba(110,220,255,.55) 34%,rgba(150,140,255,.42) 52%,transparent 78%);
+  animation:auroraSway 26s ease-in-out infinite alternate}
+#backdrop .aurora.a2{top:2vmax;
+  background:linear-gradient(80deg,transparent 18%,rgba(216,180,90,.34) 40%,rgba(120,255,210,.30) 60%,transparent 84%);
+  animation:auroraSway 34s ease-in-out infinite alternate-reverse}
+@keyframes auroraSway{
+  0%{transform:translate3d(-4%,0,0) rotate(-2.5deg) scaleY(1);opacity:.14}
+  50%{opacity:.26}
+  100%{transform:translate3d(4%,1.5%,0) rotate(2deg) scaleY(1.18);opacity:.18}}
+
+/* низкий туман над столом: дышит и ползёт */
+#backdrop .mist{position:absolute;left:-10%;right:-10%;bottom:-6vmax;height:34vmax;pointer-events:none;
+  background:radial-gradient(ellipse at 50% 100%,rgba(190,205,235,.16) 0%,rgba(150,170,210,.07) 46%,transparent 72%);
+  filter:blur(30px);mix-blend-mode:screen;animation:mistBreath 19s ease-in-out infinite alternate}
+@keyframes mistBreath{
+  0%{transform:translate3d(-2.5%,0,0) scaleY(1);opacity:.55}
+  100%{transform:translate3d(2.5%,-1.2%,0) scaleY(1.25);opacity:.9}}
+
+/* лёгкие эффекты и reduced-motion: анимации фона off */
+body.fxLite #backdrop .aurora,body.fxLite #backdrop .mist{display:none}
+body.fxLite #backdrop .bl.l1,body.fxLite #backdrop .bl.l2{animation:none}
+@media (prefers-reduced-motion: reduce){
+  #backdrop .bl.l1,#backdrop .bl.l2,#backdrop .aurora,#backdrop .mist{animation:none !important}
+}
+
+/* === PATCH v2.6.1: убираем верхнюю тёмную рамку карточки === */
+.card .chead{background:transparent !important;background-image:none !important;border:none !important;border-bottom:none !important;box-shadow:none !important;}
+.card .chead .ctitle{background:none !important;background-image:none !important;border-radius:0 !important;padding:.08em .3em .08em 0;text-shadow:0 1px 5px rgba(0,0,0,.95),0 2px 10px rgba(0,0,0,.85),0 0 16px rgba(0,0,0,.6);}
+.card.f-Aurites .chead,.card.f-Necrus .chead,.card.f-Terramorph .chead,.card.f-Pyromancer .chead,.card.f-Ethereal .chead,.card.f-Neutral .chead{background:transparent !important;background-image:none !important;}
+
+/* ── PATCH v2.7.0: главное меню как в MTG Arena — тёплая палитра сохранена ── */
+.arenaMenu{max-width:1120px;width:min(1120px,96vw);background:rgba(14,11,8,.78)!important;border:1px solid rgba(255,216,122,.14);border-radius:16px;box-shadow:0 22px 64px rgba(0,0,0,.62),0 0 0 1px rgba(255,237,180,.06) inset,0 1px 0 rgba(255,237,180,.08) inset;backdrop-filter:blur(10px) saturate(1.08);padding:1rem 1.1rem 1.1rem!important;gap:.7rem!important}
+.arenaHeader{display:flex;align-items:center;justify-content:space-between;gap:1rem;padding:.7rem .9rem .75rem;background:linear-gradient(180deg,rgba(32,24,14,.96),rgba(16,12,8,.94));border:1px solid rgba(255,216,122,.18);border-radius:12px;box-shadow:0 10px 28px rgba(0,0,0,.48),inset 0 1px 0 rgba(255,237,180,.09)}
+.arenaBrand{flex:1;min-width:0;text-align:left}
+.arenaBrand h1{margin:0;font-family:Philosopher,serif;font-size:1.85rem;letter-spacing:.16em;color:var(--gold-hi);text-shadow:0 2px 14px rgba(0,0,0,.72),0 0 22px rgba(255,180,60,.22)}
+.arenaBrand .sub{margin:.15rem 0 0;font-size:.68rem;letter-spacing:.18em;text-transform:uppercase;color:#cbb98a;opacity:.92}
+.arenaWallet{display:flex;align-items:center;gap:.55rem;flex-wrap:wrap;justify-content:flex-end}
+.arenaWallet .shardPill{margin:0!important;padding:.38rem .72rem!important;font-size:.82rem!important;border-radius:999px!important;border:1px solid rgba(255,216,122,.24)!important;background:linear-gradient(180deg,rgba(255,216,122,.14),rgba(60,40,10,.22))!important;box-shadow:0 4px 14px rgba(0,0,0,.28),inset 0 1px 0 rgba(255,255,255,.06)!important;backdrop-filter:blur(4px)}
+.arenaWallet .shardPill:nth-child(2){border-color:rgba(110,160,255,.26)!important;background:linear-gradient(180deg,rgba(110,160,255,.14),rgba(20,30,60,.24))!important}
+.arenaWallet .curIco{width:16px;height:16px;vertical-align:-3px;filter:drop-shadow(0 1px 2px rgba(0,0,0,.5))}
+.facCarouselLabel{font-size:.64rem;letter-spacing:.2em;text-transform:uppercase;color:#cbb98a;opacity:.9;margin:.15rem 0 .05rem}
+.heroRow.facCarousel{justify-content:center;gap:.55rem;padding:.45rem .3rem .55rem;flex-wrap:wrap}
+.heroChip{width:88px!important;height:96px!important;justify-content:center!important;align-items:center!important;padding:.45rem .35rem .4rem!important;border-radius:12px!important;background:linear-gradient(180deg,rgba(40,30,16,.92),rgba(18,14,10,.98))!important;border:1px solid rgba(255,216,122,.14)!important;box-shadow:0 8px 18px rgba(0,0,0,.42),inset 0 1px 0 rgba(255,255,255,.06)!important;transition:transform .18s,box-shadow .18s,border-color .18s,background .18s!important}
+.heroChip img{left:50%!important;top:46%!important;transform:translate(-50%,-50%)!important;object-position:center center!important;width:64px!important;height:64px!important;border-radius:50%!important;object-fit:cover!important}
+.heroChip .chipIco{display:none!important}
+.heroChip .chipName{position:relative;z-index:2;margin-top:auto;font-size:.62rem!important;letter-spacing:.08em!important;text-shadow:0 1px 4px #000}
+.heroChip.sel{border-color:var(--gold-hi)!important;background:linear-gradient(180deg,rgba(255,216,122,.22),rgba(32,24,12,.96))!important;box-shadow:0 0 0 1px rgba(255,216,122,.42),0 10px 26px rgba(0,0,0,.52),0 0 18px rgba(255,180,60,.18)!important;transform:translateY(-2px)}
+.heroChip:hover{transform:translateY(-2px);border-color:rgba(255,216,122,.32)!important;box-shadow:0 10px 22px rgba(0,0,0,.46)}
+.arenaMain{display:grid;grid-template-columns:1fr 360px;gap:1rem;align-items:start;width:100%;margin:.1rem 0 .2rem}
+.arenaLeft{background:linear-gradient(180deg,rgba(22,18,12,.72),rgba(14,10,8,.88));border:1px solid rgba(255,216,122,.10);border-radius:12px;padding:.75rem .7rem .8rem;box-shadow:inset 0 1px 0 rgba(255,255,255,.04)}
+.arenaSectionTitle{font-size:.64rem;letter-spacing:.18em;text-transform:uppercase;color:var(--muted);margin:0 0 .55rem;text-align:center}
+.arenaLeft .factionPick{justify-content:center;gap:.6rem}
+.fcard{width:128px!important;min-height:142px!important;padding:.6rem .5rem .55rem!important;border-radius:12px!important;background:linear-gradient(180deg,rgba(38,30,18,.94),rgba(18,14,10,.98))!important;border:1px solid rgba(255,216,122,.12)!important;box-shadow:0 8px 18px rgba(0,0,0,.38)!important}
+.fcard.sel{border-color:var(--gold)!important;box-shadow:0 0 0 1px rgba(255,216,122,.32),0 12px 28px rgba(0,0,0,.48)!important;transform:translateY(-1px)}
+.fcard .fava{width:56px!important;height:56px!important;margin:0 auto .4rem!important;display:flex!important;align-items:center;justify-content:center!important;font-size:1.35rem!important;border-width:2px!important;border-radius:50%!important;overflow:hidden!important;position:relative!important}
+.fcard .fava img{position:absolute!important;left:50%!important;top:50%!important;transform:translate(-50%,-50%)!important;width:100%!important;height:100%!important;object-fit:cover!important;object-position:center center!important}
+.fcard .fname{font-size:.76rem!important}
+.fcard .fpass{font-size:.6rem!important;line-height:1.35!important;max-height:3.8em;overflow:hidden}
+.arenaRight .menuCol{width:100%;background:linear-gradient(180deg,rgba(26,20,14,.82),rgba(12,9,6,.92));border:1px solid rgba(255,216,122,.12);border-radius:12px;padding:.85rem .85rem .9rem;box-shadow:inset 0 1px 0 rgba(255,255,255,.04),0 12px 28px rgba(0,0,0,.42);gap:.5rem}
+.arenaRight label{font-size:.66rem;letter-spacing:.14em;text-transform:uppercase;color:#cbb98a}
+.arenaRight select{width:100%;background:#14110d;border:1px solid rgba(255,216,122,.16);color:#e6d6ac;border-radius:8px;padding:.42rem .5rem;font-size:.78rem}
+.arenaRight select:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 2px rgba(255,216,122,.18)}
+.arenaPlay{width:100%!important;padding:.72rem .9rem!important;font-size:1.02rem!important;letter-spacing:.14em!important;font-family:Philosopher,serif!important;background:linear-gradient(180deg,#ffd98a 0%,#ffb84a 45%,#e07e12 100%)!important;color:#2b1a02!important;border:1px solid #ffcf6e!important;border-radius:10px!important;box-shadow:0 8px 18px rgba(0,0,0,.42),0 0 16px rgba(255,160,40,.32),inset 0 1px 0 rgba(255,255,255,.45)!important;text-shadow:0 1px 0 rgba(255,255,255,.45)!important;transition:transform .15s,filter .15s,box-shadow .15s!important}
+.arenaPlay:hover{transform:translateY(-1px);filter:brightness(1.04);box-shadow:0 12px 26px rgba(0,0,0,.48),0 0 20px rgba(255,160,40,.42),inset 0 1px 0 rgba(255,255,255,.5)!important}
+.arenaPlay:active{transform:translateY(0)}
+.arenaPlay:disabled{filter:grayscale(.25) brightness(.72);opacity:.62;transform:none;box-shadow:none!important}
+.arenaNav{display:grid!important;grid-template-columns:repeat(4,1fr);gap:.55rem!important;width:100%;margin:.15rem 0 0;flex-wrap:unset!important}
+.arenaNav .btn{flex:unset!important;min-height:64px;padding:.55rem .45rem .5rem!important;display:flex!important;flex-direction:column!important;align-items:center!important;justify-content:center!important;gap:.18rem!important;font-size:.72rem!important;letter-spacing:.06em!important;line-height:1.15!important;background:linear-gradient(180deg,rgba(32,26,18,.92),rgba(14,11,8,.96))!important;border:1px solid rgba(255,216,122,.12)!important;border-radius:10px!important;box-shadow:0 6px 16px rgba(0,0,0,.32),inset 0 1px 0 rgba(255,255,255,.04)!important;transition:transform .15s,border-color .15s,box-shadow .15s,background .15s!important}
+.arenaNav .btn:hover{transform:translateY(-2px);border-color:rgba(255,216,122,.28)!important;box-shadow:0 10px 22px rgba(0,0,0,.42),0 0 14px rgba(255,180,60,.12)!important;background:linear-gradient(180deg,rgba(48,36,20,.96),rgba(18,14,10,.98))!important}
+.arenaNav .btn:active{transform:translateY(0)}
+#menu .hint{margin-top:.2rem;max-width:980px;text-align:center;color:#8f8678;font-size:.68rem;line-height:1.55;background:rgba(10,8,6,.42);border:1px solid rgba(255,255,255,.04);border-radius:8px;padding:.5rem .7rem}
+@media(max-width:920px){
+  .arenaMain{grid-template-columns:1fr}
+  .arenaNav{grid-template-columns:repeat(4,1fr)}
+}
+@media(max-width:740px){
+  .arenaHeader{flex-direction:column;align-items:stretch}
+  .arenaWallet{justify-content:flex-start}
+}
+
+
+/* ── PATCH v2.7.1: фикс верстки — ничего не ползет, сетка фракций ровная ── */
+#menu{overflow-y:auto;overflow-x:hidden;padding:1rem .8rem 2rem}
+.arenaMenu{width:min(1160px,96vw)!important;max-width:1160px!important;margin:0 auto!important;gap:.85rem!important;padding:1.1rem 1.2rem 1.15rem!important}
+.arenaHeader{padding:.8rem 1rem .85rem}
+.arenaBrand h1{font-size:clamp(1.9rem,4vw,2.6rem)!important;letter-spacing:.14em!important;line-height:1}
+.arenaBrand .sub{font-size:.62rem!important;letter-spacing:.22em!important;margin-top:.28rem!important}
+.facCarouselLabel{margin:.2rem 0 .1rem!important;color:#d8c9a6!important}
+.heroRow.facCarousel{gap:.6rem!important;padding:.35rem 0 .5rem!important}
+.heroChip{width:86px!important;height:92px!important;flex:0 0 auto}
+.arenaMain{gap:1.1rem!important;align-items:stretch}
+.arenaLeft{padding:.9rem .9rem 1rem!important;display:flex;flex-direction:column}
+.arenaLeft .factionPick{max-width:none!important;width:100%!important;display:grid!important;grid-template-columns:repeat(5,minmax(0,1fr))!important;gap:.65rem!important;justify-content:stretch!important;align-items:start}
+.arenaLeft .factionPick .fcard{width:auto!important;min-width:0!important;min-height:156px!important;padding:.65rem .5rem .6rem!important;display:flex!important;flex-direction:column!important;align-items:center!important}
+.fcard .fava{width:58px!important;height:58px!important;flex:0 0 58px!important;margin:0 0 .45rem!important}
+.fcard .fname{font-size:.78rem!important;margin-top:0!important;white-space:nowrap}
+.fcard .fpass{font-size:.62rem!important;line-height:1.35!important;min-height:3.9em!important;display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden}
+.arenaRight .menuCol{gap:.55rem!important;padding:.9rem .9rem 1rem!important}
+.arenaRight label{font-size:.64rem!important;margin-top:.15rem}
+.arenaRight select{padding:.5rem .6rem!important;font-size:.8rem!important;border-radius:8px!important}
+.arenaPlay{margin-top:.7rem!important;padding:.78rem 1rem!important;font-size:1.08rem!important;letter-spacing:.16em!important}
+.arenaNav{gap:.6rem!important;margin-top:.4rem!important}
+.arenaNav .btn{min-height:68px!important;padding:.6rem .5rem!important;font-size:.73rem!important;border-radius:12px!important}
+#menu .hint{max-width:920px!important;margin-top:.35rem!important;padding:.6rem .8rem!important;line-height:1.6!important}
+@media(max-width:1180px){
+  .arenaLeft .factionPick{grid-template-columns:repeat(3,minmax(0,1fr))!important}
+  .arenaMain{grid-template-columns:1fr 340px!important}
+}
+@media(max-width:920px){
+  .arenaMain{grid-template-columns:1fr!important}
+  .arenaLeft .factionPick{grid-template-columns:repeat(5,minmax(0,1fr))!important}
+}
+@media(max-width:740px){
+  .arenaLeft .factionPick{grid-template-columns:repeat(2,minmax(0,1fr))!important}
+  .arenaNav{grid-template-columns:repeat(2,1fr)!important}
+  .heroChip{width:78px!important;height:84px!important}
+  .arenaMenu{padding:.9rem .8rem 1rem!important}
+}
+@media(max-width:520px){
+  .arenaLeft .factionPick{grid-template-columns:1fr!important}
+  .fcard{min-height:auto!important}
+}
+
+
+/* ── FIX v2.7.2: убрать треугольник-водяной знак с карт (просьба убрать метки) ── */
+.artBox:has(img:not(.miss))::after{opacity:0 !important;visibility:hidden !important;pointer-events:none !important}
+.artBox:has(img.miss)::after{opacity:.12 !important;visibility:visible !important}
+
+
+
+/* ── PATCH v2.8.0: красивое открытие бустеров — карты как в библиотеке + MTG-анимация вскрытия ── */
+#boosterModal{background:radial-gradient(110% 110% at 50% 38%,rgba(26,18,8,.72),rgba(3,2,1,.88)),rgba(0,0,0,.55);backdrop-filter:blur(6px) saturate(1.05)}
+.packPanel{width:min(1120px,96vw);max-height:min(88vh,860px);overflow:auto;padding:1.6rem 1.4rem 1.3rem;border-radius:16px;background:linear-gradient(180deg,rgba(28,20,10,.96),rgba(14,8,2,.98));border:1px solid rgba(255,216,122,.22);box-shadow:0 22px 70px rgba(0,0,0,.78),0 0 0 1px rgba(255,237,180,.06) inset,0 1px 0 rgba(255,237,180,.09) inset;gap:1rem;scrollbar-width:thin}
+.packPanel h3{font-size:1.22rem !important;letter-spacing:.1em !important;text-shadow:0 2px 12px rgba(0,0,0,.7),0 0 18px rgba(255,190,60,.18)}
+.packRow{gap:1rem 1.05rem;perspective:1400px;perspective-origin:50% 42%;min-height:282px;padding:.65rem .3rem 1rem;position:relative}
+.packRow.crack{animation:packShake .46s cubic-bezier(.2,.6,.2,1),packFlash .46s ease}
+@keyframes packShake{0%,100%{transform:translateX(0)}14%{transform:translateX(-6px) rotate(-.9deg)}28%{transform:translateX(6px) rotate(.9deg)}42%{transform:translateX(-4px)}58%{transform:translateX(4px)}74%{transform:translateX(-2px)}}
+@keyframes packFlash{0%{filter:brightness(1)}18%{filter:brightness(1.28)}100%{filter:brightness(1)}}
+.packSlot{width:190px;height:266px;aspect-ratio:auto;position:relative;cursor:pointer;transform-style:preserve-3d;transition:transform .68s cubic-bezier(.22,.9,.28,1),filter .28s,box-shadow .28s; border-radius:10px; opacity:0}
+.packSlot.dealIn{animation:packDealIn .64s cubic-bezier(.21,.82,.26,1) forwards}
+@keyframes packDealIn{0%{opacity:0;transform:translateY(42px) scale(.84) rotate(-1.6deg)}58%{opacity:1;transform:translateY(-7px) scale(1.045)}100%{opacity:1;transform:translateY(0) scale(1) rotate(0)}}
+.packSlot:not(.flip):hover{transform:translateY(-7px) scale(1.03);filter:brightness(1.06)}
+.packSlot.flip{transform:rotateY(180deg)}
+.packSlot.flip:hover{transform:rotateY(180deg) translateY(-5px) scale(1.03);filter:brightness(1.06)}
+.packSlot .face,.packSlot .back{position:absolute;inset:0;-webkit-backface-visibility:hidden;backface-visibility:hidden;border-radius:10px;overflow:hidden}
+.packSlot .back{background:radial-gradient(120% 92% at 32% 22%,rgba(255,228,160,.22),transparent 58%),linear-gradient(180deg,#2e2110 0%,#1a1206 55%,#0f0a03 100%);border:2px solid #d8b45a;box-shadow:inset 0 0 0 1px rgba(255,236,180,.18),inset 0 0 24px rgba(216,180,90,.28),0 8px 22px rgba(0,0,0,.55);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.48rem;color:var(--gold-hi)}
+.packSlot .back .backSigil{width:64px;height:64px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:radial-gradient(circle at 34% 28%,#7a86ff 0%,#2e3a7e 56%,#11162d 100%);border:2px solid #caa64e;box-shadow:0 0 18px rgba(140,170,255,.48),0 4px 14px rgba(0,0,0,.6);font-size:2rem;color:#ffe9b0;text-shadow:0 1px 6px rgba(0,0,0,.85)}
+.packSlot .back .backLabel{font-family:'Philosopher',serif;letter-spacing:.24em;text-transform:uppercase;font-size:.72rem;color:#f0dfae;opacity:.92;text-shadow:0 1px 4px #000}
+.packSlot .back::after{content:'';position:absolute;inset:0;border-radius:10px;pointer-events:none;background:repeating-linear-gradient(-35deg,transparent 0 14px,rgba(255,220,140,.045) 14px 16px);mix-blend-mode:overlay;opacity:.92}
+.packSlot .face{transform:rotateY(180deg);background:#0a0907}
+.packSlot .face .card{width:100% !important;height:100% !important;transform:none !important;margin:0 !important;border-radius:10px;border-width:2px}
+.packSlot .face .card .artBox{box-shadow:inset 0 0 0 1.5px var(--frB,#b98f3e)}
+/* rarity glow после переворота — как свечение рарности в MTG */
+.packSlot.r-rare.flip .face .card{box-shadow:0 0 0 1px rgba(79,159,224,.5),0 0 18px rgba(79,159,224,.52),0 10px 26px rgba(0,0,0,.6)}
+.packSlot.r-epic.flip{filter:drop-shadow(0 0 14px rgba(176,108,240,.52))}
+.packSlot.r-epic.flip .face .card{box-shadow:0 0 0 1px rgba(176,108,240,.55),0 0 20px rgba(176,108,240,.48),0 10px 26px rgba(0,0,0,.6)}
+.packSlot.r-legendary.flip{filter:drop-shadow(0 0 18px rgba(245,166,35,.62))}
+.packSlot.r-legendary.flip .face .card{box-shadow:0 0 0 1.2px rgba(245,166,35,.62),0 0 22px rgba(245,166,35,.58),0 12px 30px rgba(0,0,0,.65)}
+.packSlot.foil .face .card{border-color:#9fd8ff;box-shadow:0 0 0 1px rgba(159,216,255,.45),0 0 16px rgba(140,220,255,.62),0 8px 24px rgba(0,0,0,.6)}
+/* вспышка при вскрытии эпика/легендарки — как энергия пака в MTG Arena */
+.packSlot.burst::before{content:'';position:absolute;inset:-14px;border-radius:16px;background:radial-gradient(40% 40% at 50% 48%,rgba(255,244,180,.96),rgba(255,200,80,.55) 34%,transparent 72%);opacity:0;pointer-events:none;z-index:6;animation:packBurst .82s cubic-bezier(.2,.6,.2,1) forwards}
+.packSlot.r-legendary.burst::before{background:radial-gradient(42% 42% at 50% 48%,#fff6c2,#ffd46a 32%,#ff8c2a 56%,transparent 72%);filter:brightness(1.18)}
+@keyframes packBurst{0%{opacity:0;transform:scale(.72)}22%{opacity:1;transform:scale(1.06)}100%{opacity:0;transform:scale(1.38)}}
+/* фольга — более выраженный перелив на больших картах */
+.packSlot.foil .face::after{border-radius:10px}
+/* текст конверсии/фойла чуть крупнее на больших картах */
+.packSlot .convNote{font-size:.64rem;padding:.16rem .36rem}
+.packSlot .foilNote{font-size:.64rem;padding:.08rem .46rem}
+@media (max-width:1100px){.packSlot{width:150px;height:210px}.packRow{min-height:226px}}
+@media (max-width:860px){.packRow{gap:.75rem .7rem}.packSlot{width:138px;height:193px}.packRow{min-height:210px}}
+@media (max-width:600px){.packSlot{width:122px;height:171px}.packPanel{padding:1.1rem .9rem}.packRow{min-height:188px}}
+
+
+
+/* ── FIX v2.8.1: редкость — цветная вспышка как в MTG (rare-синяя, epic-фиолетовая, legendary-золотая) ── */
+.packSlot.r-common.burst::before,.packSlot.r-uncommon.burst::before{opacity:0 !important;animation:none !important}
+.packSlot.r-rare.burst::before{background:radial-gradient(40% 42% at 50% 48%,#e6f6ff 0%,#8fd4ff 18%,#2e7bd6 38%,transparent 72%);filter:brightness(1.08)}
+.packSlot.r-epic.burst::before{background:radial-gradient(40% 42% at 50% 48%,#f3e8ff 0%,#c99eff 18%,#7a3ad6 38%,transparent 72%);filter:brightness(1.08)}
+.packSlot.r-legendary.burst::before{background:radial-gradient(42% 44% at 50% 48%,#fff6c2 0%,#ffd46a 32%,#ff8c2a 56%,transparent 72%);filter:brightness(1.18)}
+.packSlot.foil.r-rare.burst::before,.packSlot.foil.r-epic.burst::before,.packSlot.foil.r-legendary.burst::before{filter:brightness(1.22) saturate(1.12)}
+
+
+
+/* ── PATCH v2.9.0: Магазин Packs как на скрине MTG New Capenna — тёплая палитра ── */
+.shopArena{background:radial-gradient(1100px 380px at 50% -70px,rgba(42,28,18,.42),transparent),linear-gradient(180deg,rgba(22,16,12,.98),rgba(10,8,6,.98));border:1px solid rgba(255,216,122,.14)}
+.packStoreHead{display:flex;align-items:center;justify-content:space-between;gap:.8rem;padding:.2rem .2rem .7rem;border-bottom:1px solid rgba(255,255,255,.07);margin-bottom:.5rem}
+.packStoreHead .psBrand{display:flex;align-items:center;gap:.6rem}
+.packStoreHead .psIco{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,.06);border:1px solid rgba(255,216,122,.18);color:#ffe9b0;font-size:.8rem}
+.packStoreHead .psLogo{font-family:'Philosopher',serif;font-size:.98rem;letter-spacing:.16em;text-transform:uppercase;color:#ffe9b0;text-shadow:0 2px 10px rgba(0,0,0,.7);display:flex;align-items:center;gap:.45rem}
+.packStoreHead .psLogo i{width:18px;height:18px;display:flex;align-items:center;justify-content:center;color:#cbb98a}
+.packStoreHead .psInfo{font-size:.62rem;color:#a99a7a;max-width:220px;text-align:right;line-height:1.35}
+.packStoreHead .psInfo a{color:#8ec0ff;text-decoration:underline;text-underline-offset:2px}
+.packStoreRow{display:flex;gap:14px;overflow-x:auto;padding:14px 6px 14px;scroll-snap-type:x proximity;-webkit-overflow-scrolling:touch;justify-content:flex-start}
+.packStoreRow::-webkit-scrollbar{height:6px}
+.packStoreRow::-webkit-scrollbar-thumb{background:#3a2e22;border-radius:3px}
+.packStoreRow::-webkit-scrollbar-track{background:rgba(255,255,255,.04);border-radius:3px}
+.packOffer{flex:0 0 196px;scroll-snap-align:center;height:338px;display:flex;flex-direction:column;background:linear-gradient(180deg,#232030 0%,#15131c 58%,#0e0c14 100%);border:1px solid rgba(255,255,255,.08);border-radius:12px;overflow:hidden;box-shadow:0 10px 28px rgba(0,0,0,.52),inset 0 1px 0 rgba(255,255,255,.06);position:relative;transition:transform .18s,border-color .18s,box-shadow .18s}
+.packOffer:hover{transform:translateY(-3px);border-color:rgba(255,216,122,.32);box-shadow:0 14px 32px rgba(0,0,0,.62),0 0 18px rgba(255,180,60,.08),inset 0 1px 0 rgba(255,255,255,.08)}
+.packOffer.hl{border-color:rgba(255,216,122,.38);box-shadow:0 0 0 1px rgba(255,216,122,.18),0 14px 32px rgba(0,0,0,.62),0 0 22px rgba(255,180,60,.12)}
+.packOfferArt{flex:1;position:relative;display:flex;align-items:center;justify-content:center;background:radial-gradient(120% 92% at 50% 30%,rgba(255,220,140,.05),transparent 70%),linear-gradient(180deg,#1b1826 0%,#0f0e16 100%);overflow:hidden}
+.packOfferArt::after{content:'';position:absolute;inset:0;background:linear-gradient(180deg,transparent 62%,rgba(0,0,0,.42));pointer-events:none}
+.packOfferArt .packBadge{position:absolute;top:8px;left:50%;transform:translateX(-50%);background:linear-gradient(180deg,#ffd98a,#ff9a2a);color:#2b1600;font-family:'Philosopher',serif;font-size:.58rem;letter-spacing:.08em;padding:.14rem .5rem;border-radius:999px;box-shadow:0 2px 8px rgba(0,0,0,.45);white-space:nowrap;z-index:2;text-transform:uppercase}
+.packVisWrap{position:relative;width:120px;height:112px;display:flex;align-items:center;justify-content:center;filter:drop-shadow(0 8px 14px rgba(0,0,0,.55))}
+.packVis{position:absolute;width:64px;height:88px;border-radius:5px;border:1px solid rgba(255,255,255,.14);background:linear-gradient(160deg,#2e2a3e,#12101a);display:flex;align-items:center;justify-content:center;flex-direction:column;gap:2px;color:#ffe9b0;box-shadow:0 6px 14px rgba(0,0,0,.45);overflow:hidden}
+.packVis .pvSig{font-size:22px;line-height:1;text-shadow:0 1px 6px #000}
+.packVis .pvLbl{font-family:'Philosopher',serif;font-size:.52rem;letter-spacing:.08em;opacity:.85;text-transform:uppercase}
+.packVis.v1{left:10px;transform:rotate(-8deg) translateY(4px);opacity:.96}
+.packVis.v2{left:28px;transform:rotate(-3deg) translateY(-2px);z-index:2;border-color:#caa64e;background:linear-gradient(160deg,#3a3020,#1a140a);box-shadow:0 6px 16px rgba(0,0,0,.5),0 0 12px rgba(255,180,60,.18)}
+.packVis.v3{left:46px;transform:rotate(6deg) translateY(3px);opacity:.96}
+.packVis.mythic{background:linear-gradient(160deg,#2a0a12,#120508);border-color:#8a2a2a}
+.packVis.mythic.v2{background:linear-gradient(160deg,#3a1220,#1a070a);border-color:#c04030;box-shadow:0 6px 16px rgba(120,20,20,.35),0 0 14px rgba(255,60,40,.18)}
+.packOfferTitle{font-family:'Philosopher',serif;color:#ffe9b0;font-size:.82rem;text-align:center;padding:.55rem .4rem .1rem;letter-spacing:.03em;line-height:1.2;min-height:2.2em;display:flex;align-items:center;justify-content:center}
+.packOfferPrices{padding:.5rem .62rem .72rem;display:flex;flex-direction:column;gap:.38rem}
+.priceBtn{display:flex;align-items:center;justify-content:center;gap:.4rem;width:100%;padding:.42rem .5rem;border-radius:999px;border:1px solid rgba(255,255,255,.14);font-weight:800;font-size:.82rem;letter-spacing:.02em;cursor:pointer;position:relative;overflow:hidden;transition:transform .15s,filter .15s,box-shadow .15s,opacity .15s;font-family:'Philosopher',serif}
+.priceBtn::before{content:'';position:absolute;inset:0;background:linear-gradient(180deg,rgba(255,255,255,.14),transparent 58%);pointer-events:none;border-radius:999px}
+.priceBtn.gem{background:linear-gradient(180deg,#6aa6ff 0%,#2f5bdb 55%,#1b2f8a 100%);color:#f2f7ff;box-shadow:0 3px 14px -4px rgba(47,91,219,.65),inset 0 1px 0 rgba(255,255,255,.25);border-color:rgba(120,160,255,.45)}
+.priceBtn.gold{background:linear-gradient(180deg,#ffcf6e 0%,#e77a12 55%,#8e3a05 100%);color:#2b1600;box-shadow:0 3px 14px -4px rgba(231,122,18,.6),inset 0 1px 0 rgba(255,255,255,.35);border-color:rgba(255,208,110,.5)}
+.priceBtn.gem:hover,.priceBtn.gold:hover{transform:translateY(-1px);filter:brightness(1.06)}
+.priceBtn:disabled{filter:grayscale(.55);opacity:.5;cursor:not-allowed;transform:none;box-shadow:none}
+.priceBtn .ico{width:16px;height:16px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:.72rem;background:rgba(0,0,0,.18);border:1px solid rgba(255,255,255,.18);flex:0 0 16px}
+.shopNavBottom{display:flex;gap:.2rem;justify-content:center;align-items:center;flex-wrap:wrap;padding:.9rem .2rem .1rem;margin-top:.4rem;border-top:1px solid rgba(255,255,255,.07);position:relative}
+.shopNavBottom::before{content:'';position:absolute;left:12px;right:12px;top:-1px;height:1px;background:linear-gradient(90deg,transparent,rgba(255,216,122,.12),transparent)}
+.shopNavBottom .navItem{cursor:pointer;padding:.45rem .72rem;border-radius:7px;font-family:'Philosopher',serif;font-size:.68rem;letter-spacing:.09em;text-transform:uppercase;color:rgba(203,185,138,.58);transition:color .15s,background .15s,box-shadow .15s}
+.shopNavBottom .navItem:hover{color:#ffe9b0;background:rgba(255,255,255,.04)}
+.shopNavBottom .navItem.sel{color:#ffe9b0;background:rgba(90,166,255,.12);box-shadow:inset 0 -2px 0 #5aa6ff,0 2px 10px -4px rgba(90,166,255,.45)}
+.packStoreFoot{font-size:.62rem;color:rgba(203,185,138,.55);text-align:center;padding:.5rem .6rem 0;line-height:1.45}
+@media(max-width:860px){.packOffer{flex:0 0 172px;height:308px}.packStoreRow{gap:10px}}
+@media(max-width:560px){.packOffer{flex:0 0 156px;height:286px}.packStoreHead .psInfo{display:none}}
+
+
+
+/* ── PATCH v2.10.0: вскрытие как в MTG — пачка, треск, 5 карт вылетают ── */
+.packStage{position:relative;min-height:304px;display:flex;align-items:center;justify-content:center;width:100%;padding:.4rem 0 .6rem}
+.packSealed{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.7rem;z-index:4;cursor:pointer;transition:opacity .35s ease,transform .35s ease}
+.packSealed.hidden{display:none !important}
+.packSealedInner{position:relative;width:162px;height:228px;border-radius:9px;background:linear-gradient(160deg,#3a2f1c 0%,#1a1206 55%,#0f0a03 100%);border:2px solid #d8b45a;box-shadow:0 14px 36px rgba(0,0,0,.62),inset 0 0 0 1px rgba(255,236,180,.16),inset 0 0 22px rgba(216,180,90,.22);display:flex;align-items:center;justify-content:center;overflow:hidden;transform-style:preserve-3d}
+.packSealedInner::before{content:'';position:absolute;inset:0;background:repeating-linear-gradient(-35deg,transparent 0 14px,rgba(255,220,140,.04) 14px 16px);mix-blend-mode:overlay;pointer-events:none}
+.packSealedGlow{position:absolute;inset:-22px;background:radial-gradient(60% 50% at 50% 38%,rgba(255,220,120,.28),transparent 72%);opacity:.85;pointer-events:none;filter:blur(2px)}
+.packSealedArt{position:relative;z-index:1;display:flex;flex-direction:column;align-items:center;gap:.45rem;color:#ffe9b0;text-shadow:0 1px 6px #000}
+.packSealedArt .psTop{font-family:'Philosopher',serif;font-size:.62rem;letter-spacing:.24em;opacity:.9}
+.packSealedArt .psSig{width:58px;height:58px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:radial-gradient(circle at 34% 28%,#7a86ff 0%,#2e3a7e 56%,#11162d 100%);border:2px solid #caa64e;box-shadow:0 0 16px rgba(140,170,255,.45);font-size:1.9rem}
+.packSealedArt .psBot{font-family:'Philosopher',serif;font-size:.68rem;letter-spacing:.18em;opacity:.9}
+.packSealedShine{position:absolute;inset:0;background:linear-gradient(115deg,transparent 32%,rgba(255,255,255,.18) 46%,rgba(255,255,255,.06) 54%,transparent 68%);mix-blend-mode:screen;opacity:.9;pointer-events:none;animation:sealedShine 2.8s ease-in-out infinite}
+@keyframes sealedShine{0%{transform:translateX(-100%)}55%{transform:translateX(100%)}100%{transform:translateX(100%)}}
+.packSealedHint{font-family:'Philosopher',serif;font-size:.68rem;letter-spacing:.12em;text-transform:uppercase;color:#f0dfae;text-shadow:0 1px 4px #000;opacity:.92;animation:hintPulse 1.6s ease-in-out infinite}
+@keyframes hintPulse{0%,100%{opacity:.92;transform:translateY(0)}50%{opacity:1;transform:translateY(-2px)}}
+.packSealed:hover .packSealedInner{transform:translateY(-4px) scale(1.02);box-shadow:0 18px 40px rgba(0,0,0,.68),inset 0 0 0 1px rgba(255,236,180,.18),0 0 22px rgba(255,180,60,.22)}
+.packSealed.cracking{animation:sealedCrack .62s cubic-bezier(.2,.6,.2,1) forwards}
+.packSealed.cracking .packSealedInner{animation:sealedShake .42s ease}
+@keyframes sealedShake{0%,100%{transform:translateX(0)}18%{transform:translateX(-6px) rotate(-1deg)}36%{transform:translateX(6px) rotate(1deg)}54%{transform:translateX(-4px)}72%{transform:translateX(4px)}}
+@keyframes sealedCrack{0%{opacity:1;transform:scale(1)}28%{opacity:1;transform:scale(1.06)}58%{filter:brightness(1.35)}100%{opacity:0;transform:scale(1.22) rotate(.8deg);filter:brightness(1.6) blur(2px)}}
+.packStage.hasSealed .packRow{opacity:0;pointer-events:none;transform:scale(.96)}
+.packStage:not(.hasSealed) .packRow{opacity:1;transform:scale(1);transition:opacity .35s ease .15s,transform .45s cubic-bezier(.21,.82,.26,1) .15s}
+.packSealedBurst{position:absolute;inset:0;pointer-events:none;z-index:3;background:radial-gradient(55% 45% at 50% 42%,rgba(255,244,180,.95),rgba(255,200,80,.55) 36%,transparent 72%);opacity:0}
+.packSealedBurst.go{animation:packBurst .78s cubic-bezier(.2,.6,.2,1) forwards}
+
+
+
+/* ── PATCH v2.11.0: объёмные объекты как в MTG Arena — рубашки, фоны, бустеры (art_raw вставляет сам) ── */
+.packOffer,.ofCard,.bpTile,.packSealedInner,.cardback,.packSlot .back,.packSlot .face .card,.ofArt,.shopArena .ofArt,.bpCell{transform-style:preserve-3d}
+.packOffer,.ofCard,.bpTile,.packSealedInner,.cardback{
+  will-change:transform;
+  transition:transform .22s cubic-bezier(.2,.8,.2,1),box-shadow .22s ease,border-color .22s ease,filter .22s ease;
+  box-shadow:0 10px 28px rgba(0,0,0,.48),0 2px 8px rgba(0,0,0,.35),inset 0 1px 0 rgba(255,255,255,.06),inset 0 -1px 0 rgba(0,0,0,.35);
+}
+.packOffer:hover,.ofCard:hover,.bpTile:hover:not(:disabled),.cardback:hover{
+  box-shadow:0 16px 38px rgba(0,0,0,.62),0 0 22px rgba(255,180,60,.14),inset 0 1px 0 rgba(255,255,255,.09);
+  border-color:rgba(255,216,122,.28) !important;
+}
+.packSealedInner:hover{box-shadow:0 18px 42px rgba(0,0,0,.7),0 0 24px rgba(255,180,60,.18),inset 0 0 0 1px rgba(255,236,180,.16)}
+/* 3D наклон от мыши — задаётся через JS --rx/--ry/--mx/--my */
+.volTilt{transform:perspective(900px) rotateY(var(--ry,0deg)) rotateX(var(--rx,0deg)) scale(1.02)}
+.volGlare{position:absolute;inset:0;border-radius:inherit;pointer-events:none;opacity:0;transition:opacity .22s ease;background:radial-gradient(520px circle at var(--mx,50%) var(--my,50%),rgba(255,255,255,.20),transparent 62%);mix-blend-mode:screen;z-index:2}
+.volTilt .volGlare{opacity:1}
+.packOffer .volGlare,.ofCard .volGlare,.bpTile .volGlare{border-radius:inherit}
+.packSealedInner .volGlare{border-radius:7px}
+/* подложка под пользовательский арт — если файла нет, остаётся градиент/сигил */
+.packSealedArtImg,.packOfferArtImg,.ofArtImg,.cbArt,.ofSwImg{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;pointer-events:none;border-radius:inherit;opacity:.96}
+.packSealedArtImg{border-radius:7px;z-index:0}
+.packSealedArt{position:relative;z-index:1}
+/* объёмный кант как в MTG — скос + внутренний свет */
+.packOffer::before,.ofCard::before,.bpTile::before,.packSealedInner::before{
+  content:'';position:absolute;inset:0;border-radius:inherit;pointer-events:none;
+  background:linear-gradient(180deg,rgba(255,255,255,.07),transparent 38%,transparent 62%,rgba(0,0,0,.22));
+  mix-blend-mode:overlay;opacity:.9;z-index:1;
+}
+.packOfferArt,.ofArt,.bpTile{overflow:hidden;position:relative}
+/* глубина для текста/сигила над артом */
+.packOfferTitle,.ofName,.bpTile .bpLbl{position:relative;z-index:2;transform:translateZ(14px)}
+.packVisWrap{transform:translateZ(10px)}
+.ofSig,.ofBig{transform:translateZ(12px)}
+
+
+
+/* ── PATCH v2.11.1: убрать значки в ячейках фракций + отступы между ячейками (меню) ── */
+.heroRow.facCarousel{gap:14px !important}
+.arenaLeft .factionPick{gap:14px !important}
+.heroChip{font-size:0 !important;color:transparent !important}
+.heroChip .chipName{display:none !important}
+.heroChip img{display:none !important}
+.heroChip .chipIco{display:none !important}
+.fcard .fava{font-size:0 !important;color:transparent !important}
+.fcard .fava img{display:none !important}
+.fcard .fname,.fcard .fpass{display:none !important}
+.fcard{min-height:88px !important;height:96px !important;padding:0 !important}
+.arenaLeft .factionPick .fcard{min-height:96px !important;height:96px !important}
+
+
+
+/* ── PATCH v2.11.2: вернуть аватары из папок (art_raw/heroes), скрыть только сигилы-иконки ── */
+.heroChip img{display:block !important;opacity:1 !important}
+.heroChip .chipName{display:block !important}
+.heroChip img.chipIco{display:none !important} /* как было — декоративный чип скрыт */
+.fcard .fava img{display:block !important;opacity:1 !important}
+.fcard .fname{display:block !important}
+.fcard .fpass{display:block !important}
+.fcard{min-height:156px !important;height:auto !important;padding:.65rem .5rem .6rem !important}
+.arenaLeft .factionPick .fcard{min-height:156px !important;height:auto !important}
+.heroChip{font-size:0 !important;color:transparent !important}
+.heroChip .chipName{font-size:.62rem !important;color:var(--gold-hi) !important}
+.fcard .fava{font-size:0 !important;color:transparent !important}
+.fcard .fava{position:relative !important}
+
+
+
+/* ── PATCH v2.11.3: превью справа не перекрывает выбранную карту (MTG-док) ── */
+#zoomPreview{pointer-events:none !important}
+#zoomPreview .card{pointer-events:none !important}
+#zoomPreview .card:hover{transform:none !important;box-shadow:none !important;z-index:auto !important;filter:drop-shadow(0 18px 34px rgba(0,0,0,.75)) !important}
+#zoomPreview.show{pointer-events:none}
+
+
+
+
+/* ── PATCH v2.12.3: MTG-мгновенные — подсвечены даже в чужой ход ── */
+.card.instantReady{box-shadow:0 0 0 2px rgba(120,220,255,.92),0 0 18px rgba(90,180,255,.58),0 0 28px rgba(60,140,255,.22) !important;animation:instantPulse 1.45s ease-in-out infinite;transform-origin:center bottom}
+@keyframes instantPulse{0%,100%{box-shadow:0 0 0 2px rgba(120,220,255,.85),0 0 14px rgba(90,180,255,.52)}50%{box-shadow:0 0 0 2px rgba(120,220,255,1),0 0 22px rgba(90,180,255,.78),0 0 32px rgba(60,140,255,.33)}}
+.card.instantReady::after{content:'⚡';position:absolute;top:-6px;right:-6px;width:20px;height:20px;border-radius:50%;background:linear-gradient(180deg,#8ad0ff,#2a7bd6);border:1px solid #1d5aa6;color:#06152a;font-size:.74rem;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 6px rgba(0,0,0,.45);z-index:4}
+.card.instantReady .cost{box-shadow:0 0 8px rgba(120,220,255,.55)}
+/* стек — чуть заметнее во время приоритета */
+#stackPanel:not(.hidden){border-color:rgba(120,220,255,.32);box-shadow:0 8px 22px rgba(0,0,0,.42),0 0 16px rgba(90,180,255,.14)}
+
+/* ── PATCH v2.12.3: подсказки боя — неатаковавшие подсвечены + пропуск боя ── */
+.unit.ready{box-shadow:0 0 0 2px rgba(255,220,120,.9),0 0 18px rgba(255,220,120,.55),0 0 30px rgba(255,180,60,.22) !important;animation:readyPulse 1.35s ease-in-out infinite}
+@keyframes readyPulse{0%,100%{box-shadow:0 0 0 2px rgba(255,220,120,.85),0 0 14px rgba(255,220,120,.5)}50%{box-shadow:0 0 0 2px rgba(255,220,120,1),0 0 22px rgba(255,220,120,.75),0 0 34px rgba(255,180,60,.3)}}
+.unit.ready::after{content:'⚔';position:absolute;top:-7px;right:-7px;width:20px;height:20px;border-radius:50%;background:linear-gradient(180deg,#ffd87a,#e8921a);border:1px solid #a35c08;color:#2b1600;font-size:.72rem;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 6px rgba(0,0,0,.45);z-index:3}
+.unit.tapped{opacity:.92;filter:saturate(.85) brightness(.92)}
+.unit.tapped.ready{display:none} /* атаковавшие не подсвечиваются */
+#btnSkipCombat{border-color:rgba(255,220,120,.28);background:linear-gradient(180deg,rgba(40,34,22,.94),rgba(22,18,12,.98))}
+#btnSkipCombat:hover{border-color:rgba(255,220,120,.5);background:linear-gradient(180deg,rgba(55,46,28,.98),rgba(28,22,14,1));box-shadow:0 0 14px rgba(255,180,60,.18)}
+
+
+
+/* ── PATCH v2.12.4: провокация теперь НЕПРОПУСКАЕМА — видно сразу ── */
+.unit .badges{position:absolute;left:4px;top:4px;display:flex;gap:4px;z-index:5;pointer-events:none}
+.unit .badge{width:20px;height:20px;border-radius:50%;background:linear-gradient(180deg,#2b2110,#1a150c);border:1px solid rgba(255,216,122,.55);color:#ffd87a;display:flex;align-items:center;justify-content:center;font-size:11px;line-height:1;box-shadow:0 2px 6px rgba(0,0,0,.45),inset 0 1px 0 rgba(255,255,255,.08)}
+.unit .badge.kw{background:linear-gradient(180deg,#ffd87a,#c9972a);border-color:#8d6a12;color:#2b1600;font-weight:800}
+.unit .pips{position:absolute;right:4px;top:4px;display:flex;gap:3px;z-index:5;pointer-events:none}
+.unit .pip{width:18px;height:18px;border-radius:50%;background:linear-gradient(180deg,#3a3020,#1f1a12);border:1px solid rgba(255,216,122,.45);color:#ffd87a;display:flex;align-items:center;justify-content:center;font-size:10px;box-shadow:0 1px 4px rgba(0,0,0,.4)}
+.unit.taunt{filter:none}
+.unit.taunt .ubody{border-color:#ffd87a !important;border-width:3px !important;box-shadow:0 0 0 2px rgba(255,216,122,.85),0 0 22px rgba(255,190,60,.55),0 0 36px rgba(255,160,30,.25) !important}
+.unit.taunt::after{content:'⛨ ПРОВОКАЦИЯ';position:absolute;left:50%;bottom:-9px;transform:translateX(-50%);font-size:.58rem;letter-spacing:.11em;font-weight:800;color:#2b1600;background:linear-gradient(180deg,#ffd87a,#e8a12a);border:1px solid #7a5a12;padding:.12rem .42rem;border-radius:999px;box-shadow:0 2px 8px rgba(0,0,0,.45);z-index:6;white-space:nowrap;pointer-events:none}
+.unit.taunt.targetable .ubody{border-color:#ff3b30 !important;box-shadow:0 0 0 3px rgba(255,60,40,.9),0 0 28px rgba(255,60,40,.5) !important;animation:tauntPulse 1s ease-in-out infinite}
+@keyframes tauntPulse{0%,100%{box-shadow:0 0 0 3px rgba(255,60,40,.85),0 0 18px rgba(255,60,40,.5)}50%{box-shadow:0 0 0 3px rgba(255,60,40,1),0 0 28px rgba(255,60,40,.75)}}
+
+/* ── PATCH v2.12.3: герой как цель атаки — явная подсветка ── */
+.heroBar.droppable{box-shadow:0 0 0 3px rgba(255,220,120,.95),0 0 24px rgba(255,190,60,.55),0 0 40px rgba(255,160,30,.25) !important;animation:heroDroppablePulse 1.2s ease-in-out infinite;border-color:rgba(255,220,120,.6) !important}
+@keyframes heroDroppablePulse{0%,100%{box-shadow:0 0 0 3px rgba(255,220,120,.9),0 0 18px rgba(255,190,60,.5)}50%{box-shadow:0 0 0 3px rgba(255,220,120,1),0 0 28px rgba(255,190,60,.75),0 0 44px rgba(255,160,30,.3)}}
+.heroBar.droppable::after{content:'⚔ бей в героя!';position:absolute;right:.9rem;top:50%;transform:translateY(-50%);font-size:.62rem;letter-spacing:.12em;color:#2b1600;background:linear-gradient(180deg,#ffd87a,#e8921a);border:1px solid #a35c08;padding:.18rem .42rem;border-radius:999px;box-shadow:0 2px 8px rgba(0,0,0,.4);pointer-events:none;z-index:2}
+.heroBar.droppable .hbHp{animation:hpFlash .7s ease-in-out infinite}
+
+
+/* ── PATCH v2.13.0: MTG Arena гибрид — верхняя навигация + экран колод (Decks) ── */
+#arenaTopNav{
+  position:fixed;top:0;left:0;right:0;z-index:210;
+  display:flex;align-items:center;justify-content:space-between;gap:.8rem;
+  height:52px;padding:0 .8rem 0 1rem;
+  background:linear-gradient(180deg,rgba(18,18,22,.98),rgba(10,10,14,.97));
+  border-bottom:1px solid rgba(255,255,255,.07);
+  backdrop-filter:blur(8px);
+  box-shadow:0 4px 18px rgba(0,0,0,.42);
+}
+#arenaTopNav .topLogo{
+  display:flex;align-items:center;gap:.45rem;
+  font-family:'Philosopher',serif;font-size:.92rem;letter-spacing:.12em;
+  text-transform:uppercase;color:#ffe9b0;
+}
+#arenaTopNav .topLogo i{
+  width:22px;height:22px;border-radius:3px;display:flex;align-items:center;justify-content:center;
+  background:linear-gradient(180deg,#ff9c2a,#d94a0a);color:#fff;font-size:.78rem;box-shadow:0 2px 6px rgba(0,0,0,.4);
+}
+.topTabs{display:flex;align-items:center;gap:.15rem;flex:1;justify-content:center}
+.topTab{
+  padding:.5rem .9rem;border:none;background:transparent;color:#9aa3b8;
+  font-family:'Philosopher',serif;font-size:.78rem;letter-spacing:.08em;text-transform:uppercase;
+  cursor:pointer;position:relative;border-radius:4px;transition:.18s;
+}
+.topTab:hover{color:#ffe9b0;background:rgba(255,255,255,.04)}
+.topTab.active{color:#ffe9b0;background:rgba(255,216,122,.08)}
+.topTab.active::after{
+  content:'';position:absolute;left:.55rem;right:.55rem;bottom:-10px;height:2.5px;
+  background:linear-gradient(90deg,#ff9c2a,#ffd87a);box-shadow:0 0 10px rgba(255,156,42,.65);border-radius:2px;
+}
+.topTab .ico{margin-right:.28rem;filter:drop-shadow(0 1px 2px rgba(0,0,0,.5))}
+#topWallet{display:flex;align-items:center;gap:.45rem}
+#topWallet .shardPill{padding:.28rem .6rem!important;font-size:.74rem!important}
+
+/* сместить меню вниз из-под топ-бара */
+#menu{padding-top:52px !important}
+
+/* ── Экран колод ── */
+#decksScreen{
+  position:fixed;inset:52px 0 0 0;z-index:150;
+  background:
+    radial-gradient(1100px 420px at 50% -60px,rgba(32,28,48,.42),transparent 68%),
+    radial-gradient(900px 600px at 15% 110%,rgba(25,20,38,.28),transparent 60%),
+    linear-gradient(180deg,#0d0f16 0%,#090a10 100%);
+  display:flex;flex-direction:column;overflow:hidden;
+}
+#decksScreen.hidden{display:none !important}
+.decksHeader{
+  display:flex;align-items:center;justify-content:space-between;gap:.8rem;
+  padding:.7rem 1rem .6rem;max-width:1200px;width:100%;margin:0 auto;
+}
+.decksHeader h2{
+  font-family:'Philosopher',serif;font-size:1.55rem;letter-spacing:.12em;
+  text-transform:uppercase;color:#ffe9b0;text-shadow:0 2px 12px #000;
+  display:flex;align-items:center;gap:.5rem;
+}
+.decksHeader h2 i{color:var(--gold);font-size:1rem}
+.decksFilters{
+  display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;
+  padding:.55rem 1rem;background:rgba(0,0,0,.22);
+  border-top:1px solid rgba(255,255,255,.06);border-bottom:1px solid rgba(255,255,255,.06);
+  max-width:1200px;width:100%;margin:0 auto;
+}
+.decksFilters select,.decksFilters input{
+  background:#14161f;border:1px solid #3a4054;color:#eef0f6;
+  padding:.42rem .5rem;border-radius:4px;font-family:inherit;font-size:.72rem;
+}
+.decksFilters input{min-width:180px}
+.decksFilters .colorFilters{display:flex;gap:.3rem;align-items:center}
+.colorDot{
+  width:22px;height:22px;border-radius:50%;border:1.5px solid rgba(255,255,255,.15);
+  display:flex;align-items:center;justify-content:center;font-size:.68rem;cursor:pointer;
+  transition:.15s;opacity:.55;filter:grayscale(.2);
+}
+.colorDot.on{opacity:1;filter:none;border-color:#ffd87a;box-shadow:0 0 8px rgba(255,216,122,.45);transform:scale(1.08)}
+.colorDot.aur{background:radial-gradient(circle at 30% 30%,#f5d76e,#b89a2a);color:#2b1c05}
+.colorDot.nec{background:radial-gradient(circle at 30% 30%,#a855c9,#5a2a7a);color:#fff}
+.colorDot.ter{background:radial-gradient(circle at 30% 30%,#5aa648,#2c4a20);color:#fff}
+.colorDot.pyr{background:radial-gradient(circle at 30% 30%,#ff7a18,#a33a0a);color:#fff}
+.colorDot.eth{background:radial-gradient(circle at 30% 30%,#3fd6c8,#1a5a56);color:#fff}
+.colorDot.neu{background:radial-gradient(circle at 30% 30%,#9aa3ad,#4a4e56);color:#fff}
+
+.deckGridWrap{flex:1;overflow-y:auto;padding:14px 12px 86px;scrollbar-width:thin}
+.deckGrid{
+  display:flex;flex-wrap:wrap;gap:14px;justify-content:flex-start;
+  max-width:1200px;margin:0 auto;
+}
+.deckBox{
+  position:relative;flex:0 0 184px;width:184px;height:246px;
+  background:linear-gradient(180deg,#232030 0%,#15131c 58%,#0e0c14 100%);
+  border:1px solid rgba(255,255,255,.08);border-radius:10px;overflow:hidden;
+  box-shadow:0 10px 28px rgba(0,0,0,.48),0 2px 8px rgba(0,0,0,.35),inset 0 1px 0 rgba(255,255,255,.06);
+  cursor:pointer;transition:transform .18s,box-shadow .18s,border-color .18s;
+  transform-style:preserve-3d;
+}
+.deckBox::after{
+  content:'';position:absolute;top:6px;bottom:6px;right:-7px;width:8px;
+  background:linear-gradient(90deg,#2e2c36,#1a1820);border:1px solid rgba(255,255,255,.06);
+  border-left:none;border-radius:0 6px 6px 0;transform:skewY(-6deg);z-index:0;
+}
+.deckBox:hover{transform:translateY(-3px) scale(1.015);border-color:rgba(255,216,122,.28);box-shadow:0 14px 32px rgba(0,0,0,.58),0 0 16px rgba(255,180,60,.10)}
+.deckBox.sel{border-color:#ffd87a;box-shadow:0 0 0 1px rgba(255,216,122,.32),0 14px 32px rgba(0,0,0,.58),0 0 18px rgba(255,216,122,.18);transform:translateY(-2px)}
+.deckBox.addBox{
+  background:radial-gradient(120% 100% at 50% 30%,#1a1a24,#0a0a0f);
+  border:1.5px dashed rgba(255,216,122,.22);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.6rem;
+}
+.deckBox.addBox:hover{border-color:rgba(255,216,122,.45);background:radial-gradient(120% 100% at 50% 30%,#232030,#0f0e16)}
+.deckAddIcon{
+  width:56px;height:56px;border-radius:8px;display:flex;align-items:center;justify-content:center;
+  background:rgba(255,216,122,.06);border:1px solid rgba(255,216,122,.18);color:#ffd87a;
+  font-size:2.2rem;box-shadow:0 0 18px rgba(255,216,122,.18),inset 0 1px 0 rgba(255,255,255,.06);
+  text-shadow:0 0 12px rgba(255,216,122,.6);
+}
+.deckAddLabel{font-family:'Philosopher',serif;font-size:.72rem;letter-spacing:.08em;text-transform:uppercase;color:#cbb98a}
+.deckArt{
+  height:162px;position:relative;overflow:hidden;
+  background:radial-gradient(120% 90% at 50% 30%,rgba(255,220,140,.06),transparent 70%),linear-gradient(180deg,#1b1826,#0f0e16);
+  display:flex;align-items:center;justify-content:center;
+}
+.deckArt img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.deckArt .deckArtFallback{
+  font-size:2.6rem;color:#ffd87a;opacity:.85;text-shadow:0 2px 12px #000;z-index:1;
+}
+.deckArt::after{
+  content:'';position:absolute;inset:0;
+  background:linear-gradient(180deg,transparent 62%,rgba(0,0,0,.38));pointer-events:none;
+}
+.deckLabel{
+  position:relative;z-index:1;padding:.55rem .5rem .5rem;
+  background:linear-gradient(180deg,#0e0c10,#07060a);border-top:1px solid rgba(255,255,255,.07);
+  display:flex;flex-direction:column;gap:.3rem;
+}
+.deckName{
+  font-family:'Philosopher',serif;color:#ffe9b0;font-size:.78rem;text-align:center;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;letter-spacing:.02em;
+}
+.deckMeta{
+  display:flex;align-items:center;justify-content:space-between;gap:.4rem;
+}
+.deckColors{display:flex;gap:.25rem}
+.deckCIcon{
+  width:18px;height:18px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+  font-size:.58rem;border:1px solid rgba(0,0,0,.5);box-shadow:0 1px 3px rgba(0,0,0,.4);flex:none;
+}
+.deckCount{font-size:.62rem;color:#8b93ab;letter-spacing:.04em}
+.deckBox .selCheck{
+  position:absolute;top:6px;right:6px;width:22px;height:22px;border-radius:50%;
+  background:linear-gradient(180deg,#ffd87a,#e8921a);border:1px solid #a35c08;
+  display:flex;align-items:center;justify-content:center;color:#2b1600;font-size:.72rem;
+  box-shadow:0 2px 6px rgba(0,0,0,.4);opacity:0;transform:scale(.7);transition:.18s;z-index:2;
+}
+.deckBox.sel .selCheck{opacity:1;transform:scale(1)}
+
+.decksFooter{
+  position:fixed;left:0;right:0;bottom:0;z-index:151;
+  background:linear-gradient(180deg,rgba(12,12,16,.96),rgba(6,6,9,.99));
+  border-top:1px solid rgba(255,255,255,.07);box-shadow:0 -6px 18px rgba(0,0,0,.45);
+  padding:.6rem .9rem;display:flex;align-items:center;justify-content:space-between;gap:.8rem;flex-wrap:wrap;
+}
+.decksFooterLeft{display:flex;gap:.45rem;flex-wrap:wrap;align-items:center}
+.decksFooterRight{display:flex;gap:.45rem;align-items:center}
+.decksFooter .btn{padding:.42rem .85rem;font-size:.72rem;border-radius:6px}
+.decksFooter .btn.primary{background:linear-gradient(180deg,#ffd87a,#e8921a);color:#2b1600;border-color:#a35c08;box-shadow:0 2px 10px rgba(232,146,26,.35)}
+.decksFooter .btn:disabled{opacity:.42;filter:grayscale(.4);cursor:not-allowed;transform:none;box-shadow:none}
+
+@media(max-width:900px){
+  .topTabs{gap:0}
+  .topTab{padding:.45rem .6rem;font-size:.72rem}
+  #arenaTopNav{padding:0 .5rem}
+  .deckBox{flex:0 0 156px;width:156px;height:218px}
+  .deckArt{height:138px}
+}
+@media(max-width:560px){
+  .topTabs .topTab span{display:none}
+  .deckGrid{justify-content:center}
+  .decksHeader{flex-direction:column;align-items:flex-start}
+  .decksFilters input{min-width:120px}
+}
+
+
+
+/* ── PATCH v2.14.0: Store Featured + Home (как на скринах 3,5,8 — гибрид Arena/Цитадель) ── */
+/* Store Featured — заголовок по центру, витрина как в MTG */
+.shopArena{max-width:1180px;margin:0 auto}
+.shopArena .shTitle{font-size:1.55rem !important;letter-spacing:.16em !important;text-align:center;flex:1}
+.ofCard{
+  position:relative;overflow:hidden;
+  background:linear-gradient(180deg,#232028 0%,#141218 62%,#0e0c11 100%) !important;
+  border:1px solid #2e2a36 !important;
+}
+.ofCard.hl{border-color:#ffd87a !important;box-shadow:0 0 0 1px rgba(255,216,122,.22),0 0 22px rgba(255,180,60,.18) !important}
+.ofCard.hl::before{
+  content:'';position:absolute;inset:-1px;border:1.5px solid #ffd87a;border-radius:10px;pointer-events:none;z-index:3;
+}
+.ofArt{position:relative}
+.ofArt .newBadge{
+  position:absolute;top:6px;right:8px;background:linear-gradient(180deg,#7ec8ff,#3a6bff);color:#fff;
+  font-size:.58rem;letter-spacing:.06em;padding:.12rem .4rem;border-radius:999px;
+  box-shadow:0 2px 6px rgba(0,0,0,.4);z-index:2;
+}
+.ofArt .oneTime{
+  position:absolute;bottom:0;left:0;right:0;text-align:center;
+  background:linear-gradient(180deg,rgba(0,0,0,.0),rgba(0,0,0,.62));
+  color:#8ec0ff;font-size:.58rem;letter-spacing:.06em;padding:.25rem 0 .3rem;
+}
+.ofSub{color:#9aa3ab !important}
+.ofBuy .btn.price{border-radius:999px !important;font-weight:800 !important}
+.shopArena .packStoreHead .psLogo{font-size:1.05rem !important}
+.shopArena .packStoreHead{margin-bottom:.6rem}
+
+/* Home Arena — как на скрине 3 */
+#homeScreen{
+  position:fixed;inset:52px 0 0 0;z-index:145;
+  background:
+    radial-gradient(1100px 420px at 50% -80px,rgba(42,22,12,.38),transparent 68%),
+    linear-gradient(180deg,#0a0d14 0%,#07090e 100%);
+  display:flex;flex-direction:column;overflow:hidden;
+}
+#homeScreen.hidden{display:none !important}
+.homeTop{flex:1;display:grid;grid-template-columns:1.15fr 1.15fr 0.9fr;gap:14px;max-width:1180px;width:100%;margin:0 auto;padding:14px 12px 10px;min-height:0}
+.homeHero{
+  position:relative;border-radius:10px;overflow:hidden;
+  background:
+    radial-gradient(80% 60% at 50% 30%,rgba(255,120,40,.18),transparent 68%),
+    linear-gradient(180deg,#1a1520,#0e0c14);
+  border:1px solid rgba(255,255,255,.07);box-shadow:0 14px 32px rgba(0,0,0,.55);
+  display:flex;flex-direction:column;min-height:320px;
+}
+.homeHero .dragonArt{
+  flex:1;position:relative;display:flex;align-items:center;justify-content:center;
+  background:radial-gradient(70% 60% at 50% 40%,rgba(255,60,20,.22),transparent 70%),url('img/board_arena.png') center/cover no-repeat;
+  overflow:hidden;
+}
+.homeHero .dragonArt::after{
+  content:'🐉';font-size:5.2rem;filter:drop-shadow(0 6px 18px rgba(0,0,0,.6));opacity:.92;
+}
+.homeHero .welcomeBox{
+  position:absolute;left:12px;bottom:12px;width:168px;
+  background:linear-gradient(180deg,#1e1c24,#0e0c14);border:1px solid rgba(255,255,255,.08);
+  border-radius:8px;overflow:hidden;box-shadow:0 8px 18px rgba(0,0,0,.45);
+  display:flex;flex-direction:column;
+}
+.welcomeBox .wbArt{height:92px;background:radial-gradient(circle at 50% 30%,#2a3a4a,#10161c);display:flex;align-items:center;justify-content:center;font-size:1.8rem;color:#ffd87a}
+.welcomeBox .wbTitle{padding:.4rem .5rem .2rem;font-family:'Philosopher',serif;color:#ffe9b0;font-size:.76rem;text-align:center}
+.welcomeBox .wbSub{padding:0 .5rem .45rem;font-size:.58rem;color:#9aa3ab;text-align:center;line-height:1.3}
+.homeDrafts{display:flex;flex-direction:column;gap:10px}
+.draftCard{
+  position:relative;height:96px;border-radius:8px;overflow:hidden;
+  background:linear-gradient(90deg,#1e1c24 0%,#0e0c14 100%);border:1px solid rgba(255,255,255,.07);
+  display:flex;align-items:center;padding-left:12px;cursor:pointer;transition:.18s;
+  box-shadow:0 6px 16px rgba(0,0,0,.35);
+}
+.draftCard:hover{transform:translateY(-2px);border-color:rgba(255,216,122,.22);box-shadow:0 10px 22px rgba(0,0,0,.45)}
+.draftCard .draftArt{position:absolute;inset:0;opacity:.42}
+.draftCard .draftArt img{width:100%;height:100%;object-fit:cover}
+.draftCard .draftInfo{position:relative;z-index:1}
+.draftCard .draftTitle{font-family:'Philosopher',serif;color:#ffe9b0;font-size:.82rem;text-shadow:0 1px 4px #000}
+.draftCard .draftSub{font-size:.58rem;color:#cbb98a}
+.draftCard .draftArrow{position:absolute;right:10px;top:50%;transform:translateY(-50%);color:#8b93ab;font-size:.9rem}
+.homeQuests{
+  max-width:1180px;width:100%;margin:0 auto;padding:10px 12px 12px;
+  background:linear-gradient(180deg,rgba(6,6,9,.92),rgba(10,10,14,.95));
+  border-top:1px solid rgba(255,255,255,.07);display:flex;gap:12px;align-items:center;overflow-x:auto;
+  scrollbar-width:thin;
+}
+.questChip{
+  flex:0 0 auto;display:flex;align-items:center;gap:.6rem;
+  min-width:156px;padding:.45rem .6rem .45rem .45rem;
+  background:linear-gradient(180deg,#1e1c24,#0e0c14);border:1px solid rgba(255,255,255,.07);
+  border-radius:999px;box-shadow:0 4px 12px rgba(0,0,0,.35);
+}
+.questChip .qIcon{
+  width:38px;height:38px;border-radius:50%;flex:none;
+  background:radial-gradient(circle at 30% 30%,#ffd87a,#b89a2a);border:2px solid #7a5a12;
+  display:flex;align-items:center;justify-content:center;color:#2b1600;font-size:.92rem;
+  box-shadow:0 0 10px rgba(255,216,122,.25);
+}
+.questChip .qText{font-size:.62rem;line-height:1.25;color:#cbb98a}
+.questChip .qText b{color:#ffe9b0;font-size:.74rem;display:block}
+.questChip.xp .qIcon{background:radial-gradient(circle at 30% 30%,#8a7bff,#3a2a8a);border-color:#4a3a8a;color:#fff}
+.homeBottom{
+  display:flex;align-items:center;justify-content:space-between;gap:.8rem;
+  max-width:1180px;width:100%;margin:0 auto;padding:.6rem 12px .7rem;
+  background:rgba(0,0,0,.18);border-top:1px solid rgba(255,255,255,.05);
+}
+.homeBottom .playBtn{
+  padding:.65rem 1.8rem;border-radius:999px;background:linear-gradient(180deg,#ff9c2a,#e05a0a);
+  border:none;color:#fff;font-family:'Philosopher',serif;font-size:1.02rem;letter-spacing:.08em;
+  box-shadow:0 4px 16px rgba(232,90,10,.4),inset 0 1px 0 rgba(255,255,255,.25);cursor:pointer;
+  transition:.18s;
+}
+.homeBottom .playBtn:hover{transform:translateY(-1px);box-shadow:0 6px 20px rgba(232,90,10,.5)}
+@media(max-width:900px){
+  .homeTop{grid-template-columns:1fr;overflow:auto}
+  .homeHero{min-height:260px}
+}
+
+
+
+/* ── PATCH v2.15.0: Profile Ranked (скрин 6) + Mastery/Sleeves (скрин 7) гибрид ── */
+.rankedTop{
+  display:flex;align-items:flex-start;gap:1.2rem;padding:.6rem 0 .4rem;
+  border-bottom:1px solid rgba(255,255,255,.06);margin-bottom:.6rem;
+}
+.rankedLeft{flex:1}
+.rankedRight{
+  width:260px;flex:none;display:flex;flex-direction:column;align-items:center;gap:.5rem;
+  background:radial-gradient(300px 200px at 50% 30%,rgba(40,30,20,.35),transparent 70%),linear-gradient(180deg,rgba(22,18,14,.6),rgba(10,10,14,.4));
+  border:1px solid rgba(255,255,255,.06);border-radius:8px;padding:.8rem .6rem;
+}
+.rankEmblem{
+  width:84px;height:84px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+  background:radial-gradient(circle at 30% 30%,#ffd87a,#8a5a12);border:3px solid #4a3208;
+  box-shadow:0 0 0 2px rgba(255,216,122,.25),0 0 14px rgba(255,216,122,.3);font-size:1.8rem;color:#4a3208;
+}
+.rankTitle{font-family:Philosopher,serif;color:#ffe9b0;font-size:.92rem;text-align:center}
+.rankSub{font-size:.62rem;color:#8b93ab;text-align:center}
+.seasonRewards{display:flex;flex-direction:column;gap:.35rem}
+.rewardRow{
+  display:grid;grid-template-columns:90px 1fr auto;gap:.6rem;align-items:center;
+  padding:.35rem .5rem;border-radius:6px;background:linear-gradient(90deg,rgba(30,24,16,.6),rgba(14,10,8,.4));
+  border:1px solid rgba(255,255,255,.04);position:relative;overflow:hidden;
+}
+.rewardRow::before{
+  content:'';position:absolute;left:0;top:0;bottom:0;width:3px;background:linear-gradient(180deg,#ffd87a,#b89a2a);
+  opacity:.9;
+}
+.rewardName{font-family:Philosopher,serif;color:#ffe9b0;font-size:.74rem}
+.rewardName span{color:#8b93ab;font-size:.62rem;display:block}
+.rewardPacks{display:flex;gap:4px;flex-wrap:wrap}
+.rewardPack{width:32px;height:44px;border-radius:3px;background:linear-gradient(160deg,#2e2a3e,#12101a);border:1px solid rgba(255,216,122,.18);display:flex;align-items:center;justify-content:center;font-size:.62rem;color:#ffd87a;box-shadow:0 2px 6px rgba(0,0,0,.35)}
+.rewardGold{display:flex;align-items:center;gap:.3rem;color:#ffd87a;font-size:.72rem}
+.rewardGold i{width:18px;height:18px;border-radius:50%;background:radial-gradient(circle at 30% 30%,#ffd87a,#b89a2a);display:flex;align-items:center;justify-content:center;color:#2b1600;font-size:.62rem;border:1px solid #8a5a12}
+.sleeveGrid{
+  display:grid;grid-template-columns:repeat(4,1fr);gap:10px;max-width:520px;
+}
+.sleeveCard{
+  position:relative;aspect-ratio:512/720;border-radius:8px;overflow:hidden;
+  background:linear-gradient(180deg,#1e1c24,#0e0c14);border:1px solid rgba(255,255,255,.07);
+  cursor:pointer;transition:.18s;box-shadow:0 6px 14px rgba(0,0,0,.35);
+}
+.sleeveCard:hover{transform:translateY(-2px);border-color:rgba(255,216,122,.22)}
+.sleeveCard.sel{border-color:#ffd87a;box-shadow:0 0 0 1px rgba(255,216,122,.32),0 0 14px rgba(255,216,122,.18)}
+.sleeveCard img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.sleeveCard .lock{position:absolute;inset:0;background:rgba(6,6,9,.62);display:flex;align-items:center;justify-content:center;font-size:1.4rem;color:#8b93ab}
+.sleeveCard .sleeveName{position:absolute;left:0;right:0;bottom:0;background:linear-gradient(180deg,transparent,rgba(0,0,0,.78));color:#ffe9b0;font-family:Philosopher,serif;font-size:.58rem;text-align:center;padding:.3rem .2rem .25rem}
+.sleevePreview{
+  position:absolute;right:10px;top:50%;transform:translateY(-50%);width:260px;aspect-ratio:512/720;
+  border-radius:10px;overflow:hidden;border:2px solid #2e2a36;box-shadow:0 14px 32px rgba(0,0,0,.55);
+  background:linear-gradient(180deg,#1e1c24,#0e0c14);display:flex;align-items:center;justify-content:center;
+}
+@media(max-width:700px){
+  .rankedTop{flex-direction:column}
+  .rankedRight{width:100%}
+  .sleeveGrid{grid-template-columns:repeat(3,1fr)}
+  .sleevePreview{position:relative;right:auto;top:auto;transform:none;width:100%;max-width:300px;margin:10px auto 0}
+}
+
+
+
+/* ── PATCH v2.16.0 PIXEL-PERFECT DECKS (скрины 1-2 гибрид) — переопределяет v2.13-15 ── */
+#arenaTopNav{
+  height:48px !important;
+  background:linear-gradient(180deg,#14161e 0%,#0d0f14 100%) !important;
+  border-bottom:1px solid #2a3040 !important;
+  padding:0 10px 0 14px !important;
+}
+#arenaTopNav .topLogo{
+  font-size:.88rem !important;letter-spacing:.14em !important;font-weight:600;
+}
+.topTab{
+  font-size:.76rem !important;letter-spacing:.07em !important;
+  padding:.42rem .78rem !important;border-radius:3px !important;
+  color:#8b93ab !important;
+}
+.topTab.active{
+  color:#fff !important;background:#1e232e !important;
+  box-shadow:inset 0 -2px 0 #ff8c1a, 0 0 12px rgba(255,140,26,.22) !important;
+}
+.topTab.active::after{display:none !important}
+
+/* Decks screen — точь как скрин 1-2 */
+#decksScreen{
+  background:#0a0c10 !important;
+  background-image:
+    radial-gradient(1200px 420px at 50% -40px,rgba(30,40,70,.18),transparent 70%),
+    linear-gradient(180deg,#0d1118 0%,#07090e 100%) !important;
+}
+.decksHeader{
+  padding:.55rem .9rem .45rem !important;
+  border-bottom:1px solid #1e232e !important;
+  background:linear-gradient(180deg,#0f131c,#0a0e14) !important;
+  max-width:none !important;width:100% !important;
+}
+.decksHeader h2{
+  font-size:1.35rem !important;letter-spacing:.14em !important;
+  color:#eef2f8 !important;text-shadow:none !important;
+}
+.decksHeader h2 i{display:none}
+.decksFilters{
+  background:#0f141c !important;
+  border-top:1px solid #1e232e !important;
+  border-bottom:1px solid #1e232e !important;
+  padding:.42rem .7rem !important;
+  gap:.45rem !important;
+  max-width:none !important;
+}
+.decksFilters select,.decksFilters input{
+  height:28px !important;padding:.28rem .45rem !important;
+  background:#0a0e14 !important;border:1px solid #2a3446 !important;
+  color:#cbd5e8 !important;border-radius:4px !important;
+  font-size:.72rem !important;box-shadow:inset 0 1px 0 rgba(255,255,255,.04) !important;
+}
+.decksFilters input{
+  background:#0a0e14 url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 12 12"><circle cx="5" cy="5" r="3.5" fill="none" stroke="%236b7a99" stroke-width="1.2"/><path d="M8 8 L11 11" stroke="%236b7a99" stroke-width="1.2" stroke-linecap="round"/></svg>') 8px 50% no-repeat !important;
+  padding-left:26px !important;min-width:200px !important;
+}
+.decksFilters #decksSearchClear{
+  background:#1e232e !important;border:1px solid #2a3446 !important;color:#8b93ab !important;
+  width:28px !important;height:28px !important;padding:0 !important;border-radius:4px !important;
+}
+.colorDot{
+  width:20px !important;height:20px !important;border-width:1px !important;
+  border-color:#1e232e !important;box-shadow:0 1px 3px rgba(0,0,0,.4), inset 0 1px 0 rgba(255,255,255,.12) !important;
+  opacity:1 !important;filter:none !important;
+}
+.colorDot.on{
+  border-color:#ffd87a !important;box-shadow:0 0 0 1px #ffd87a, 0 0 8px rgba(255,216,122,.45) !important;transform:none !important;
+}
+.colorDot.aur{background:#fffef2 !important;color:#a07a00 !important;border-color:#d8cfaa !important}
+.colorDot.nec{background:#0a0a0a !important;color:#a99a8a !important}
+.colorDot.ter{background:#00733e !important}
+.colorDot.pyr{background:#d3202a !important}
+.colorDot.eth{background:#0e68ab !important}
+.colorDot.neu{background:#6b7280 !important}
+#decksCount{color:#6b7a99 !important;font-size:.68rem !important}
+
+.deckGridWrap{
+  padding:16px 12px 88px !important;
+  background:radial-gradient(900px 500px at 50% 0%,rgba(20,30,60,.14),transparent 70%) !important;
+}
+.deckGrid{
+  gap:12px !important;max-width:1180px !important;
+}
+.deckBox{
+  flex:0 0 186px !important;width:186px !important;height:126px !important;
+  background:#0f0f12 !important;
+  border:1px solid #2a2d3a !important;
+  border-radius:4px !important;
+  overflow:visible !important;
+  box-shadow:0 6px 14px rgba(0,0,0,.55), 0 2px 6px rgba(0,0,0,.4) !important;
+}
+.deckBox::before{ /* right side */
+  content:'' !important;position:absolute !important;top:3px !important;bottom:5px !important;right:-6px !important;width:6px !important;
+  background:linear-gradient(180deg,#2a2d36 0%,#1a1c22 100%) !important;
+  border:1px solid #2a2d3a !important;border-left:none !important;
+  border-radius:0 3px 3px 0 !important;transform:none !important;display:block !important;
+}
+.deckBox::after{ /* bottom side */
+  content:'' !important;position:absolute !important;left:3px !important;right:-3px !important;bottom:-5px !important;height:5px !important;
+  background:#0a0a0c !important;border:1px solid #2a2d3a !important;border-top:none !important;
+  border-radius:0 0 3px 3px !important;transform:none !important;
+}
+.deckBox:hover{transform:translateY(-2px) !important;border-color:#3a4157 !important;box-shadow:0 10px 22px rgba(0,0,0,.65) !important}
+.deckBox.sel{
+  border-color:#ff8c1a !important;box-shadow:0 0 0 1px #ff8c1a, 0 0 14px rgba(255,140,26,.28) !important;
+}
+.deckBox.addBox{
+  background:#0a0a0c !important;border:1.5px solid #2a2d3a !important;
+  border-style:solid !important;height:126px !important;
+  display:flex !important;flex-direction:column !important;align-items:center !important;justify-content:center !important;
+  gap:.35rem !important;
+}
+.deckBox.addBox::before,.deckBox.addBox::after{display:none !important}
+.deckAddIcon{
+  width:44px !important;height:44px !important;border-radius:4px !important;
+  background:#0f0f12 !important;border:1px solid #2a2d3a !important;
+  color:#fff !important;font-size:1.6rem !important;font-weight:300 !important;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.06), 0 2px 8px rgba(0,0,0,.4) !important;
+  text-shadow:none !important;
+}
+.deckAddLabel{color:#6b7a99 !important;font-size:.66rem !important;letter-spacing:.08em !important}
+.deckArt{
+  height:92px !important;background:#0a0a0c !important;
+  border-radius:3px 3px 0 0 !important;overflow:hidden !important;
+  border-bottom:1px solid #1a1c22 !important;
+}
+.deckArt img{position:absolute !important;inset:0 !important;width:100% !important;height:100% !important;object-fit:cover !important}
+.deckArt .deckArtFallback{font-size:2.1rem !important;opacity:.55 !important}
+.deckArt::after{display:none !important}
+.deckLabel{
+  height:34px !important;padding:.28rem .4rem .2rem !important;
+  background:#08080a !important;border:none !important;border-top:1px solid #1e1e24 !important;
+  border-radius:0 0 3px 3px !important;gap:.15rem !important;
+}
+.deckName{
+  font-size:.74rem !important;letter-spacing:.02em !important;color:#eef2f8 !important;
+  font-weight:500 !important;
+}
+.deckMeta{justify-content:center !important}
+.deckColors{
+  position:absolute !important;top:-9px !important;left:50% !important;transform:translateX(-50%) !important;
+  background:#08080a !important;border:1px solid #1e1e24 !important;
+  border-radius:10px !important;padding:1px 3px !important;gap:1px !important;
+  box-shadow:0 2px 6px rgba(0,0,0,.4) !important;
+}
+.deckCIcon{
+  width:14px !important;height:14px !important;font-size:.48rem !important;
+  border:1px solid rgba(255,255,255,.14) !important;box-shadow:0 1px 2px rgba(0,0,0,.4) !important;
+}
+.deckCount{display:none !important}
+.deckBox .selCheck{
+  width:16px !important;height:16px !important;top:5px !important;right:5px !important;
+  background:#ff8c1a !important;border:none !important;color:#fff !important;
+  font-size:.58rem !important;box-shadow:0 1px 4px rgba(0,0,0,.4) !important;
+}
+.decksFooter{
+  height:46px !important;padding:.38rem .6rem !important;
+  background:#0a0e14 !important;border-top:1px solid #1e232e !important;
+  box-shadow:0 -4px 14px rgba(0,0,0,.4) !important;
+}
+.decksFooter .btn{
+  height:28px !important;padding:.28rem .62rem !important;font-size:.68rem !important;
+  border-radius:3px !important;background:#1e232e !important;
+  border:1px solid #2a3446 !important;color:#cbd5e8 !important;
+  text-transform:none !important;letter-spacing:.04em !important;
+}
+.decksFooter .btn.primary{
+  background:#2a5bd7 !important;border-color:#3a6bff !important;color:#fff !important;
+  box-shadow:0 2px 8px rgba(42,91,215,.35) !important;border-radius:4px !important;
+}
+.decksFooter .btn:hover:not(:disabled){background:#252e42 !important;transform:none !important;box-shadow:none !important}
+#decksSelInfo{color:#6b7a99 !important;font-size:.66rem !important}
+
+
+
+/* ── PATCH v2.16.1 PIXEL-PERFECT HOME/STORE/PROFILE (скрины 3-8 гибрид) ── */
+#homeScreen{
+  background:#07090e !important;
+  background-image:
+    radial-gradient(1100px 500px at 50% -60px,rgba(20,35,75,.14),transparent 68%),
+    linear-gradient(180deg,#0a0e1a 0%,#06080e 100%) !important;
+}
+.homeTop{
+  gap:10px !important;padding:10px 8px 8px !important;
+  grid-template-columns:1fr 340px 1fr !important;max-width:1180px !important;
+}
+.homeHero{
+  background:#0a0a0c !important;border:1px solid #2a2d3a !important;border-radius:4px !important;
+  box-shadow:0 8px 22px rgba(0,0,0,.55) !important;min-height:286px !important;
+}
+.homeHero .dragonArt{
+  background:linear-gradient(180deg,rgba(10,10,14,.1),rgba(6,6,9,.55)), url('img/board_arena.png') center/cover no-repeat !important;
+}
+.homeHero .dragonArt::after{content:'🐉' !important;font-size:4.6rem !important;filter:drop-shadow(0 8px 18px rgba(0,0,0,.7)) !important}
+.welcomeBox{
+  width:152px !important;left:10px !important;bottom:10px !important;
+  background:#0f0f12 !important;border:1px solid #2a2d3a !important;border-radius:4px !important;
+  box-shadow:0 6px 14px rgba(0,0,0,.45) !important;
+}
+.welcomeBox .wbArt{height:78px !important;background:radial-gradient(60% 60% at 50% 30%,#1a2a3a,#0a0e14) !important;font-size:1.4rem !important}
+.welcomeBox .wbTitle{font-size:.70rem !important;color:#eef2f8 !important}
+.welcomeBox .wbSub{font-size:.54rem !important;color:#8b93ab !important}
+.draftCard{
+  height:86px !important;background:#0f0f12 !important;border:1px solid #2a2d3a !important;border-radius:4px !important;
+  box-shadow:0 4px 12px rgba(0,0,0,.45) !important;
+}
+.draftCard .draftTitle{font-size:.76rem !important;color:#eef2f8 !important}
+.draftCard .draftSub{font-size:.56rem !important;color:#8b93ab !important}
+.homeQuests{
+  background:#0a0e14 !important;border-top:1px solid #1e232e !important;
+  padding:8px 8px 8px !important;gap:8px !important;
+}
+.questChip{
+  min-width:142px !important;padding:.32rem .45rem !important;
+  background:#0f1118 !important;border:1px solid #1e232e !important;border-radius:20px !important;
+  box-shadow:0 2px 8px rgba(0,0,0,.3) !important;
+}
+.questChip .qIcon{
+  width:32px !important;height:32px !important;font-size:.78rem !important;
+  border-width:1.5px !important;
+}
+.questChip .qText b{font-size:.68rem !important;color:#eef2f8 !important}
+.homeBottom{padding:.45rem 8px !important;background:#07090e !important;border-top:1px solid #1e232e !important}
+.homeBottom .playBtn{
+  padding:.52rem 1.6rem !important;font-size:.92rem !important;
+  background:linear-gradient(180deg,#ff8c1a 0%,#e05a0a 100%) !important;
+  border-radius:20px !important;box-shadow:0 3px 12px rgba(232,90,10,.35) !important;
+}
+
+/* Store — как скрины 5/8 */
+.shopArena{
+  background:#0a0c10 !important;border:1px solid #1e232e !important;
+  border-radius:4px !important;box-shadow:0 12px 28px rgba(0,0,0,.5) !important;
+  max-width:1180px !important;
+}
+.shopArena .shTitle{color:#eef2f8 !important;font-size:1.25rem !important}
+.ofCard{
+  background:#0f0f12 !important;border:1px solid #2a2d3a !important;
+  border-radius:4px !important;box-shadow:0 4px 12px rgba(0,0,0,.4) !important;
+  width:176px !important;
+}
+.ofCard .ofArt{height:96px !important;background:#0a0a0c !important;border-radius:3px 3px 0 0 !important}
+.ofCard .ofName{color:#eef2f8 !important;font-size:.74rem !important}
+.ofCard .ofSub{font-size:.58rem !important}
+.ofCard .price{height:26px !important;font-size:.70rem !important}
+.shopArena .packStoreRow{gap:10px !important;padding:10px 8px !important}
+.packOffer{
+  flex:0 0 176px !important;height:286px !important;
+  background:#0f0f12 !important;border:1px solid #2a2d3a !important;border-radius:4px !important;
+}
+.packOffer .packOfferArt{flex:1 !important;background:#0a0a0c !important}
+.packOfferTitle{color:#eef2f8 !important;font-size:.74rem !important}
+.priceBtn{height:26px !important;font-size:.70rem !important}
+.shopNavBottom{
+  background:#0a0e14 !important;border-top:1px solid #1e232e !important;
+  padding:.32rem 8px !important;
+}
+.shopNavBottom .navItem{color:#6b7a99 !important;font-size:.66rem !important;padding:.28rem .5rem !important}
+.shopNavBottom .navItem.sel{color:#fff !important;background:#1e232e !important;box-shadow:inset 0 -2px 0 #2a5bd7 !important}
+
+/* Profile Ranked — скрин 6 */
+#profileModal .packPanel{max-width:780px !important;background:#0a0c10 !important;border:1px solid #1e232e !important}
+.rankedTop{padding:.45rem 0 !important}
+.rewardRow{
+  background:#0f0f12 !important;border:1px solid #1e232e !important;border-radius:4px !important;
+  padding:.28rem .45rem !important;
+}
+.rewardName{color:#eef2f8 !important;font-size:.70rem !important}
+.rewardPack{background:#0a0a0c !important;border:1px solid #2a2d3a !important;width:28px !important;height:38px !important}
+.rankedRight{
+  background:#0f0f12 !important;border:1px solid #1e232e !important;border-radius:4px !important;
+}
+.rankEmblem{width:72px !important;height:72px !important;border-width:2.5px !important}
+
+/* Sleeves — скрин 7 */
+.sleeveCard{border:1px solid #2a2d3a !important;background:#0f0f12 !important;border-radius:4px !important;box-shadow:0 4px 12px rgba(0,0,0,.4) !important}
+.sleeveCard.sel{border-color:#2a5bd7 !important;box-shadow:0 0 0 1px #2a5bd7, 0 0 10px rgba(42,91,215,.25) !important}
+.sleevePreview{border:1px solid #2a2d3a !important;background:#0f0f12 !important;border-radius:4px !important;box-shadow:0 12px 28px rgba(0,0,0,.55) !important}
+
+/* Events — скрин 4 */
+#eventsScreen{background:#07090e !important}
+#eventsGrid .draftCard{border:1px solid #2a2d3a !important;background:#0f0f12 !important}
+#eventsSide{background:#0a0e14 !important;border-left:1px solid #1e232e !important}
+
+
+
+/* ── PATCH v2.17.0 ULTRA-POLISH — градиенты фракций, пилюли цен, квесты как в Arena ── */
+/* Deck art — фракционные градиенты как на скринах Bant/Simic/Mono etc. */
+.deckArt{background:#0a0a0c !important;position:relative !important;overflow:hidden !important}
+.deckArt::before{
+  content:'';position:absolute;inset:0;opacity:.92;z-index:0;
+  background:var(--deck-grad, radial-gradient(80% 70% at 50% 30%, #1a2a3a, #0a0e14));
+}
+.deckArt.f-Aurites{--deck-grad: radial-gradient(80% 70% at 50% 30%, #2a3a5a 0%, #0e152a 55%, #070a14 100%)}
+.deckArt.f-Necrus{--deck-grad: radial-gradient(80% 70% at 50% 30%, #2a1a2a 0%, #0e0a14 100%)}
+.deckArt.f-Terramorph{--deck-grad: radial-gradient(80% 70% at 50% 30%, #1a2e22 0%, #0a140e 100%)}
+.deckArt.f-Pyromancer{--deck-grad: radial-gradient(80% 70% at 50% 30%, #3a1a0a 0%, #140a06 100%)}
+.deckArt.f-Ethereal{--deck-grad: radial-gradient(80% 70% at 50% 30%, #0f2a3a 0%, #070e14 100%)}
+.deckArt.f-Neutral{--deck-grad: radial-gradient(80% 70% at 50% 30%, #1e232e 0%, #0a0e14 100%)}
+.deckArt img{position:absolute !important;inset:0 !important;width:100% !important;height:100% !important;object-fit:cover !important;z-index:1 !important;mix-blend-mode:overlay !important;opacity:.72 !important}
+.deckArt .deckArtFallback{position:relative !important;z-index:2 !important;font-size:1.9rem !important;opacity:.88 !important;text-shadow:0 2px 10px rgba(0,0,0,.7) !important}
+
+/* Store offer — точные пилюли как на скринах 5/8 */
+.ofCard .ofSub{color:#8b93ab !important;font-size:.56rem !important;line-height:1.25 !important;min-height:2.2em !important}
+.ofCard .ofBuy{padding:.35rem .4rem .4rem !important}
+.btn.price{display:inline-flex !important;align-items:center !important;justify-content:center !important;gap:.28rem !important;height:26px !important;padding:0 .62rem !important;border-radius:13px !important;font-size:.68rem !important;font-weight:700 !important;letter-spacing:.02em !important;border:none !important}
+.btn.price.gold{background:linear-gradient(180deg,#ffcf6e 0%,#e8921a 55%,#a35c08 100%) !important;color:#2b1600 !important;box-shadow:0 2px 8px rgba(232,146,26,.35), inset 0 1px 0 rgba(255,255,255,.25) !important}
+.btn.price.gem{background:linear-gradient(180deg,#6aa6ff 0%,#2f5bdb 55%,#1b2f8a 100%) !important;color:#f2f7ff !important;box-shadow:0 2px 8px rgba(47,91,219,.35), inset 0 1px 0 rgba(255,255,255,.22) !important}
+.ofArt .limit{position:absolute !important;left:6px !important;bottom:4px !important;font-size:.52rem !important;color:#6b7a99 !important;background:rgba(10,10,14,.72) !important;border:1px solid #1e232e !important;border-radius:8px !important;padding:.08rem .32rem !important;z-index:2 !important}
+.ofArt .oneTime{font-size:.52rem !important;letter-spacing:.06em !important;color:#8ec0ff !important;background:linear-gradient(180deg,transparent,rgba(0,0,0,.62)) !important;padding:.18rem 0 !important}
+
+/* Home quests — точные как скрин 3 */
+.questChip{border-radius:18px !important;height:36px !important;padding:0 .45rem 0 .32rem !important}
+.questChip .qIcon{width:28px !important;height:28px !important;font-size:.68rem !important;border-width:1.5px !important;box-shadow:0 1px 4px rgba(0,0,0,.3) !important}
+.questChip .qText{font-size:.58rem !important;line-height:1.15 !important}
+.questChip .qText b{font-size:.66rem !important}
+.homeQuests{scrollbar-width:thin !important}
+.homeQuests::-webkit-scrollbar{height:6px !important}
+.homeQuests::-webkit-scrollbar-thumb{background:#1e232e !important;border-radius:3px !important}
+
+/* Profile ranked — точные пакетики и монеты */
+.rewardPack{width:26px !important;height:36px !important;border-radius:3px !important;background:linear-gradient(180deg,#2e2a3e 0%,#12101a 100%) !important;border:1px solid #2a2d3a !important;box-shadow:0 2px 6px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.06) !important}
+.rewardGold i{width:16px !important;height:16px !important;font-size:.58rem !important}
+.rankedRight{box-shadow:0 6px 14px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.06) !important}
+
+/* Global polish — скругления и тени как в Arena */
+.deckBox, .draftCard, .ofCard, .packOffer, .sleeveCard{transition:transform .16s ease, border-color .16s ease, box-shadow .16s ease !important}
+.deckBox:hover, .draftCard:hover, .ofCard:hover{transform:translateY(-1px) !important}
+
+/* Background texture subtle */
+#decksScreen, #homeScreen, #eventsScreen, .shopArena{
+  background-image:
+    radial-gradient(1px 1px at 20% 30%, rgba(255,255,255,.04) 1px, transparent 0),
+    radial-gradient(1px 1px at 60% 70%, rgba(255,255,255,.03) 1px, transparent 0),
+    linear-gradient(180deg, transparent, rgba(0,0,0,.12)) !important;
+  background-size: 280px 280px, 320px 320px, auto !important;
+}
+
+
+
+.homeHero .dragonArt img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.homeHero .dragonArt:has(img:not([style*="display: none"]))::after{display:none !important}
+
+
+
+/* ── PATCH v2.18.0: главное меню — гибрид тёмный как Decks + 5 мана-точек (WUBRG) ── */
+#menu{background:radial-gradient(900px 600px at 50% 30%, rgba(26,22,36,.55), transparent 62%),linear-gradient(180deg,#070a14,#05070d) !important}
+#menu .menuBg{filter:brightness(.32) saturate(1.05) blur(1.5px) !important; opacity:.55 !important}
+#menu .menuBg::after{background:radial-gradient(ellipse at 50% 42%,rgba(10,14,24,.12),rgba(5,6,10,.88) 84%) !important}
+.arenaMenu{background:linear-gradient(180deg,rgba(18,18,26,.94),rgba(10,11,18,.96))!important;border:1px solid rgba(255,255,255,.08)!important;box-shadow:0 22px 64px rgba(0,0,0,.68),0 0 0 1px rgba(255,255,255,.04) inset!important;backdrop-filter:blur(12px) saturate(1.05)}
+.arenaHeader{background:linear-gradient(180deg,rgba(22,22,34,.96),rgba(14,14,22,.94))!important;border:1px solid rgba(255,255,255,.09)!important}
+.arenaBrand h1{color:#ffe9b0!important}
+.arenaBrand .sub{color:#9aa3ad!important}
+.facCarouselLabel{color:#8b93ab!important}
+.arenaMain .arenaLeft{background:linear-gradient(180deg,rgba(22,22,30,.72),rgba(14,14,20,.88))!important;border:1px solid rgba(255,255,255,.06)!important}
+.arenaMain .arenaRight .menuCol{background:linear-gradient(180deg,rgba(22,22,30,.82),rgba(14,14,20,.92))!important;border:1px solid rgba(255,255,255,.08)!important}
+.arenaNav .btn{background:linear-gradient(180deg,rgba(28,28,36,.92),rgba(16,16,22,.96))!important;border-color:rgba(255,255,255,.08)!important}
+#menu .hint{background:rgba(10,12,18,.42)!important;border-color:rgba(255,255,255,.05)!important;color:#8b93ab!important}
+/* heroChip — мана-точки 56px как в Decks colorDot */
+.heroRow.facCarousel{gap:28px !important;padding:.55rem .3rem 1.35rem !important;flex-wrap:wrap !important;justify-content:center !important}
+.heroChip{width:56px !important;height:56px !important;min-width:56px !important;min-height:56px !important;flex:0 0 56px !important;border-radius:50% !important;padding:0 !important;display:flex !important;align-items:center !important;justify-content:center !important;font-size:1.65rem !important;line-height:1 !important;color:#0d0f16 !important;border:2px solid rgba(255,255,255,.16) !important;box-shadow:0 3px 10px rgba(0,0,0,.5),inset 0 1px 0 rgba(255,255,255,.18) !important;position:relative !important;overflow:visible !important;background:radial-gradient(circle at 32% 28%, #fff, var(--dotBg,#9aa3ad) 68%) !important}
+.heroChip img{display:none !important}
+.heroChip .chipIco{display:none !important}
+.heroChip .chipName{position:absolute !important;bottom:-1.35rem !important;left:50% !important;transform:translateX(-50%) !important;margin:0 !important;padding:0 !important;font-size:.62rem !important;letter-spacing:.08em !important;color:#cbb98a !important;white-space:nowrap !important;text-shadow:0 1px 3px #000 !important;font-family:'Philosopher',serif !important;display:block !important}
+.heroChip[data-f="Aurites"]{--dotBg:#f5d76e;background:radial-gradient(circle at 32% 28%, #fff8c0, #f5d76e 55%, #c9a23f 100%) !important;color:#2b1a02 !important;border-color:rgba(245,215,110,.65) !important}
+.heroChip[data-f="Necrus"]{--dotBg:#a855c9;background:radial-gradient(circle at 32% 28%, #f0d0ff, #a855c9 55%, #6a2a8a 100%) !important;color:#1a0a22 !important;border-color:rgba(168,85,201,.6) !important}
+.heroChip[data-f="Terramorph"]{--dotBg:#5aa648;background:radial-gradient(circle at 32% 28%, #d6f0c8, #5aa648 55%, #2f6a24 100%) !important;color:#0e1a0a !important;border-color:rgba(90,166,72,.6) !important}
+.heroChip[data-f="Pyromancer"]{--dotBg:#ff7a18;background:radial-gradient(circle at 32% 28%, #ffe0c0, #ff7a18 55%, #a33a08 100%) !important;color:#2a0e02 !important;border-color:rgba(255,122,24,.6) !important}
+.heroChip[data-f="Ethereal"]{--dotBg:#3fd6c8;background:radial-gradient(circle at 32% 28%, #ccf5ef, #3fd6c8 55%, #1a8a80 100%) !important;color:#061a18 !important;border-color:rgba(63,214,200,.6) !important}
+.heroChip.sel{border-color:#ffd87a !important;box-shadow:0 0 0 2px rgba(255,216,122,.85),0 0 18px rgba(255,216,122,.55),0 4px 14px rgba(0,0,0,.6) !important;transform:scale(1.08) !important}
+.heroChip:hover{transform:scale(1.06) !important;border-color:rgba(255,216,122,.55) !important}
+.heroChip.sel .chipName{color:#ffe9b0 !important}
+/* fcard — тёмная карта с мана-пилюлей сверху как в Decks */
+.arenaLeft .factionPick{grid-template-columns:repeat(5,minmax(0,1fr)) !important;gap:.75rem !important}
+.fcard{background:linear-gradient(180deg,rgba(28,28,36,.94),rgba(16,16,22,.98))!important;border:1px solid rgba(255,255,255,.07)!important;box-shadow:0 8px 18px rgba(0,0,0,.38)!important;border-radius:12px!important;position:relative!important;padding-top:1.05rem !important}
+.fcard.sel{border-color:rgba(255,216,122,.42) !important;box-shadow:0 0 0 1px rgba(255,216,122,.32),0 12px 28px rgba(0,0,0,.48)!important}
+.fcard .fava{width:58px!important;height:58px!important;flex:0 0 58px!important;margin:0 auto .45rem!important;border-width:2px!important;position:relative!important;overflow:hidden!important}
+.fcard .fava::after{content:'';position:absolute;inset:-1px;border-radius:50%;pointer-events:none;box-shadow:inset 0 1px 0 rgba(255,255,255,.18)}
+
+/* мана-пилюля сверху fcard — как deckColors */
+.fcard::before{content:'';position:absolute;top:-9px;left:50%;transform:translateX(-50%);width:36px;height:18px;border-radius:999px;background:var(--dotBg,#2a2d3a);border:1.5px solid rgba(255,255,255,.12);box-shadow:0 2px 6px rgba(0,0,0,.5);z-index:2}
+.fcard[data-f="Aurites"]{--dotBg:#f5d76e}
+.fcard[data-f="Necrus"]{--dotBg:#a855c9}
+.fcard[data-f="Terramorph"]{--dotBg:#5aa648}
+.fcard[data-f="Pyromancer"]{--dotBg:#ff7a18}
+.fcard[data-f="Ethereal"]{--dotBg:#3fd6c8}
+.fcard::after{content:attr(data-sigil);position:absolute;top:-9px;left:50%;transform:translateX(-50%);width:36px;height:18px;display:flex;align-items:center;justify-content:center;font-size:.72rem;line-height:18px;color:#0d0f16;font-weight:700;z-index:3;pointer-events:none}
+
+
+
+
+/* ── PATCH v2.18.2: форсим мана-точки — перебиваем font-size:0 и старые 88px ── */
+#menu .heroRow.facCarousel{gap:28px !important;padding:.55rem .3rem 1.55rem !important}
+#menu .heroRow.facCarousel .heroChip{width:56px !important;height:56px !important;min-width:56px !important;min-height:56px !important;flex:0 0 56px !important;border-radius:50% !important;padding:0 !important;display:flex !important;align-items:center !important;justify-content:center !important;font-size:1.65rem !important;line-height:1 !important;color:#0d0f16 !important;border:2px solid rgba(255,255,255,.16) !important;box-shadow:0 3px 10px rgba(0,0,0,.5),inset 0 1px 0 rgba(255,255,255,.18) !important;position:relative !important;overflow:visible !important;background:radial-gradient(circle at 32% 28%, #fff, var(--dotBg,#9aa3ad) 68%) !important}
+#menu .heroRow.facCarousel .heroChip img{display:none !important}
+#menu .heroRow.facCarousel .heroChip .chipIco{display:none !important}
+#menu .heroRow.facCarousel .heroChip .chipName{position:absolute !important;bottom:-1.35rem !important;left:50% !important;transform:translateX(-50%) !important;margin:0 !important;padding:0 !important;font-size:.62rem !important;letter-spacing:.08em !important;color:#cbb98a !important;white-space:nowrap !important;text-shadow:0 1px 3px #000 !important;font-family:'Philosopher',serif !important;display:block !important;font-weight:400 !important}
+#menu .heroRow.facCarousel .heroChip[data-f="Aurites"]{--dotBg:#f5d76e;background:radial-gradient(circle at 32% 28%, #fff8c0, #f5d76e 55%, #c9a23f 100%) !important;color:#2b1a02 !important;border-color:rgba(245,215,110,.65) !important}
+#menu .heroRow.facCarousel .heroChip[data-f="Necrus"]{--dotBg:#a855c9;background:radial-gradient(circle at 32% 28%, #f0d0ff, #a855c9 55%, #6a2a8a 100%) !important;color:#1a0a22 !important;border-color:rgba(168,85,201,.6) !important}
+#menu .heroRow.facCarousel .heroChip[data-f="Terramorph"]{--dotBg:#5aa648;background:radial-gradient(circle at 32% 28%, #d6f0c8, #5aa648 55%, #2f6a24 100%) !important;color:#0e1a0a !important;border-color:rgba(90,166,72,.6) !important}
+#menu .heroRow.facCarousel .heroChip[data-f="Pyromancer"]{--dotBg:#ff7a18;background:radial-gradient(circle at 32% 28%, #ffe0c0, #ff7a18 55%, #a33a08 100%) !important;color:#2a0e02 !important;border-color:rgba(255,122,24,.6) !important}
+#menu .heroRow.facCarousel .heroChip[data-f="Ethereal"]{--dotBg:#3fd6c8;background:radial-gradient(circle at 32% 28%, #ccf5ef, #3fd6c8 55%, #1a8a80 100%) !important;color:#061a18 !important;border-color:rgba(63,214,200,.6) !important}
+#menu .heroRow.facCarousel .heroChip.sel{border-color:#ffd87a !important;box-shadow:0 0 0 2px rgba(255,216,122,.85),0 0 18px rgba(255,216,122,.55),0 4px 14px rgba(0,0,0,.6) !important;transform:scale(1.08) !important}
+#menu .heroRow.facCarousel .heroChip:hover{transform:scale(1.06) !important}
+
+
+
+/* ── PATCH v2.19.0: меню как на превью — арт-карты фракций, крупные мана-шары с линией ── */
+#menu{background:radial-gradient(900px 600px at 50% 28%, rgba(18,24,42,.62), transparent 62%),radial-gradient(700px 700px at 50% 52%, rgba(10,18,36,.45), transparent 70%),linear-gradient(180deg,#050a1a 0%,#070a14 100%) !important}
+#menu .menuBg{opacity:.38 !important;filter:brightness(.42) saturate(1.08) !important}
+#menu .menuBg::after{background:radial-gradient(ellipse at 50% 44%, transparent 38%, rgba(5,8,18,.92) 78%), radial-gradient(circle at 50% 50%, transparent 42%, rgba(5,8,18,.55) 100%) !important}
+#menu .menuBg::before{content:'';position:absolute;inset:0;background:url('img/board_arena.png') center/cover no-repeat;opacity:.07;pointer-events:none;mix-blend-mode:overlay}
+.arenaMenu{background:transparent !important;border:none !important;box-shadow:none !important;backdrop-filter:none !important;padding:0 !important;gap:0 !important}
+.arenaHeader{background:linear-gradient(180deg,rgba(12,16,30,.94),rgba(8,10,20,.96))!important;border:1px solid rgba(255,216,122,.14)!important;box-shadow:0 4px 18px rgba(0,0,0,.55),inset 0 1px 0 rgba(255,255,255,.06)!important}
+#menu .heroRow.facCarousel{position:relative;gap:0 !important;padding:1.2rem 1rem 1.8rem !important;justify-content:center !important;background:transparent}
+#menu .heroRow.facCarousel::before{content:'';position:absolute;top:50%;left:10%;right:10%;height:2px;margin-top:-18px;background:linear-gradient(90deg,transparent,rgba(255,216,122,.28) 12%,rgba(255,216,122,.28) 88%,transparent);z-index:0;pointer-events:none}
+#menu .heroRow.facCarousel .heroChip{width:78px !important;height:78px !important;min-width:78px !important;min-height:78px !important;flex:0 0 78px !important;font-size:2.1rem !important;z-index:1;margin:0 14px !important;box-shadow:0 0 0 3px rgba(255,216,122,.14),0 0 18px var(--dotGlow,rgba(255,216,122,.45)),0 6px 14px rgba(0,0,0,.6) !important;border-width:3px !important}
+#menu .heroRow.facCarousel .heroChip[data-f="Aurites"]{--dotGlow:rgba(245,215,110,.65)}
+#menu .heroRow.facCarousel .heroChip[data-f="Necrus"]{--dotGlow:rgba(168,85,201,.6)}
+#menu .heroRow.facCarousel .heroChip[data-f="Terramorph"]{--dotGlow:rgba(90,166,72,.6)}
+#menu .heroRow.facCarousel .heroChip[data-f="Pyromancer"]{--dotGlow:rgba(255,122,24,.6)}
+#menu .heroRow.facCarousel .heroChip[data-f="Ethereal"]{--dotGlow:rgba(63,214,200,.6)}
+#menu .heroRow.facCarousel .heroChip .chipName{font-size:.62rem !important;bottom:-1.55rem !important;background:rgba(10,12,18,.88);border:1px solid rgba(255,216,122,.14);padding:.12rem .5rem !important;border-radius:999px !important;letter-spacing:.1em !important;text-transform:uppercase !important}
+#menu .heroRow.facCarousel .heroChip.sel .chipName{background:linear-gradient(180deg,rgba(255,216,122,.22),rgba(40,30,12,.94)) !important;border-color:rgba(255,216,122,.42) !important;color:#ffe9b0 !important}
+.arenaMain{margin-top:.6rem !important;gap:1.1rem !important}
+.arenaLeft{background:transparent !important;border:none !important;box-shadow:none !important;padding:0 !important}
+.arenaLeft .arenaSectionTitle{color:#8b93ab !important;letter-spacing:.18em !important;margin-bottom:.7rem !important}
+.arenaLeft .factionPick{grid-template-columns:repeat(5,minmax(0,1fr)) !important;gap:.7rem !important}
+.fcard{background:linear-gradient(180deg,rgba(22,26,38,.94),rgba(12,14,22,.98))!important;border:1px solid rgba(255,255,255,.09)!important;box-shadow:0 10px 28px rgba(0,0,0,.52),inset 0 1px 0 rgba(255,255,255,.06)!important;border-radius:10px!important;overflow:hidden!important;padding:0 0 .55rem !important;display:flex !important;flex-direction:column !important;position:relative !important;min-height:248px !important}
+.fcard::before{display:none !important}
+.fcard::after{display:none !important}
+.fcardArt{position:relative;height:118px;overflow:hidden;background:radial-gradient(circle at 50% 30%, #1a1e2e, #0a0d14);border-bottom:1px solid rgba(255,216,122,.12)}
+.fcardArt img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:.92}
+.fcardArtGrad{position:absolute;inset:0;background:linear-gradient(180deg,transparent 42%,rgba(8,10,18,.92) 100%);pointer-events:none}
+.fcardLvl{position:absolute;top:6px;right:6px;z-index:2;width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:.82rem;background:rgba(10,12,18,.82);border:1px solid rgba(255,216,122,.32);color:#ffe9b0;box-shadow:0 2px 6px rgba(0,0,0,.5)}
+.fcard .fname{margin:.5rem .5rem 0 !important;font-size:.82rem !important;letter-spacing:.04em !important;color:#ffe9b0 !important;text-align:center !important}
+.fcard .fpass{margin:.25rem .5rem 0 !important;font-size:.62rem !important;line-height:1.35 !important;color:#9aa3ad !important;text-align:center !important;min-height:3.2em !important;display:block !important;overflow:hidden !important}
+.fcardStats{margin:.45rem .5rem 0;display:flex;justify-content:space-between;align-items:center;padding:0 .1rem}
+.fcardStats span{width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:.72rem;font-weight:700;background:rgba(10,12,18,.88);border:1px solid rgba(255,216,122,.22);color:#ffe9b0;box-shadow:0 2px 6px rgba(0,0,0,.4)}
+.fcardStats span:first-child{background:linear-gradient(180deg,#2a2e3e,#14161e);color:#ffd87a}
+.fcardStats span:last-child{background:linear-gradient(180deg,#3a1a1a,#1a0a0a);color:#ff8f8f}
+.fcard.sel{border-color:rgba(255,216,122,.42) !important;box-shadow:0 0 0 1px rgba(255,216,122,.32),0 14px 32px rgba(0,0,0,.58),0 0 18px rgba(255,216,122,.22) !important;transform:translateY(-3px) !important}
+.fcard[data-f="Aurites"]{border-color:rgba(245,215,110,.28) !important}
+.fcard[data-f="Necrus"]{border-color:rgba(168,85,201,.28) !important}
+.fcard[data-f="Terramorph"]{border-color:rgba(90,166,72,.28) !important}
+.fcard[data-f="Pyromancer"]{border-color:rgba(255,122,24,.28) !important}
+.fcard[data-f="Ethereal"]{border-color:rgba(63,214,200,.28) !important}
+.arenaRight .menuCol{background:linear-gradient(180deg,rgba(18,20,32,.88),rgba(10,12,20,.94))!important;border:1px solid rgba(255,216,122,.14)!important;box-shadow:0 12px 28px rgba(0,0,0,.52)!important}
+.arenaRight label{color:#cbb98a !important}
+#menu .hint{margin-top:.6rem !important}
+@media(max-width:1100px){.arenaLeft .factionPick{grid-template-columns:repeat(5,minmax(0,1fr)) !important} #menu .heroRow.facCarousel .heroChip{width:68px !important;height:68px !important;flex:0 0 68px !important;min-width:68px !important;min-height:68px !important;margin:0 8px !important} .fcard{min-height:232px !important} .fcardArt{height:108px}}
+@media(max-width:860px){.arenaMain{grid-template-columns:1fr !important} .arenaLeft .factionPick{grid-template-columns:repeat(3,minmax(0,1fr)) !important} #menu .heroRow.facCarousel::before{left:5%;right:5%}}
+
+
+
+/* ── PATCH v2.20.0: фоновые слои с поддержкой IMG/VIDEO drop-in ── */
+.menuBg img#menuBgImg.show{opacity:1 !important}
+.menuBg video#menuBgVideo.show{opacity:.92 !important;display:block !important}
+#backdrop img#battleBgImg.show{opacity:.92 !important}
+#backdrop video#battleBgVideo.show{opacity:.92 !important;display:block !important}
+#backdrop .bgArt{transition:opacity .6s}
+#backdrop.hasCustomBg .bgArt{opacity:0 !important}
+.menuBg.hasCustomBg::after{opacity:.55 !important}
+
+
+
+/* ── PATCH v2.21.0: админка ── */
+.adminPanel{width:min(1100px,96vw);max-height:92vh;overflow:hidden;background:linear-gradient(180deg,rgba(18,18,28,.96),rgba(10,10,16,.98)) !important;border:1px solid rgba(255,216,122,.18) !important}
+.admTab{padding:.38rem .75rem;font-size:.74rem;border-radius:8px}
+.admTab.sel{border-color:var(--gold) !important;color:#ffe9b0 !important;box-shadow:0 0 12px rgba(255,216,122,.28) !important;background:linear-gradient(180deg,rgba(48,36,20,.92),rgba(22,16,10,.96)) !important}
+#adminBody{scrollbar-width:thin}
+.admSection{padding:.5rem 0}
+.admGrid{display:grid;grid-template-columns:1fr 1fr;gap:.6rem}
+@media(max-width:860px){.admGrid{grid-template-columns:1fr}}
+.admCard{background:linear-gradient(180deg,rgba(28,28,36,.92),rgba(16,16,22,.96));border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:.7rem .8rem;box-shadow:0 6px 16px rgba(0,0,0,.28)}
+.admCard h4{font-family:Philosopher,serif;color:#ffe9b0;font-size:.86rem;margin:0 0 .4rem;letter-spacing:.04em}
+.admField{display:flex;align-items:center;gap:.5rem;margin:.35rem 0}
+.admField label{flex:1;font-size:.72rem;color:#cbb98a;min-width:90px}
+.admField input, .admField select{flex:1;background:#14161f;border:1px solid var(--line);color:var(--text);padding:.38rem .45rem;border-radius:6px;font-family:inherit;font-size:.78rem;min-width:0}
+.admField input:focus, .admField select:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 2px rgba(255,216,122,.14)}
+.admTable{width:100%;border-collapse:collapse;font-size:.74rem}
+.admTable th{font-family:Philosopher,serif;color:#ffe9b0;font-weight:400;letter-spacing:.06em;font-size:.68rem;text-transform:uppercase;padding:.4rem .45rem;border-bottom:1px solid rgba(255,216,122,.18);text-align:left;background:rgba(255,255,255,.03)}
+.admTable td{padding:.38rem .45rem;border-bottom:1px solid rgba(255,255,255,.04);color:#e6d6ac;vertical-align:middle}
+.admTable tr:hover td{background:rgba(255,255,255,.03)}
+.admBadge{display:inline-flex;align-items:center;padding:.12rem .4rem;border-radius:999px;font-size:.62rem;border:1px solid rgba(255,216,122,.22);background:rgba(255,216,122,.08);color:#ffe9b0}
+.admBadge.off{border-color:rgba(120,128,150,.22);background:rgba(120,128,150,.08);color:#9aa3ad}
+.admActions{display:flex;gap:.25rem;flex-wrap:wrap}
+.admActions .btn{padding:.2rem .45rem;font-size:.66rem}
+#adminModal .packPanel, #adminLogin .packPanel{animation:panelSpring .45s cubic-bezier(.22,1.4,.36,1) both}
+#adminLogin{position:fixed;inset:0;z-index:330;display:flex;align-items:center;justify-content:center;background:rgba(6,4,1,.74);backdrop-filter:blur(3px)}
+#adminLogin.hidden{display:none !important}
+#adminModal{position:fixed;inset:0;z-index:325;display:flex;align-items:center;justify-content:center;background:rgba(6,4,1,.74);backdrop-filter:blur(3px);overflow:auto;padding:1rem}
+#adminModal.hidden{display:none !important}
+
+
+/* ── PATCH v2.23.0: MTG-анимация вскрытия бустера + арт пачек и рубашек (art_raw/cosm) ── */
+.packStage{min-height:320px}
+.packSealedInner{width:186px;height:262px;animation:sealedBob 3.4s ease-in-out infinite}
+@keyframes sealedBob{0%,100%{translate:0 0}50%{translate:0 -7px}}
+.packSealedInner .packSealedArt{transition:opacity .18s}
+.packSealedInner .packSealedArt.gone{opacity:0}
+/* разрыв пачки пополам: halves с тем же артом (--pack-art), клип сверх/снизу */
+.packTearHalf{display:none;position:absolute;inset:0;z-index:3;background-image:var(--pack-art);background-size:cover;background-position:center;background-repeat:no-repeat;pointer-events:none;border-radius:inherit}
+.packTearHalf.top{clip-path:inset(0 0 49.2% 0)}
+.packTearHalf.bot{clip-path:inset(50.8% 0 0 0)}
+.packSealedInner.hasArt.cracking{overflow:visible}
+.packSealedInner.hasArt.cracking .packSealedArtImg,
+.packSealedInner.hasArt.cracking .packSealedArt,
+.packSealedInner.hasArt.cracking .packSealedShine,
+.packSealedInner.hasArt.cracking .packSealedGlow{opacity:0}
+.packSealedInner.hasArt.cracking .packTearHalf{display:block}
+.packSealedInner.hasArt.cracking .packTearHalf.top{animation:tearTop .54s cubic-bezier(.3,.05,.4,1) forwards}
+.packSealedInner.hasArt.cracking .packTearHalf.bot{animation:tearBot .54s cubic-bezier(.3,.05,.4,1) forwards}
+@keyframes tearTop{0%{transform:translate(0,0) rotate(0)}26%{transform:translate(-5px,-12px) rotate(-3.5deg)}100%{transform:translate(-34px,-172px) rotate(-17deg);opacity:0}}
+@keyframes tearBot{0%{transform:translate(0,0) rotate(0)}26%{transform:translate(5px,12px) rotate(3.5deg)}100%{transform:translate(34px,172px) rotate(17deg);opacity:0}}
+/* ударные волны от разрыва (направляются из revealPack на packStage) */
+.packShockRing{position:absolute;left:50%;top:42%;width:120px;height:120px;margin:-60px 0 0 -60px;border-radius:50%;border:2.5px solid rgba(255,222,130,.9);opacity:0;pointer-events:none;z-index:5}
+.packShockRing.go{animation:shockRing .68s cubic-bezier(.1,.6,.2,1) forwards}
+.packShockRing.r2.go{border-color:rgba(158,188,255,.75);animation-delay:.14s}
+@keyframes shockRing{0%{opacity:.95;transform:scale(.22);border-width:3px}100%{opacity:0;transform:scale(2.7);border-width:1px}}
+/* рубашка слота: пользовательский арт (art_raw/cosm/backs) поверх процедурного сигила */
+.packSlot .back .backImg{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:0;transition:opacity .3s ease;z-index:1;border-radius:9px}
+.packSlot .back .backImg.on{opacity:1}
+.packSlot .back .backSigil,.packSlot .back .backLabel{position:relative;z-index:0}
+/* интрига до переворота: свечение редких рубашек дышит */
+.packSlot:not(.flip).r-rare{box-shadow:0 0 14px rgba(79,159,224,.34)}
+.packSlot:not(.flip).r-epic{box-shadow:0 0 16px rgba(176,108,240,.42);animation:auraBreath 1.7s ease-in-out infinite}
+.packSlot:not(.flip).r-legendary{box-shadow:0 0 20px rgba(245,166,35,.5),0 0 36px rgba(245,166,35,.22);animation:auraBreath 1.3s ease-in-out infinite}
+@keyframes auraBreath{0%,100%{filter:brightness(1)}50%{filter:brightness(1.13) saturate(1.08)}}
+/* вылет карт из центра — от пачки (JS задаёт --dx/--dy; дефолт = прежняя траектория) */
+.packSlot.dealIn{animation-name:packDealInFlight}
+@keyframes packDealInFlight{
+  0%{opacity:0;transform:translate(var(--dx,0px),var(--dy,42px)) scale(.55) rotate(-2.2deg)}
+  58%{opacity:1;transform:translate(calc(var(--dx,0px) * .14),-8px) scale(1.045) rotate(.6deg)}
+  100%{opacity:1;transform:translate(0,0) scale(1) rotate(0)}
+}
+/* щадящий режим и системное «уменьшить движение» */
+body.fxLite .packSealedInner,body.fxLite .packSealedShine,body.fxLite .packSealedHint,
+body.fxLite .packSlot:not(.flip).r-epic,body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
+@media (prefers-reduced-motion: reduce){
+  .packSealedInner,.packSealedShine,.packSealedHint,.packShockRing,
+  .packSlot:not(.flip).r-epic,.packSlot:not(.flip).r-legendary{animation:none !important}
+  .packSlot.dealIn{animation-duration:.12s !important}
+}
+/* v2.23 hotfix: fill forwards на deal-in навсегда «запирал» transform слота — .flip и hover не работали.
+   Решение: базовая прозимость + fill backwards (во время задержки/анимации держит кадр0%, после — слот свободен) */
+.packSlot{opacity:1}
+.packSlot.dealIn{animation-fill-mode:backwards}
+/* v2.23 hotfix2: арт пачки — классом, не инлайном (иначе в фазе разрыва картинка не гаснет) */
+.packSealedArtImg{opacity:0;transition:opacity .32s ease}
+.packSealedArtImg.artOn{opacity:1}
+.packSealedInner.hasArt.cracking .packSealedArtImg,
+.packSealedInner.hasArt.cracking .packSealedArtImg.artOn{opacity:0;transition:opacity .1s ease}
+/* v2.23 hotfix3: auraBreath шортхендом убивал deal-in на слотах epic/legendary — флип «запаздывал».
+   Дыхание перенесено на .back, у слота анимация гасится */
+.packSlot:not(.flip).r-epic{animation:none}
+.packSlot:not(.flip).r-epic .back{animation:auraBreath1.7s ease-in-out infinite}
+.packSlot:not(.flip).r-legendary{animation:none}
+.packSlot:not(.flip).r-legendary .back{animation:auraBreath1.3s ease-in-out infinite}
+body.fxLite .packSlot:not(.flip).r-epic .back,
+body.fxLite .packSlot:not(.flip).r-legendary .back,
+body.fxLite .packSlot:not(.flip).r-epic,
+body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
+@media (prefers-reduced-motion: reduce){
+  .packSlot:not(.flip).r-epic .back,.packSlot:not(.flip).r-legendary .back{animation:none !important}
+}
+/* v2.23 hotfix4: filter на .flip сплющивал preserve-3d — epic/legendary оставались рубашкой визуально */
+.packSlot.r-epic.flip{filter:none;box-shadow:0 0 16px rgba(176,108,240,.55),0 10px 26px rgba(0,0,0,.5)}
+.packSlot.r-legendary.flip{filter:none;box-shadow:0 0 20px rgba(245,166,35,.6),0 10px 28px rgba(0,0,0,.5)}
+/* v2.23 hotfix5: .cracking вешается на #packSealed (внешний), hasArt — на inner. Правим селекторы разрыва */
+.packSealed.cracking .packSealedInner.hasArt{overflow:visible}
+.packSealed.cracking .packSealedInner.hasArt .packSealedArtImg,
+.packSealed.cracking .packSealedInner.hasArt .packSealedArtImg.artOn,
+.packSealed.cracking .packSealedInner.hasArt .packSealedArt,
+.packSealed.cracking .packSealedInner.hasArt .packSealedShine,
+.packSealed.cracking .packSealedInner.hasArt .packSealedGlow{opacity:0;transition:opacity .1s ease}
+.packSealed.cracking .packSealedInner.hasArt .packTearHalf{display:block}
+.packSealed.cracking .packSealedInner.hasArt .packTearHalf.top{animation:tearTop .54s cubic-bezier(.3,.05,.4,1) forwards}
+.packSealed.cracking .packSealedInner.hasArt .packTearHalf.bot{animation:tearBot .54s cubic-bezier(.3,.05,.4,1) forwards}
+
+/* ── PATCH v2.24.0: главный интерфейс — юзабилити, игровая корректность, адаптив ── */
+/* декоративное кольцо не должно сыпать горизонтальный скролл */
+#menu .ecCircle{overflow:hidden}
+/* ≤1180 (стек): панель «Активный вызов» + В БОЙ — сразу после карусели, CTA не уходит за фолд */
+@media(max-width:1180px){#menu .ecChallenge{order:-1}}
+/* нижняя навигация всегда под рукой; на десктопе и так в кадре, на мобиле — прилипает */
+#menu .ecBottomNav{
+  position:sticky;bottom:0;z-index:60;
+  background:linear-gradient(180deg,rgba(9,10,16,.94),rgba(6,6,10,.98));
+  -webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);
+  border-radius:10px 10px 0 0;box-shadow:0 -10px 26px rgba(0,0,0,.5);
+  padding-bottom:env(safe-area-inset-bottom,0px);
+}
+/* ≤760: компактные карточки фракций (арт-шапка16:10, без длинного пассива — он в модалке)
+   + двухколоночные поля вызова: CTA «В БОЙ» поднимается выше липкой навигации */
+@media(max-width:760px){
+  #menu .ecHub .fcardArt{aspect-ratio:16/10;max-height:112px}
+  #menu .ecHub .fcardBody{padding:.4rem .5rem .45rem!important}
+  #menu .ecHub .fcardBody .fpass{display:none}
+  #menu .ecChallenge{grid-template-columns:1fr 1fr}
+}
+/* шапка без наложений: логотип в потоке уже с планшета (на768 абсолютный центр перекрывал кошелёк) */
+@media(max-width:820px){
+  .ecLogoPlate{position:static;transform:none;padding:.15rem .7rem .2rem}
+  .ecLogoPlate::before,.ecLogoPlate::after{display:none}
+}
+@media(max-width:560px){
+  #ecProfile{display:none} /* профиль дублируется вкладкой «Профиль» в разделах */
+  .ecLogoTitle{font-size:.95rem;letter-spacing:.1em}
+  /* компактный вызов: без демо-прогресса, мельче аватар — В БОЙ свободен от навигации */
+  #menu .ecProgress{display:none}
+  #menu .ecOppAva{width:44px;height:44px;flex:0 0 44px}
+  #menu .ecChallenge{gap:.4rem!important;padding:.7rem .65rem .75rem!important}
+  #menu .ecChTitle{padding-bottom:.3rem}
+}
+/* тап-цели ≥37px (десктоп-мышь не страдает: было29-35) */
+.ecBurger{width:44px;height:40px}
+.ecDrawer .topTab{min-height:37px}
+.ecDrawerGrid .btn{min-height:37px}
+#menu .ecField select{min-height:38px;padding-top:.5rem;padding-bottom:.5rem}
+.ecMiniBtn{min-width:38px;min-height:38px}
+/* админка — служебный вход, не игровой раздел: приглушаем визуально */
+#btnAdminMenu{grid-column:1/-1;opacity:.6;background:transparent!important;border-style:dashed!important;font-size:.63rem!important}
+#btnAdminMenu:hover{opacity:1}
+/* видимая подсказка гейта колоды под «В БОЙ» */
+.ecPlayHint{min-height:1.05rem;font-size:.67rem;letter-spacing:.05em;color:#f0c9a0;text-align:center;line-height:1.35}
+.ecPlayHint:empty,.ecPlayHint[hidden]{display:none}
+/* «О прототипе» — свёрнуто, не мешает хабу */
+#menu details.hint{overflow:hidden}
+#menu details.hint>summary{cursor:pointer;list-style:none;text-align:center;font-size:.66rem;letter-spacing:.14em;text-transform:uppercase;color:#8f8678;padding:.05rem .1rem}
+#menu details.hint>summary::-webkit-details-marker{display:none}
+#menu details.hint>summary:hover{color:#d8c193}
+#menu details.hint[open]>summary{border-bottom:1px solid rgba(255,255,255,.06);padding-bottom:.45rem;margin-bottom:.4rem}
+#menu details.hint .hintBody{padding:0 .1rem .1rem}
+
+/* ═══ PATCH v2.25.0: Настройки · Профиль · Админка и экраны — MTG/Hearthstone-стиль, простор, адаптив ═══ */
+/* ——— Общие акценты секций ——— */
+.shopH{position:relative;padding-left:1.05rem;font-size:.92rem;letter-spacing:.05em;margin:1.15rem 0 .5rem}
+.shopH::before{content:'◆';position:absolute;left:0;top:.22em;font-size:.66em;color:#d8b45a;text-shadow:0 0 8px rgba(216,180,90,.55)}
+
+/* ——— Настройки: широкая центрированная панель с секциями ——— */
+#settingsScrim{position:fixed;inset:0;z-index:338;background:rgba(5,4,2,.55);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px)}
+#settingsScrim.hidden{display:none!important}
+#settingsPanel{
+  position:fixed;top:50%;left:50%;right:auto;transform:translate(-50%,-50%);
+  width:min(880px,94vw);max-height:min(86vh,780px);overflow:auto;z-index:340;
+  padding:1.2rem 1.35rem 1.05rem;border-radius:14px;
+  background:linear-gradient(165deg,rgba(26,24,36,.97),rgba(12,11,18,.99));
+  border:1px solid rgba(255,216,122,.3);
+  box-shadow:0 34px 90px rgba(0,0,0,.65),inset 0 1px 0 rgba(255,255,255,.05);
+}
+#settingsPanel h3{margin:0;font-family:Philosopher,serif;color:#ffe9b0;letter-spacing:.14em;font-size:1.05rem;text-transform:uppercase;font-weight:400}
+.setHead{display:flex;align-items:center;gap:.8rem;padding-bottom:.7rem;border-bottom:1px solid rgba(255,216,122,.18);margin-bottom:.9rem}
+.setHead h3{flex:1}
+.setClose{min-width:40px!important;min-height:40px!important;padding:0!important;font-size:.9rem!important}
+.setGroups{display:grid;grid-template-columns:1fr 1fr;gap:.9rem;align-items:start}
+.setGroup{background:linear-gradient(180deg,rgba(255,255,255,.045),rgba(255,255,255,.015));border:1px solid rgba(255,216,122,.16);border-radius:11px;padding:.7rem .9rem .8rem;box-shadow:inset 0 1px 0 rgba(255,255,255,.04)}
+.setGroupTitle{font-family:Philosopher,serif;color:#ffe1a0;font-size:.82rem;letter-spacing:.12em;text-transform:uppercase;margin-bottom:.3rem;padding-bottom:.45rem;border-bottom:1px solid rgba(255,255,255,.07)}
+#settingsPanel .setRow{display:flex;gap:.75rem;align-items:center;min-height:48px;padding:.32rem 0;border-bottom:1px dashed rgba(255,255,255,.06);margin:0}
+#settingsPanel .setGroup .setRow:last-child{border-bottom:none}
+#settingsPanel .setRow label{display:flex;flex-direction:column;gap:.12rem;flex:1;min-width:0;color:#e8e2d2;font-size:.8rem;line-height:1.35;cursor:pointer}
+#settingsPanel .setRow .setHint,#settingsPanel .setAccTxt .setHint{display:block;font-size:.66rem;color:#8f8678;line-height:1.4;margin-top:.08rem;font-weight:400}
+#settingsPanel input[type=checkbox]{width:20px;height:20px;accent-color:#d8b45a;flex:0 0 auto;cursor:pointer}
+#settingsPanel select{background:#14161f;border:1px solid var(--line);color:var(--text);border-radius:7px;padding:.42rem .5rem;font-family:inherit;font-size:.78rem;min-height:38px;min-width:118px;max-width:46%;cursor:pointer}
+#settingsPanel select:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 2px rgba(255,216,122,.14)}
+#settingsPanel input[type=range]{flex:1;min-width:100px;max-width:170px;accent-color:#d8b45a;height:30px;cursor:pointer}
+#settingsPanel .setRowAcc{border-bottom:none;flex-wrap:wrap}
+.setAccTxt{flex:1;min-width:140px;font-size:.8rem;color:#e8e2d2;line-height:1.35}
+.setLogout{min-height:40px!important;padding:.45rem .95rem!important;font-size:.78rem!important}
+#settingsPanel .setFoot{font-size:.66rem;color:#8f8678;border-top:1px solid var(--line);padding-top:.65rem;margin-top:.35rem;line-height:1.65}
+#settingsPanel kbd{background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.14);border-bottom-width:2px;border-radius:4px;padding:.02rem .3rem;font-family:inherit;font-size:.85em;color:#d8cfba}
+@media(max-width:720px){
+  #settingsPanel{width:min(560px,96vw);max-height:88vh;padding:1rem 1rem .9rem}
+  .setGroups{grid-template-columns:1fr}
+  #settingsPanel select{min-height:40px;max-width:50%}
+}
+@media(max-width:430px){
+  #settingsPanel .setRow{flex-wrap:wrap}
+  #settingsPanel select{max-width:100%;width:100%}
+  #settingsPanel input[type=range]{max-width:none;width:100%}
+}
+
+/* ——— Профиль: просторная карточка игрока ——— */
+#profileModal .packPanel{width:min(900px,95vw);align-items:stretch;text-align:left;padding:1.3rem 1.4rem 1.25rem;border:1px solid rgba(255,216,122,.28);border-radius:14px;background:linear-gradient(165deg,rgba(26,24,36,.97),rgba(12,11,18,.99))!important;box-shadow:0 30px 80px rgba(0,0,0,.6)}
+.prfHead{display:flex;gap:1.15rem;align-items:center;width:100%}
+.prfHead .avaBig{width:86px;height:86px}
+#nickInput{min-height:40px;padding:.35rem .7rem;border-radius:8px;background:#14161f;border:1px solid var(--line);color:var(--text);font-family:Philosopher,serif;font-size:1rem;letter-spacing:.04em;min-width:170px}
+#nickInput:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 2px rgba(255,216,122,.16)}
+.prfHead .ptabs{margin:.5rem 0 .3rem}
+.ptabs{display:flex;gap:.5rem;margin:.7rem 0 .55rem;flex-wrap:wrap}
+.ptab{min-height:38px;padding:.4rem 1.05rem;font-size:.78rem;border-radius:999px;letter-spacing:.04em}
+#profileModal .jl{background:rgba(255,255,255,.035);border:1px solid rgba(255,255,255,.07);border-radius:9px;padding:.62rem .8rem;margin:.42rem 0;font-size:.78rem;line-height:1.55;color:#e6d6ac}
+#profileModal .jl.you{border-color:rgba(255,216,122,.32);background:rgba(255,216,122,.05)}
+#profileModal .setRow{min-height:46px;align-items:center;gap:.7rem;padding:.25rem 0;border-bottom:1px dashed rgba(255,255,255,.055)}
+#profileModal .setRow:last-of-type{border-bottom:none}
+@media(max-width:640px){
+  #profileModal .packPanel{padding:1rem .9rem}
+  .prfHead{flex-direction:column;text-align:center;gap:.75rem}
+  .prfHead .avaBig{margin:0 auto}
+  #nickInput{min-width:0;width:100%}
+  .ptabs{flex-wrap:nowrap;overflow-x:auto;padding-bottom:.3rem;scrollbar-width:thin}
+  .ptabs .btn{flex:0 0 auto;min-height:40px}
+}
+
+/* ——— Админка: дашборд ——— */
+.adminPanel{
+  width:min(1140px,96vw);max-height:92vh;overflow:hidden;
+  align-items:stretch!important;text-align:left;gap:.65rem;
+  padding:1.05rem 1.2rem .95rem;border-radius:14px;
+  background:linear-gradient(165deg,rgba(24,22,34,.97),rgba(10,10,16,.99))!important;
+  border:1px solid rgba(255,216,122,.3)!important;
+  box-shadow:0 34px 90px rgba(0,0,0,.65),inset 0 1px 0 rgba(255,255,255,.05);
+}
+.admHead{display:flex;align-items:center;gap:.8rem;padding-bottom:.65rem;border-bottom:1px solid rgba(255,216,122,.16)}
+.admCrest{flex:0 0 auto;width:38px;height:42px;display:block;color:#ffd87a;filter:drop-shadow(0 0 10px rgba(255,216,122,.35))}
+.admCrest svg{width:100%;height:100%;display:block}
+.admCrestLg{width:52px;height:58px;margin:0 auto}
+.admHeadTxt{flex:1;min-width:0}
+.admHeadTxt h2{margin:0;font-family:Philosopher,serif;color:#ffe9b0;letter-spacing:.1em;font-size:1.12rem;font-weight:400}
+.admHeadSub{font-size:.64rem;color:#8b93ab;letter-spacing:.05em;margin-top:.2rem}
+.admHeadSub code,.admFootNote code,.admLoginNote code{background:rgba(0,0,0,.35);padding:.05rem .3rem;border-radius:4px;font-size:.92em}
+.admVer{font-size:.62rem;color:#8ff0c8;background:rgba(80,220,160,.08);border:1px solid rgba(80,220,160,.28);padding:.2rem .55rem;border-radius:999px;letter-spacing:.06em;white-space:nowrap}
+.admX{min-width:40px!important;min-height:40px!important;padding:0!important;font-size:.88rem!important}
+.admTabs{display:flex;gap:.5rem;flex-wrap:wrap;margin:.15rem 0 .25rem}
+.admTab{display:inline-flex;align-items:center;gap:.42rem;min-height:40px;padding:.42rem .95rem!important;font-size:.78rem;border-radius:10px;letter-spacing:.03em}
+.admTab .admIco{font-size:.92rem;line-height:1}
+.admTab.sel{border-color:var(--gold)!important;color:#ffe9b0!important;box-shadow:0 0 14px rgba(255,216,122,.3)!important;background:linear-gradient(180deg,rgba(48,36,20,.92),rgba(22,16,10,.96))!important}
+#adminBody{flex:1;overflow:auto;padding:.4rem .15rem .55rem;min-height:280px;scrollbar-width:thin}
+.admKpi{display:grid;grid-template-columns:repeat(4,1fr);gap:.6rem;margin:.35rem 0 .75rem}
+.admKpiChip{display:flex;flex-direction:column;gap:.14rem;padding:.62rem .8rem;border-radius:10px;background:linear-gradient(180deg,rgba(255,255,255,.05),rgba(255,255,255,.02));border:1px solid rgba(255,216,122,.16);box-shadow:inset 0 1px 0 rgba(255,255,255,.05)}
+.admKpiChip .k{font-size:.6rem;letter-spacing:.14em;text-transform:uppercase;color:#8f8678}
+.admKpiChip .v{font-family:Philosopher,serif;font-size:1.18rem;color:#ffe9b0;letter-spacing:.03em}
+.admGrid{display:grid;grid-template-columns:1fr 1fr;gap:.95rem}
+@media(max-width:920px){.admGrid{grid-template-columns:1fr}}
+.admCard{padding:.95rem 1.05rem;border-radius:12px;border:1px solid rgba(255,216,122,.14);background:linear-gradient(180deg,rgba(30,29,40,.94),rgba(16,16,22,.97));box-shadow:0 8px 20px rgba(0,0,0,.32)}
+.admCard h4{font-size:.95rem;letter-spacing:.06em;margin:0 0 .6rem;padding-bottom:.48rem;border-bottom:1px solid rgba(255,216,122,.14)}
+.admField{margin:.55rem 0;gap:.65rem}
+.admField label{font-size:.76rem}
+.admField input,.admField select{min-height:38px;padding:.42rem .55rem;border-radius:7px;font-size:.8rem}
+.admTable{min-width:560px}
+.admTable th{font-size:.7rem;padding:.52rem .55rem}
+.admTable td{padding:.52rem .55rem}
+.admActions{gap:.3rem}
+.admActions .btn{min-height:34px;padding:.3rem .6rem;font-size:.7rem}
+.admSection{padding:.6rem 0}
+.admFoot{display:flex;gap:.6rem;justify-content:space-between;align-items:center;padding-top:.7rem;border-top:1px solid rgba(255,255,255,.08);flex-wrap:wrap;margin-top:.1rem}
+.admFootNote{font-size:.64rem;color:#8b93ab;max-width:56ch;line-height:1.5}
+.admFootBtns{display:flex;gap:.55rem}
+.admFootBtns .btn{min-height:40px!important;padding:.42rem 1.05rem!important;font-size:.82rem!important}
+@media(max-width:760px){
+  .admKpi{grid-template-columns:repeat(2,1fr)}
+  .admTabs{flex-wrap:nowrap;overflow-x:auto;padding-bottom:.3rem;scrollbar-width:thin}
+  .admTab{flex:0 0 auto;min-height:42px}
+  .adminPanel{width:97vw;max-height:94vh;padding:.9rem .8rem .85rem}
+  .admHeadSub{display:none}
+  .admFootNote{max-width:none}
+}
+/* вход в админку */
+.admLoginPanel{width:min(430px,92vw);text-align:center;padding:1.7rem 1.5rem 1.3rem!important;gap:.55rem!important;border:1px solid rgba(255,216,122,.3)!important;background:linear-gradient(165deg,rgba(26,24,36,.97),rgba(12,11,18,.99))!important}
+.admLoginPanel h3{margin:.35rem 0 0;font-family:Philosopher,serif;color:#ffe9b0;letter-spacing:.1em;font-size:1.08rem;font-weight:400}
+.admLoginNote{font-size:.74rem;color:#cbb98a;margin:.1rem 0 .75rem;line-height:1.55}
+.admLoginNote b{color:#ffe9b0}
+.admPassInp{width:100%;background:#14161f;border:1px solid var(--line);color:var(--text);padding:.7rem;border-radius:9px;font-family:inherit;font-size:.95rem;text-align:center;min-height:46px;letter-spacing:.25em}
+.admPassInp:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 2px rgba(255,216,122,.16)}
+.admLoginBtns{display:flex;gap:.6rem;justify-content:center;margin-top:.9rem}
+.admLoginBtns .btn{min-height:42px!important;padding:.5rem 1.35rem!important;font-size:.88rem!important}
+.admLoginErr{font-size:.72rem;color:#ff8f8f;min-height:1.1em;margin-top:.5rem}
+@media(max-width:420px){.admLoginBtns{flex-direction:column}.admLoginBtns .btn{width:100%}}
+
+/* ——— Прочие экраны: адаптив и простор ——— */
+#eventsGrid{grid-template-columns:repeat(3,1fr)!important}
+@media(max-width:900px){#eventsGrid{grid-template-columns:repeat(2,1fr)!important}}
+@media(max-width:560px){#eventsGrid{grid-template-columns:1fr!important}}
+#bpModal .packPanel{width:min(880px,95vw);max-height:88vh;overflow:auto;margin:auto;align-items:stretch}
+
+/* ═══ PATCH v2.26.0: Магазин · Кампания · Обучение · Журнал · Фракция · Колоды — единый MTG/HS-стиль ═══ */
+/* ——— хромировка модалок: индиго+золото как в Профиле/Админке/Настройках ——— */
+#campaignModal .packPanel,#tutModal .packPanel,#journalModal .packPanel,#replayModal .packPanel,#factionModal .packPanel{
+  border:1px solid rgba(255,216,122,.3)!important;border-radius:14px;
+  background:linear-gradient(165deg,rgba(26,24,36,.97),rgba(12,11,18,.99))!important;
+  box-shadow:0 30px 80px rgba(0,0,0,.6);padding:1.3rem 1.4rem 1.2rem;gap:.9rem}
+.shopArena{border:1px solid rgba(255,216,122,.3)!important;border-radius:14px;box-shadow:0 30px 80px rgba(0,0,0,.6)}
+.bpArena{border:1px solid rgba(255,216,122,.3)!important;border-radius:14px;box-shadow:0 30px 80px rgba(0,0,0,.6)}
+/* заголовок модалки с ромбом */
+.ecModalH{position:relative;margin:0 0 .35rem!important;padding-left:1.2rem!important;
+  font-family:Philosopher,serif!important;color:#ffe9b0!important;letter-spacing:.1em!important;
+  font-size:1.12rem!important;font-weight:400!important}
+.ecModalH::before{content:'◆';position:absolute;left:0;top:.3em;font-size:.6em;color:#d8b45a;text-shadow:0 0 8px rgba(216,180,90,.55)}
+.ecModalFoot{display:flex;gap:.6rem;justify-content:center;flex-wrap:wrap;margin-top:.75rem}
+.ecModalFoot .btn{min-height:40px;padding:.45rem 1.2rem;font-size:.82rem}
+/* ——— Кампания: простор, тап-цели ——— */
+.campRegion{padding:.65rem 0}
+.campRegHead{padding:.25rem .55rem;margin-bottom:.45rem}
+.campNode{min-height:38px!important;padding:.42rem .9rem!important;font-size:.78rem!important;border-radius:8px}
+.campGo{min-height:40px!important;padding:.5rem 1.1rem!important}
+#campBody .jl{margin:.35rem 0}
+/* ——— Обучение: строки уроков и выбор награды ——— */
+#tutBody .setRow{min-height:54px;align-items:center;gap:.75rem;padding:.4rem 0;border-bottom:1px dashed rgba(255,255,255,.06);margin:0!important}
+#tutBody .setRow:last-of-type{border-bottom:none}
+#tutBody .setHint{display:block;font-size:.66rem;color:#8f8678;margin-top:.15rem;line-height:1.45}
+#tutBody .tutStart,#tutBody .tutPick{min-height:40px!important;padding:.45rem 1.05rem!important;font-size:.8rem!important}
+/* ——— Журнал/реплей: читаемые строки ——— */
+#journalModal .jl,#replayModal .jl{padding:.45rem .65rem;border-radius:7px;line-height:1.5}
+/* ——— Магазин: вкладки-пилюли, крупный заголовок ——— */
+.shTab{min-height:40px!important;padding:.5rem 1.1rem!important;font-size:.78rem!important;border-radius:999px!important}
+.shTab.sel{border-color:var(--gold)!important;color:#ffe9b0!important;box-shadow:0 0 12px rgba(255,216,122,.3)!important;background:linear-gradient(180deg,rgba(48,36,20,.92),rgba(22,16,10,.96))!important}
+.shTabs{margin-top:1rem;padding-top:.75rem;gap:.55rem}
+.shTop{padding-bottom:.7rem}
+/* ——— Фракция: воздух в механиках/советах ——— */
+#factionModal .facMech,#factionModal #facTips{margin:.5rem 0}
+#factionModal #facTips{padding-left:1.2rem;line-height:1.6}
+#factionModal .facExLabel{margin-top:.9rem}
+#factionModal #btnFactionPlay,#factionModal #btnFactionClose2{min-height:42px;padding:.5rem 1.3rem}
+/* ——— Колоды: перенос фильтров, тап-цели, мобильный футер ——— */
+.decksFilters{flex-wrap:wrap;gap:.5rem;row-gap:.5rem}
+.decksFilters select,.decksFilters input{min-height:40px!important;border-radius:8px;padding:.4rem .55rem!important;font-size:.78rem}
+.decksFilters input{min-width:150px;flex:1}
+.decksFooter .btn{min-height:40px!important;padding:.5rem .9rem!important}
+.deckAddBox{min-width:170px}
+@media(max-width:760px){
+  #decksScreen .decksHeader{padding:.6rem .7rem;gap:.5rem}
+  .decksHeader h2{font-size:1.02rem}
+  .decksFilters{padding:.5rem .7rem}
+  .deckGridWrap{padding:10px 8px 104px}
+  .decksFooter{padding:.55rem .7rem calc(.65rem + env(safe-area-inset-bottom,0px));gap:.5rem}
+  .decksFooterRight{width:100%;justify-content:space-between}
+  .decksFooterRight #decksSelInfo{max-width:56vw}
+  .campNode{min-height:40px!important}
+}
+@media(max-width:430px){
+  .shTitle{font-size:1.15rem}
+  .ecModalH{font-size:1rem!important}
+  #campaignModal .packPanel,#tutModal .packPanel,#journalModal .packPanel,#replayModal .packPanel{padding:1rem .9rem .95rem}
+}
+
+/* ═══ PATCH v2.27.0: аккаунт (вход/регистрация meta-server), строка аккаунта, события ═══ */
+.authPanel{width:min(440px,93vw);gap:.5rem!important}
+.authFields{display:flex;flex-direction:column;gap:.6rem;width:100%;margin:.35rem 0 .15rem}
+.authInp{width:100%;min-height:46px;background:#14161f;border:1px solid var(--line);color:var(--text);
+  padding:.6rem .8rem;border-radius:9px;font-family:inherit;font-size:.92rem;text-align:left;letter-spacing:.02em}
+.authInp::placeholder{color:#6f675c}
+.authInp:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 2px rgba(255,216,122,.16)}
+.authNote{font-size:.66rem;color:#8f8678;line-height:1.55;margin-top:.55rem;text-align:center}
+#settingsPanel .setRowAcc{gap:.55rem}
+#settingsPanel .setRowAcc .btn{min-height:40px!important;padding:.45rem .95rem!important;font-size:.76rem!important}
+@media(max-width:430px){
+  .authPanel .admLoginBtns{flex-direction:column}
+  .authPanel .admLoginBtns .btn{width:100%}
+}
+/* оверлей аккаунта — ВЫШЕ scrim настроек (z338) и панели (z340) */
+#authModal{position:fixed;inset:0;z-index:345;display:flex;align-items:center;justify-content:center;
+  background:rgba(6,4,1,.78);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);overflow:auto;padding:1rem}
+#authModal.hidden{display:none !important}
+/* события: правый рельс фильтров — на узких экранах прячем, контент занимает место рельса */
+#eventsSide label{min-height:34px;font-size:.66rem!important;cursor:pointer;align-items:center!important}
+#eventsSide label input{width:16px;height:16px;accent-color:#d8b45a}
+@media(max-width:960px){
+  #eventsScreen{padding-right:0!important}
+  #eventsSide{display:none!important}
+}
