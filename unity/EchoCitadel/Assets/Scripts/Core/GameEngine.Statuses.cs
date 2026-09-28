@@ -128,6 +128,7 @@ namespace EchoCitadel.Core
             if (s.Type == StatusType.Silence)
             {
                 c.Silenced = true;
+                c.Frozen = false;
                 c.Statuses.RemoveAll(x => x.Type != StatusType.Silence);
                 c.Keywords.Clear();
                 Emit(new GameEvent
@@ -140,14 +141,21 @@ namespace EchoCitadel.Core
                 });
             }
 
+            var activeStatus = c.FindStatus(s.Type);
+            int shownValue = activeStatus?.Value ?? s.Value;
             Emit(new GameEvent
             {
                 Type = GameEventType.StatusApplied,
                 Uid = c.Uid,
                 Side = c.Owner,
                 CardName = c.Name,
-                Value = s.Value,
-                Text = $"«{c.Name}»: {GameText.StatusRu(s.Type)}{(s.Value > 1 ? $" ({s.Value})" : "")}",
+                Value = shownValue,
+                Data = new Dictionary<string, object>
+                {
+                    ["status"] = s.Type.ToString(),
+                    ["turnsLeft"] = activeStatus?.TurnsLeft ?? s.TurnsLeft,
+                },
+                Text = $"«{c.Name}»: {GameText.StatusRu(s.Type)}{(shownValue > 1 ? $" ({shownValue})" : "")}",
             });
         }
 

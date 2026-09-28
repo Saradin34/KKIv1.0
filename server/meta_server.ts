@@ -43,12 +43,13 @@ let seq = 1;
 /* ---- Игровой профиль (спека «2. Профиль»): клиент — источник истины (localStorage),
    сервер — зеркало для уникальности ников, квестов и будущего кросс-девайса.
    Хранилище in-memory; PostgreSQL-адаптер — server/schema.sql без смены маршрутов. ---- */
-interface QRow { id: string; prog: number; goal: number; claimed: boolean }
+interface QRow { id: string; prog: number; goal: number; claimed: boolean; fac?: string }
 interface GameProfile {
   pid: string; nick: string; level: number; xp: number; mmr: number; bestMmr: number;
   wins: number; losses: number; avatarFac: string; frame: string;
   ach: Record<string, boolean>;
   quests: { daily: QRow[]; weekly: QRow[] };
+  questDate?: string; wquestWeek?: string;
   history: Array<{ ts: number; win: boolean; fac: string; efac?: string; foe?: string; turns: number; practice?: boolean }>;
   shards: number; gems: number; freeOpens: number; bundles: string[];
   cosmetics: unknown;                 // зеркало клиентской косметики (форма клиента)
@@ -481,6 +482,8 @@ const server = createServer(async (req, res) => {
       frame: String(b.frame ?? prev?.frame ?? 'bronze'),
       ach: (b.ach as Record<string, boolean> | undefined) ?? prev?.ach ?? {},
       quests: (b.quests as GameProfile['quests'] | undefined) ?? prev?.quests ?? { daily: [], weekly: [] },
+      questDate: String(b.questDate ?? prev?.questDate ?? ''),
+      wquestWeek: String(b.wquestWeek ?? prev?.wquestWeek ?? ''),
       history: (b.history as GameProfile['history'] | undefined) ?? prev?.history ?? [],
       shards: Number(b.shards ?? prev?.shards ?? 1200),
       gems: Number(b.gems ?? prev?.gems ?? 100),

@@ -121,7 +121,7 @@ export enum Side { Player = 0, Opponent = 1 }
 /* ------------------------------ КОНФИГУРАЦИЯ -------------------------- */
 
 export interface GameConfig {
-  deckSize: number;          // 40
+  deckSize: number;          // минимум 60, без верхнего лимита
   startingHand: number;      // 5
   maxHand: number;           // 10 (излишек сгорает)
   heroHealth: number;        // 30
@@ -145,7 +145,7 @@ export interface GameConfig {
 }
 
 export const DEFAULT_CONFIG: GameConfig = {
-  deckSize: 40,
+  deckSize: 60,
   startingHand: 5,
   maxHand: 10,
   heroHealth: 30,
@@ -363,10 +363,10 @@ export interface PlayerState {
   spellsCastThisTurn: number;
   cardsPlayedThisTurn: number;
   fatigueCounter: number;
-  damageReduction: number;     // «Защита героя»
+  damageReduction: number;     // временная «Защита героя»
   spellDamageBonus: number;    // от существ/рун с SpellDamage
   mulliganUsed: boolean;
-  incomingDamageReductionTurns: number;
+  incomingDamageReductionTurns: number; // до конца следующего хода противника
 }
 
 export enum GameResult { Ongoing = 'Ongoing', PlayerWin = 'PlayerWin', OpponentWin = 'OpponentWin', Draw = 'Draw' }

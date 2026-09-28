@@ -16,7 +16,7 @@
     ["End" /* End */]: "\u041A\u043E\u043D\u0435\u0446"
   };
   var DEFAULT_CONFIG = {
-    deckSize: 40,
+    deckSize: 60,
     startingHand: 5,
     maxHand: 10,
     heroHealth: 30,
@@ -316,7 +316,7 @@
         value: dmg,
         sourceCardId: opts.sourceCardId,
         sourceElement: this.elementOfCard(opts.sourceCardId),
-        fromSpell: !!this.spellSourceCard,
+        fromSpell: opts.fromSpell ?? !!this.spellSourceCard,
         text: `${pl.name} \u043F\u043E\u043B\u0443\u0447\u0430\u0435\u0442 ${dmg} \u0443\u0440\u043E\u043D\u0430${opts.source ? ` (${opts.source})` : ""}`
       });
       if (opts.lifestealFor !== void 0) {
@@ -469,32 +469,42 @@
       this.emit({ type: "CreatureSummoned" /* CreatureSummoned */, side, uid: c.uid, cardId: c.cardId, cardName: c.name, data: { attack: c.attack, health: c.health } });
       this.say(`${pl.name} \u043F\u0440\u0438\u0437\u044B\u0432\u0430\u0435\u0442 \xAB${c.name}\xBB (${c.attack}/${c.health})`, side);
       if (!c.silenced && card.effects && card.effects.length > 0 && opts.fromHand !== false) {
-        this.runEffects(card.effects, side, { sourceUid: c.uid, sourceCard: card, isBattlecry: true });
+        this.runEffects(card.effects, side, {
+          sourceUid: c.uid,
+          sourceCard: card,
+          isBattlecry: true,
+          targetUid: opts.targetUid,
+          targetSide: opts.targetSide
+        });
       }
       this.checkDeaths();
       return c;
     }
-    /** Постоянные ауры уже стоящих рун применяются к новичку. */
+    /** Постоянные ауры обеих сторон применяются и к новичку на доске. */
     applyAuraToNewCreature(side, c) {
       const pl = this.p(side);
+      const enemy = this.p(side === 0 /* Player */ ? 1 /* Opponent */ : 0 /* Player */);
+      const matches = (aura) => !Array.isArray(aura.matches) || aura.matches.length === 0 || aura.matches.includes(c.element);
       for (const r of pl.runes) {
         if (r.silenced) continue;
         const aura = r.data.aura;
-        if (aura && (aura.op === "buffAttackHealth" || aura.op === "buffAttack" || aura.op === "buffHealth")) {
-          if (!aura.matches?.includes(c.element) || aura.matches.length === 0) {
-            if (aura.op === "buffAttackHealth") {
-              c.attack += aura.atk ?? 0;
-              c.health += aura.hp ?? 0;
-              c.maxHealth += aura.hp ?? 0;
-            }
-            if (aura.op === "buffAttack") {
-              c.attack += aura.value ?? 0;
-            }
-            if (aura.op === "buffHealth") {
-              c.health += aura.value ?? 0;
-              c.maxHealth += aura.value ?? 0;
-            }
-          }
+        if (!aura || !matches(aura)) continue;
+        if (aura.op === "buffAttackHealth") {
+          c.attack += aura.atk ?? 0;
+          c.health += aura.hp ?? 0;
+          c.maxHealth += aura.hp ?? 0;
+        }
+        if (aura.op === "buffAttack") c.attack += aura.value ?? 0;
+        if (aura.op === "buffHealth") {
+          c.health += aura.value ?? 0;
+          c.maxHealth += aura.value ?? 0;
+        }
+      }
+      for (const r of enemy.runes) {
+        if (r.silenced) continue;
+        const aura = r.data.aura;
+        if (aura?.op === "debuffAttackEnemy" && matches(aura)) {
+          c.attack = Math.max(0, c.attack - (aura.value ?? 0));
         }
       }
     }
@@ -598,10 +608,20 @@
       if (s.type === "Silence" /* Silence */) {
         c.silenced = true;
         c.statuses = c.statuses.filter((x) => x.type === "Silence" /* Silence */);
+        c.frozen = false;
         c.keywords = [];
         this.emit({ type: "CreatureSilenced" /* CreatureSilenced */, uid: c.uid, side: c.owner, cardName: c.name, text: `\xAB${c.name}\xBB \u043F\u043E\u0434 \u043D\u0435\u043C\u043E\u0442\u043E\u0439` });
       }
-      this.emit({ type: "StatusApplied" /* StatusApplied */, uid: c.uid, side: c.owner, cardName: c.name, value: s.value, text: `\xAB${c.name}\xBB: ${statusRu(s.type)}${s.value > 1 ? ` (${s.value})` : ""}` });
+      const activeStatus = c.statuses.find((x) => x.type === s.type);
+      this.emit({
+        type: "StatusApplied" /* StatusApplied */,
+        uid: c.uid,
+        side: c.owner,
+        cardName: c.name,
+        value: activeStatus?.value ?? s.value,
+        data: { status: s.type, turnsLeft: activeStatus?.turnsLeft ?? s.turnsLeft },
+        text: `\xAB${c.name}\xBB: ${statusRu(s.type)}${(activeStatus?.value ?? s.value) > 1 ? ` (${activeStatus?.value ?? s.value})` : ""}`
+      });
     }
     removeStatus(c, s) {
       const i = c.statuses.indexOf(s);
@@ -732,7 +752,7 @@
         if (pl.runes.length >= limit) return { ok: false, reason: `\u041C\u0430\u043A\u0441\u0438\u043C\u0443\u043C \u0440\u0443\u043D: ${limit}`, card };
         if (pl.runes.some((r) => r.cardId === card.id)) return { ok: false, reason: "\u042D\u0442\u0430 \u0440\u0443\u043D\u0430 \u0443\u0436\u0435 \u0443\u0441\u0442\u0430\u043D\u043E\u0432\u043B\u0435\u043D\u0430 (\u0443\u043D\u0438\u043A\u0430\u043B\u044C\u043D\u0430)", card };
       }
-      const needsTarget = this.needsTarget(side, card);
+      const needsTarget = this.targetRequiresChoice(card.target);
       if (needsTarget && !this.hasValidTarget(side, card)) return { ok: false, reason: "\u041D\u0435\u0442 \u0434\u043E\u043F\u0443\u0441\u0442\u0438\u043C\u043E\u0439 \u0446\u0435\u043B\u0438", card };
       return { ok: true, card, needsTarget };
     }
@@ -748,9 +768,11 @@
       this.emit({ type: "ManaChanged" /* ManaChanged */, side, value: pl.mana, data: { max: pl.maxMana + pl.bonusMana } });
       return true;
     }
+    targetRequiresChoice(target) {
+      return target === "EnemyCreature" /* EnemyCreature */ || target === "FriendlyCreature" /* FriendlyCreature */ || target === "AnyCreature" /* AnyCreature */ || target === "EnemyHero" /* EnemyHero */ || target === "FriendlyHero" /* FriendlyHero */ || target === "AnyHero" /* AnyHero */;
+    }
     needsTarget(side, card) {
-      if (card.target === "None" /* None */) return false;
-      return this.hasValidTarget(side, card);
+      return this.targetRequiresChoice(card.target) && this.hasValidTarget(side, card);
     }
     hasValidTarget(side, card) {
       return this.validTargets(side, card).length > 0;
@@ -797,9 +819,11 @@
       const pl = this.p(side);
       if (check.needsTarget) {
         const valid = this.validTargets(side, card);
-        let chosen = valid.find((v) => v.uid === targetUid && v.side === targetSide);
-        if (!chosen) chosen = valid.find((v) => v.uid === targetUid);
-        if (!chosen) chosen = valid[0];
+        const chosen = valid.find((v) => v.uid === targetUid && (targetSide === void 0 || v.side === targetSide)) ?? (targetUid === void 0 && targetSide !== void 0 ? valid.find((v) => v.uid === void 0 && v.side === targetSide) : void 0);
+        if (!chosen) {
+          this.say("\u041D\u0443\u0436\u043D\u043E \u0432\u044B\u0431\u0440\u0430\u0442\u044C \u0434\u043E\u043F\u0443\u0441\u0442\u0438\u043C\u0443\u044E \u0446\u0435\u043B\u044C", side);
+          return false;
+        }
         targetUid = chosen.uid;
         targetSide = chosen.side;
       }
@@ -810,7 +834,7 @@
       this.emit({ type: "CardPlayed" /* CardPlayed */, side, cardId: card.id, cardName: card.name, value: card.cost });
       switch (card.type) {
         case "Creature" /* Creature */:
-          this.summon(side, card, { fromHand: true });
+          this.summon(side, card, { fromHand: true, targetUid, targetSide });
           break;
         case "Rune" /* Rune */:
           this.playRune(side, card);
@@ -1102,7 +1126,17 @@
       if (this.phase === "Main" /* Main */) this.setPhase("Combat" /* Combat */);
       if (this.phase !== "Combat" /* Combat */ || this.result !== "Ongoing" /* Ongoing */) return;
       this.doCombatPhase();
-      this.runCombatAnimations();
+      const animation = this.runCombatAnimations();
+      if (animation) return animation.then(
+        () => this.completeMainPhase(),
+        (err) => {
+          this.completeMainPhase();
+          throw err;
+        }
+      );
+      this.completeMainPhase();
+    }
+    completeMainPhase() {
       if (this.result !== "Ongoing" /* Ongoing */) return;
       this.setPhase("End" /* End */);
       this.doEndPhase();
@@ -1112,23 +1146,19 @@
       this.emit({ type: "TurnStarted" /* TurnStarted */, side: this.activeSide, turn: this.turn + 1 });
     }
     runCombatAnimations() {
-      if (!this.onBeforeCombatEnd) return;
+      if (!this.onBeforeCombatEnd) return null;
       const q = this.attackQueue;
       this.attackQueue = [];
-      let r;
+      this.animating = true;
+      let result;
       try {
-        r = this.onBeforeCombatEnd(q);
+        result = Promise.resolve(this.onBeforeCombatEnd(q));
       } catch (err) {
-        r = Promise.reject(err);
+        result = Promise.reject(err);
       }
-      if (r instanceof Promise) {
-        this.animating = true;
-        r.then(() => {
-          this.animating = false;
-        }, () => {
-          this.animating = false;
-        });
-      }
+      return result.finally(() => {
+        this.animating = false;
+      });
     }
     /* --- 4. БИТВА --- */
     doCombatPhase() {
@@ -1190,6 +1220,8 @@
         heroDamage: 0,
         defenderDamage: 0,
         attackerDamage: 0,
+        lifesteal: !attacker.silenced && attacker.keywords.includes("Lifesteal" /* Lifesteal */),
+        lifestealAmount: 0,
         attackerAfter: { hp: 0 },
         defenderAfter: defender ? { hp: 0 } : void 0
       };
@@ -1211,7 +1243,12 @@
         const counter = defender.attack;
         const defHpBefore = defender.health;
         const dealt = this.damageCreature(defender, attacker.attack, { source: attacker.name, sourceCardId: attacker.cardId });
-        if (dealt > 0 && lifesteal) this.healHero(ownerSide, dealt, { source: "\u0412\u0430\u043C\u043F\u0438\u0440\u0438\u0437\u043C" });
+        const dealtToCreature = Math.min(dealt, Math.max(0, defHpBefore));
+        if (dealtToCreature > 0 && lifesteal) {
+          const hpBeforeHeal = this.p(ownerSide).health;
+          this.healHero(ownerSide, dealtToCreature, { source: "\u0412\u0430\u043C\u043F\u0438\u0440\u0438\u0437\u043C" });
+          rec.lifestealAmount += Math.max(0, this.p(ownerSide).health - hpBeforeHeal);
+        }
         if (dealt > 0 && !attacker.silenced && defender.health > 0) {
           if (attacker.keywords.includes("Poisonous" /* Poisonous */)) {
             this.addStatus(defender, { type: "Poison" /* Poison */, value: 1, turnsLeft: -1 });
@@ -1231,11 +1268,13 @@
           const excess = attacker.attack - Math.min(dealt, defHpBefore);
           if (excess > 0) {
             const hero = this.p(defender.owner);
+            const hpBeforeHeal = this.p(ownerSide).health;
             const hd = this.damageHero(hero.side, excess, {
               source: `${attacker.name} (\u041F\u0440\u043E\u0440\u044B\u0432)`,
               sourceCardId: attacker.cardId,
               lifestealFor: lifesteal ? ownerSide : void 0
             });
+            if (lifesteal) rec.lifestealAmount += Math.max(0, this.p(ownerSide).health - hpBeforeHeal);
             rec.heroDamage = hd;
             rec.hitHero = hd > 0;
           }
@@ -1255,7 +1294,9 @@
           value: dmg,
           text: `\xAB${attacker.name}\xBB \u0430\u0442\u0430\u043A\u0443\u0435\u0442 \u0433\u0435\u0440\u043E\u044F ${enemyHero.name}`
         });
+        const hpBeforeHeal = this.p(ownerSide).health;
         const dealt = this.damageHero(enemyHero.side, dmg, { source: attacker.name, sourceCardId: attacker.cardId, lifestealFor: lifesteal ? ownerSide : void 0 });
+        if (lifesteal) rec.lifestealAmount = Math.max(0, this.p(ownerSide).health - hpBeforeHeal);
         rec.heroDamage = dealt;
         rec.attackerAfter = { hp: Math.max(0, attacker.health) };
         this.attackQueue.push(rec);
@@ -1327,7 +1368,14 @@
             s.turnsLeft--;
             if (s.turnsLeft <= 0) {
               this.removeStatus(c, s);
-              this.emit({ type: "StatusExpired" /* StatusExpired */, uid: c.uid, side, cardName: c.name, text: `\xAB${c.name}\xBB: ${statusRu(s.type)} \u0440\u0430\u0441\u0441\u0435\u0438\u0432\u0430\u0435\u0442\u0441\u044F` });
+              this.emit({
+                type: "StatusExpired" /* StatusExpired */,
+                uid: c.uid,
+                side,
+                cardName: c.name,
+                data: { status: s.type },
+                text: `\xAB${c.name}\xBB: ${statusRu(s.type)} \u0440\u0430\u0441\u0441\u0435\u0438\u0432\u0430\u0435\u0442\u0441\u044F`
+              });
             }
           }
         }
@@ -1346,7 +1394,11 @@
           }
         }
       }
-      pl.incomingDamageReductionTurns = 0;
+      const guarded = this.p(side === 0 /* Player */ ? 1 /* Opponent */ : 0 /* Player */);
+      if (guarded.incomingDamageReductionTurns > 0) {
+        guarded.incomingDamageReductionTurns--;
+        if (guarded.incomingDamageReductionTurns === 0) guarded.damageReduction = 0;
+      }
       this.checkDeaths();
       if (pl.deck.length === 0) {
         this.say(`${pl.name}: \u043A\u043E\u043B\u043E\u0434\u0430 \u043F\u0443\u0441\u0442\u0430, \u0441\u043B\u0435\u0434\u0443\u044E\u0449\u0438\u0439 \u0434\u043E\u0431\u043E\u0440 \u043D\u0430\u043D\u0435\u0441\u0451\u0442 \u0443\u0440\u043E\u043D`, side);
@@ -1394,19 +1446,20 @@
           case "damage": {
             const base = eff.value ?? 0;
             const amt = isSpellDamage ? base + this.spellDamageOf(side, ctx2.sourceCard?.element ?? "None" /* None */, srcCost) : base;
-            const t = this.resolveTarget(side, eff.to, eff.filter, ctx2);
-            if (amt <= 0) break;
+            const t = this.resolveTarget(side, eff.to, eff.filter, { ...ctx2, sourceCard: ctx2.sourceCard });
+            if (amt <= 0 || t.invalid) break;
             if (t.creatures.length) for (const c of t.creatures) this.damageCreature(c, amt, { source: ctx2.sourceCard?.name, fromSpell: isSpellDamage, sourceCardId: ctx2.sourceCard?.id });
-            else if (t.heroSide !== void 0) this.damageHero(t.heroSide, amt, { source: ctx2.sourceCard?.name, sourceCardId: ctx2.sourceCard?.id });
-            else this.damageHero(en.side, amt, { source: ctx2.sourceCard?.name, sourceCardId: ctx2.sourceCard?.id });
+            else if (t.heroSide !== void 0) this.damageHero(t.heroSide, amt, { source: ctx2.sourceCard?.name, sourceCardId: ctx2.sourceCard?.id, fromSpell: isSpellDamage });
+            else if (t.allowHeroFallback) this.damageHero(en.side, amt, { source: ctx2.sourceCard?.name, sourceCardId: ctx2.sourceCard?.id, fromSpell: isSpellDamage });
             break;
           }
           case "heal": {
-            const t = this.resolveTarget(side, eff.to, eff.filter, ctx2);
+            const t = this.resolveTarget(side, eff.to, eff.filter, { ...ctx2, sourceCard: ctx2.sourceCard });
             const amt = eff.value ?? 0;
+            if (t.invalid) break;
             if (t.creatures.length) for (const c of t.creatures) this.healCreature(c, amt, ctx2.sourceCard?.id);
             else if (t.heroSide !== void 0) this.healHero(t.heroSide, amt, { source: ctx2.sourceCard?.name, sourceCardId: ctx2.sourceCard?.id });
-            else this.healHero(side, amt, { source: ctx2.sourceCard?.name, sourceCardId: ctx2.sourceCard?.id });
+            else if (t.allowHeroFallback) this.healHero(side, amt, { source: ctx2.sourceCard?.name, sourceCardId: ctx2.sourceCard?.id });
             break;
           }
           case "draw":
@@ -1529,10 +1582,19 @@
             me.mana = Math.min(this.config.maxMana, me.mana + (eff.value ?? 1));
             this.emit({ type: "ManaChanged" /* ManaChanged */, side, value: me.mana });
             break;
-          case "gainMaxMana":
+          case "gainMaxMana": {
+            const beforeMax = me.maxMana;
             me.maxMana = Math.min(this.config.maxMana, me.maxMana + (eff.value ?? 1));
-            me.mana += eff.value ?? 1;
+            const gained = me.maxMana - beforeMax;
+            me.mana = Math.min(this.config.maxMana, me.mana + gained);
+            this.emit({
+              type: "ManaChanged" /* ManaChanged */,
+              side,
+              value: me.mana,
+              data: { max: Math.min(this.config.maxMana, me.maxMana + me.bonusMana) }
+            });
             break;
+          }
           case "gainEcho":
             me.echoPoints = Math.min(this.config.echoPointsMax, me.echoPoints + (eff.value ?? 1));
             this.emit({ type: "EchoGained" /* EchoGained */, side, text: `${me.name} \u043F\u043E\u043B\u0443\u0447\u0430\u0435\u0442 \u042D\u0445\u043E-\u043E\u0447\u043A\u043E` });
@@ -1564,12 +1626,12 @@
           }
           case "damageAllFriendlyCreatures": {
             const amt = (eff.value ?? 0) + (isSpellDamage ? this.spellDamageOf(side, ctx2.sourceCard?.element ?? "None" /* None */, srcCost) : 0);
-            for (const c of [...me.creatures]) this.damageCreature(c, amt, { source: ctx2.sourceCard?.name, sourceCardId: ctx2.sourceCard?.id });
+            for (const c of [...me.creatures]) this.damageCreature(c, amt, { source: ctx2.sourceCard?.name, fromSpell: isSpellDamage, sourceCardId: ctx2.sourceCard?.id });
             break;
           }
           case "damageAllCreatures": {
             const amt = (eff.value ?? 0) + (isSpellDamage ? this.spellDamageOf(side, ctx2.sourceCard?.element ?? "None" /* None */, srcCost) : 0);
-            for (const c of [...this.allCreatures()]) this.damageCreature(c, amt, { source: ctx2.sourceCard?.name, sourceCardId: ctx2.sourceCard?.id });
+            for (const c of [...this.allCreatures()]) this.damageCreature(c, amt, { source: ctx2.sourceCard?.name, fromSpell: isSpellDamage, sourceCardId: ctx2.sourceCard?.id });
             break;
           }
           case "healAllFriendlyCreatures":
@@ -1584,14 +1646,19 @@
           case "shieldAllFriendlies":
             for (const c of me.creatures) this.addStatus(c, { type: "Shield" /* Shield */, value: 1, turnsLeft: -1 });
             break;
-          case "damageHeroes":
-            this.damageHero(en.side, eff.value ?? 1, { source: ctx2.sourceCard?.name });
-            this.damageHero(side, eff.value ?? 1, { source: ctx2.sourceCard?.name });
+          case "damageHeroes": {
+            const base = eff.value ?? 1;
+            const amt = base + (isSpellDamage ? this.spellDamageOf(side, ctx2.sourceCard?.element ?? "None" /* None */, srcCost) : 0);
+            const opts = { source: ctx2.sourceCard?.name, sourceCardId: ctx2.sourceCard?.id, fromSpell: isSpellDamage };
+            this.damageHero(en.side, amt, opts);
+            this.damageHero(side, amt, opts);
             break;
-          case "reduceIncomingDamage":
+          }
+          case "reduceIncomingDamage": {
             me.damageReduction += eff.value ?? 1;
-            me.incomingDamageReductionTurns = eff.value ?? 1;
+            me.incomingDamageReductionTurns = Math.max(me.incomingDamageReductionTurns, 1);
             break;
+          }
           case "increaseSpellDamage":
             me.spellDamageBonus += eff.value ?? 1;
             break;
@@ -1613,12 +1680,28 @@
     resolveTarget(side, to, filter, ctx2) {
       const me = this.p(side);
       const en = this.p(side === 0 /* Player */ ? 1 /* Opponent */ : 0 /* Player */);
-      const kind = to ?? "None" /* None */;
-      if (ctx2.targetUid !== void 0) {
+      const cardTarget = ctx2.sourceCard?.target ?? "None" /* None */;
+      const kind = to && to !== "None" /* None */ ? to : cardTarget;
+      const creatureKind = (k) => k === "EnemyCreature" /* EnemyCreature */ || k === "FriendlyCreature" /* FriendlyCreature */ || k === "AnyCreature" /* AnyCreature */;
+      const basicFilterMatches = (c) => {
+        if (!filter) return true;
+        if (filter.attackAtLeast !== void 0 && c.attack < filter.attackAtLeast) return false;
+        if (filter.attackAtMost !== void 0 && c.attack > filter.attackAtMost) return false;
+        if (filter.costAtLeast !== void 0 && c.cost < filter.costAtLeast) return false;
+        if (filter.isLegendary !== void 0 && c.data.rarity === "Legendary" /* Legendary */ !== filter.isLegendary) return false;
+        if (filter.notSilenced && c.silenced) return false;
+        return true;
+      };
+      if (ctx2.targetUid !== void 0 && !filter?.random && creatureKind(kind)) {
         const c = this.uidMap.get(ctx2.targetUid);
-        if (c) return { creatures: [c] };
+        const sideMatches = c && (kind === "AnyCreature" /* AnyCreature */ || kind === "FriendlyCreature" /* FriendlyCreature */ && c.owner === me.side || kind === "EnemyCreature" /* EnemyCreature */ && c.owner === en.side);
+        if (!c || !sideMatches || !basicFilterMatches(c)) return { creatures: [], invalid: true };
+        return { creatures: [c] };
       }
+      const allowHeroFallback = kind === "None" /* None */ && ctx2.targetUid === void 0 && ctx2.targetSide === void 0;
       switch (kind) {
+        case "None" /* None */:
+          return { creatures: [], allowHeroFallback };
         case "EnemyCreature" /* EnemyCreature */:
           return { creatures: this.filterCreatures(en.creatures, filter) };
         case "FriendlyCreature" /* FriendlyCreature */:
@@ -1636,9 +1719,9 @@
         case "FriendlyHero" /* FriendlyHero */:
           return { creatures: [], heroSide: me.side };
         case "AnyHero" /* AnyHero */:
-          return { creatures: [], heroSide: en.side };
+          return { creatures: [], heroSide: ctx2.targetSide === me.side ? me.side : en.side };
         default:
-          return { creatures: [] };
+          return { creatures: [], allowHeroFallback: false };
       }
     }
     /**
@@ -3638,11 +3721,7 @@
             op: "applyStatus",
             status: "Poison",
             value: 1,
-            to: "EnemyCreature",
-            filter: {
-              random: true,
-              count: 1
-            }
+            to: "EnemyCreature"
           }
         ],
         abilityText: "\u0411\u043E\u0435\u0432\u043E\u0439 \u043A\u043B\u0438\u0447: \u042F\u0434 \u043D\u0430 1 \u0445\u043E\u0434(\u0430) (\u0432\u0440\u0430\u0436\u0435\u0441\u043A\u043E\u0435 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E). \u0411\u043E\u0435\u0432\u043E\u0439 \u043A\u043B\u0438\u0447.",
@@ -9741,15 +9820,11 @@
         name: "\u0421\u043F\u043E\u0440\u043E\u0432\u044B\u0439 \u0433\u043E\u043B\u0435\u043C",
         faction: "Pyromancer",
         type: "Spell",
+        subtype: "Instant",
         rarity: "Epic",
         cost: 3,
-        attack: 7,
-        health: 7,
         element: "Fire",
-        keywords: [
-          "Rush",
-          "Trample"
-        ],
+        keywords: [],
         target: "None",
         effects: [
           {
@@ -9757,17 +9832,14 @@
             value: 3
           }
         ],
-        abilityText: "\u0411\u043E\u0435\u0432\u043E\u0439 \u043A\u043B\u0438\u0447: \u041D\u0430\u043D\u0435\u0441\u0438\u0442\u0435 2 \u0443\u0440\u043E\u043D\u0430 \u0432\u0441\u0435\u043C \u0432\u0440\u0430\u0436\u0435\u0441\u043A\u0438\u043C \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0430\u043C. \u0412\u044B\u0436\u0438\u0433\u0430\u043D\u0438\u0435: \u0432\u0445\u043E\u0434\u044F\u0449\u0435\u0435 \u043B\u0435\u0447\u0435\u043D\u0438\u0435 \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430 \u0441\u043D\u0438\u0436\u0435\u043D\u043E \u043D\u0430 1. \u0420\u044B\u0432\u043E\u043A / \u041F\u0440\u043E\u0440\u044B\u0432.",
+        abilityText: "\u041D\u0430\u043D\u043E\u0441\u0438\u0442 3 \u0443\u0440\u043E\u043D\u0430 \u0432\u0441\u0435\u043C \u0432\u0440\u0430\u0436\u0435\u0441\u043A\u0438\u043C \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0430\u043C.",
         flavor: "\xAB\u0426\u0435\u043D\u0430 \u0441\u0438\u043B\u044B \u2014 \u0441\u043B\u0435\u0434, \u043A\u043E\u0442\u043E\u0440\u044B\u0439 \u043E\u043D\u0430 \u043E\u0441\u0442\u0430\u0432\u043B\u044F\u0435\u0442.\xBB",
         tags: [
-          "aoe",
-          "aggro",
-          "antiheal"
+          "aoe"
         ],
-        healReduction: 1,
         art: "Resources/Cards/Pyromancer/ter_s10.png",
         artworkPath: "Resources/Cards/Pyromancer/ter_s10.png",
-        artPrompt: 'epic cinematic composition, volumetric light, dark fantasy trading card game illustration, a single heroic creature character: "\u0412\u0443\u043B\u043A\u0430\u043D\u0438\u0447\u0435\u0441\u043A\u0438\u0439 \u043A\u043E\u043B\u043E\u0441\u0441", molten lava cracks, ember storm, scorched obsidian, orange-red fire magic, smoke and ash, glowing forge runes, fire element, centered composition, rich color grading, painterly brushwork, high detail --ar 3:4 --style raw --v 6',
+        artPrompt: 'epic cinematic composition, volumetric light, dark fantasy trading card game illustration, a burst of spore-infused fire magic: "\u0421\u043F\u043E\u0440\u043E\u0432\u044B\u0439 \u0433\u043E\u043B\u0435\u043C", ember-red spores spreading across a dark fantasy battlefield, glowing fungal clusters, ash, heat distortion, fiery shockwave, Pyromancer energy, centered composition, rich color grading, painterly brushwork, high detail --ar 3:4 --style raw --v 6',
         negativePrompt: "text, letters, watermark, signature, ui, frame, border, extra limbs, deformed hands, lowres, blurry, jpeg artifacts, modern clothing, photograph, 3d render plastic look",
         artSize: "512x720",
         subtype: "Instant"
@@ -20381,12 +20453,13 @@
   // unity/EchoCitadel/Assets/StreamingAssets/Decks.json
   var Decks_default = {
     meta: {
-      deckSize: 40,
-      copyLimit: 2,
-      legendaryCopyLimit: 1,
-      updated: "2026-09-22",
-      note: "v6: \u0441\u0432\u043E\u0438 \u043F\u0443\u043B\u044B + \u0434\u043E\u0431\u043E\u0440 \u043F\u043E \u0431\u044E\u0434\u0436\u0435\u0442\u043D\u043E\u0439 \u043C\u043E\u0434\u0435\u043B\u0438 + \u044F\u0434\u0440\u0430 ECH2",
-      tuned: 7
+      deckSize: 60,
+      copyLimit: 4,
+      legendaryCopyLimit: 4,
+      updated: "2026-09-28",
+      note: "\u041F\u044F\u0442\u044C \u0441\u0431\u0430\u043B\u0430\u043D\u0441\u0438\u0440\u043E\u0432\u0430\u043D\u043D\u044B\u0445 \u0441\u0442\u0430\u0440\u0442\u043E\u0432\u044B\u0445 \u043A\u043E\u043B\u043E\u0434 \u043F\u043E 30 \u043A\u0430\u0440\u0442; Constructed \u043E\u0441\u0442\u0430\u0451\u0442\u0441\u044F 60+",
+      tuned: 7,
+      starterDeckSize: 30
     },
     decks: [
       {
@@ -20433,7 +20506,27 @@
           "aur_r05",
           "aur_01",
           "aur_s09",
-          "aur_r01"
+          "aur_r01",
+          "aur_01",
+          "aur_03",
+          "aur_04",
+          "meh_06",
+          "meh_08",
+          "aur_08",
+          "pal_08",
+          "meh_10",
+          "aur_09",
+          "aur_35",
+          "aur_33",
+          "aur_13",
+          "meh_11",
+          "aur_s14",
+          "aur_s04",
+          "aur_s05",
+          "aur_s15",
+          "aur_s06",
+          "aur_r01",
+          "aur_r02"
         ]
       },
       {
@@ -20480,7 +20573,27 @@
           "nec_s09",
           "neu_06",
           "vmp_14",
-          "vmp_14"
+          "vmp_14",
+          "nec_41",
+          "nec_06",
+          "nec_08",
+          "nec_09",
+          "nec_10",
+          "neu_06",
+          "nec_44",
+          "nec_12",
+          "vmp_12",
+          "wtc_12",
+          "nec_s01",
+          "nec_s05",
+          "nec_s12",
+          "nec_s06",
+          "wtc_11",
+          "nec_s01",
+          "wtc_13",
+          "vmp_13",
+          "nec_r02",
+          "nec_r03"
         ]
       },
       {
@@ -20527,7 +20640,27 @@
           "neu_06",
           "ter_31",
           "ent_02",
-          "ent_02"
+          "ent_02",
+          "ter_31",
+          "neu_02",
+          "ter_05",
+          "neu_06",
+          "ter_04",
+          "ter_06",
+          "ter_07",
+          "ter_08",
+          "ter_10",
+          "ter_11",
+          "ter_12",
+          "ter_13",
+          "asp_12",
+          "ent_12",
+          "asp_01",
+          "ent_13",
+          "ter_s04",
+          "nec_s10",
+          "ter_s05",
+          "ter_r04"
         ]
       },
       {
@@ -20574,7 +20707,27 @@
           "pyr_r06",
           "neu_01",
           "pyr_s08",
-          "pyr_s08"
+          "pyr_s08",
+          "neu_01",
+          "cnb_03",
+          "pyr_03",
+          "pyr_05",
+          "cnb_08",
+          "pyr_08",
+          "pyr_09",
+          "cnb_04",
+          "cnb_05",
+          "grm_10",
+          "pyr_11",
+          "grm_12",
+          "eth_s13",
+          "pyr_s10",
+          "pyr_s04",
+          "cnb_14",
+          "aur_s10",
+          "ter_s10",
+          "pyr_r02",
+          "pyr_r03"
         ]
       },
       {
@@ -20621,7 +20774,27 @@
           "sbd_10",
           "neu_01",
           "spr_07",
-          "eth_r06"
+          "eth_r06",
+          "eth_02",
+          "neu_01",
+          "eth_05",
+          "eth_06",
+          "spr_05",
+          "spr_07",
+          "eth_07",
+          "spr_08",
+          "eth_10",
+          "spr_12",
+          "eth_15",
+          "scc_13",
+          "eth_02",
+          "neu_01",
+          "spr_11",
+          "eth_s07",
+          "scc_14",
+          "eth_s08",
+          "eth_r03",
+          "eth_r04"
         ]
       },
       {
@@ -20668,7 +20841,217 @@
           "neu_01",
           "neu_01",
           "neu_03",
-          "neu_02"
+          "neu_02",
+          "aur_01",
+          "pyr_02",
+          "aur_03",
+          "neu_02",
+          "aur_04",
+          "neu_03",
+          "pyr_08",
+          "aur_11",
+          "aur_12",
+          "aur_13",
+          "nec_14",
+          "aur_s02",
+          "aur_s03",
+          "eth_s02",
+          "pyr_s04",
+          "ter_s04",
+          "eth_s07",
+          "ter_r02",
+          "nec_r05",
+          "pyr_r05"
+        ]
+      },
+      {
+        id: "starter_aurites",
+        name: "\u0421\u0442\u0430\u0440\u0442\u043E\u0432\u0430\u044F: \u041E\u043F\u043B\u043E\u0442 \u0421\u0432\u0435\u0442\u0430",
+        faction: "Aurites",
+        format: "starter",
+        cards: [
+          "aur_r03",
+          "aur_02",
+          "aur_03",
+          "aur_04",
+          "aur_10",
+          "aur_06",
+          "aur_07",
+          "aur_08",
+          "aur_09",
+          "aur_10",
+          "aur_11",
+          "aur_15",
+          "aur_12",
+          "aur_13",
+          "aur_14",
+          "aur_s01",
+          "neu_01",
+          "aur_s03",
+          "aur_s04",
+          "aur_s05",
+          "aur_s06",
+          "aur_r02",
+          "aur_s08",
+          "neu_06",
+          "aur_r06",
+          "aur_r02",
+          "aur_r03",
+          "aur_r04",
+          "aur_r05",
+          "aur_01"
+        ]
+      },
+      {
+        id: "starter_necrus",
+        name: "\u0421\u0442\u0430\u0440\u0442\u043E\u0432\u0430\u044F: \u041A\u0440\u043E\u0432\u0430\u0432\u0430\u044F \u0416\u0430\u0442\u0432\u0430",
+        faction: "Necrus",
+        format: "starter",
+        cards: [
+          "nec_s05",
+          "nec_02",
+          "nec_03",
+          "nec_04",
+          "nec_04",
+          "nec_06",
+          "nec_07",
+          "nec_08",
+          "nec_09",
+          "nec_10",
+          "nec_11",
+          "neu_06",
+          "nec_13",
+          "nec_r05",
+          "nec_13",
+          "nec_s01",
+          "nec_s02",
+          "neu_01",
+          "nec_s04",
+          "neu_06",
+          "nec_r05",
+          "nec_s07",
+          "nec_s08",
+          "nec_s09",
+          "nec_r01",
+          "nec_r02",
+          "nec_r03",
+          "nec_r06",
+          "nec_09",
+          "nec_r06"
+        ]
+      },
+      {
+        id: "starter_terramorph",
+        name: "\u0421\u0442\u0430\u0440\u0442\u043E\u0432\u0430\u044F: \u041A\u043E\u0440\u043D\u0438 \u0417\u0435\u043C\u043B\u0438",
+        faction: "Terramorph",
+        format: "starter",
+        cards: [
+          "ter_01",
+          "ter_02",
+          "ter_03",
+          "neu_01",
+          "ter_04",
+          "ter_06",
+          "ter_07",
+          "ter_02",
+          "ter_09",
+          "ter_10",
+          "ter_11",
+          "ter_12",
+          "ter_13",
+          "ter_14",
+          "ter_s02",
+          "ter_11",
+          "ter_s02",
+          "ter_r03",
+          "ter_s04",
+          "ter_s05",
+          "ter_s06",
+          "ter_s07",
+          "ter_s08",
+          "ter_s09",
+          "ter_r01",
+          "ter_04",
+          "ter_r03",
+          "ter_05",
+          "ter_r05",
+          "ter_r06"
+        ]
+      },
+      {
+        id: "starter_pyromancer",
+        name: "\u0421\u0442\u0430\u0440\u0442\u043E\u0432\u0430\u044F: \u041F\u043B\u0430\u043C\u044F \u0412\u043E\u0437\u043C\u0435\u0437\u0434\u0438\u044F",
+        faction: "Pyromancer",
+        format: "starter",
+        cards: [
+          "pyr_03",
+          "pyr_02",
+          "pyr_03",
+          "pyr_04",
+          "pyr_s04",
+          "pyr_06",
+          "pyr_r01",
+          "pyr_s06",
+          "pyr_s10",
+          "pyr_10",
+          "pyr_11",
+          "pyr_14",
+          "pyr_r02",
+          "pyr_14",
+          "neu_03",
+          "pyr_s01",
+          "pyr_s02",
+          "pyr_s03",
+          "pyr_s04",
+          "neu_03",
+          "neu_02",
+          "pyr_s07",
+          "pyr_s08",
+          "pyr_r03",
+          "pyr_r01",
+          "pyr_r02",
+          "pyr_r03",
+          "pyr_r04",
+          "pyr_10",
+          "pyr_r06"
+        ]
+      },
+      {
+        id: "starter_ethereal",
+        name: "\u0421\u0442\u0430\u0440\u0442\u043E\u0432\u0430\u044F: \u0422\u044B\u0441\u044F\u0447\u0430 \u0412\u0443\u0430\u043B\u0435\u0439",
+        faction: "Ethereal",
+        format: "starter",
+        cards: [
+          "eth_01",
+          "eth_02",
+          "eth_03",
+          "eth_04",
+          "eth_05",
+          "eth_06",
+          "eth_07",
+          "eth_08",
+          "eth_09",
+          "eth_10",
+          "eth_11",
+          "eth_12",
+          "eth_13",
+          "eth_14",
+          "eth_15",
+          "eth_s01",
+          "eth_s02",
+          "eth_s03",
+          "eth_s04",
+          "eth_s05",
+          "eth_s06",
+          "eth_s07",
+          "eth_s08",
+          "eth_s09",
+          "eth_r01",
+          "eth_r02",
+          "eth_r03",
+          "neu_04",
+          "eth_r05",
+          "eth_r06"
         ]
       }
     ]
@@ -21684,9 +22067,9 @@
   }
 
   // src/ui/deckstore.ts
-  var DECK_SIZE = 40;
+  var MIN_DECK_SIZE = 60;
   var MAX_COPIES = 4;
-  var MAX_LEGENDARY_COPIES = 1;
+  var MAX_LEGENDARY_COPIES = 4;
   var KEY = "echo-citadel.decks.v1";
   function loadCustomDecks() {
     try {
@@ -21726,8 +22109,8 @@
     const problems = [];
     const counts = /* @__PURE__ */ new Map();
     for (const id of cards) counts.set(id, (counts.get(id) ?? 0) + 1);
-    if (cards.length !== DECK_SIZE) {
-      problems.push(`\u043D\u0443\u0436\u043D\u043E \u0440\u043E\u0432\u043D\u043E ${DECK_SIZE} \u043A\u0430\u0440\u0442, \u0441\u0435\u0439\u0447\u0430\u0441 ${cards.length}`);
+    if (cards.length < MIN_DECK_SIZE) {
+      problems.push(`\u043D\u0443\u0436\u043D\u043E \u043C\u0438\u043D\u0438\u043C\u0443\u043C ${MIN_DECK_SIZE} \u043A\u0430\u0440\u0442, \u0441\u0435\u0439\u0447\u0430\u0441 ${cards.length}`);
     }
     for (const [id, n] of counts) {
       const card = lookup(id);
@@ -21745,12 +22128,12 @@
     }
     return { ok: problems.length === 0, problems, total: cards.length };
   }
-  function validateDeckSize(cards, lookup) {
+  function validateDeckSize(cards, lookup, minSize = MIN_DECK_SIZE) {
     const problems = [];
     const counts = /* @__PURE__ */ new Map();
     for (const id of cards) counts.set(id, (counts.get(id) ?? 0) + 1);
-    if (cards.length !== DECK_SIZE) {
-      problems.push(`\u043D\u0443\u0436\u043D\u043E \u0440\u043E\u0432\u043D\u043E ${DECK_SIZE} \u043A\u0430\u0440\u0442, \u0441\u0435\u0439\u0447\u0430\u0441 ${cards.length}`);
+    if (cards.length < minSize) {
+      problems.push(`\u043D\u0443\u0436\u043D\u043E \u043C\u0438\u043D\u0438\u043C\u0443\u043C ${minSize} \u043A\u0430\u0440\u0442, \u0441\u0435\u0439\u0447\u0430\u0441 ${cards.length}`);
     }
     for (const [id, n] of counts) {
       const card = lookup(id);
@@ -21781,6 +22164,79 @@
     if (html !== void 0) n.innerHTML = html;
     return n;
   };
+  var appRoute = "home";
+  var routeHistory = [];
+  var suppressRouteHistory = false;
+  function setAppRoute(next) {
+    if (next !== appRoute) {
+      if (next === "home" && !suppressRouteHistory) routeHistory.length = 0;
+      else if (!suppressRouteHistory) routeHistory.push(appRoute);
+      if (routeHistory.length > 24) routeHistory.shift();
+      appRoute = next;
+    }
+    document.body.dataset.appRoute = next;
+    const dock = document.getElementById("ecQuickNav");
+    const show = next !== "home" && next !== "battle";
+    dock?.classList.toggle("hidden", !show);
+    dock?.setAttribute("aria-hidden", show ? "false" : "true");
+    dock?.querySelectorAll("[data-route]").forEach((item) => {
+      const active = item.dataset.route === next;
+      item.classList.toggle("active", active);
+      if (active) item.setAttribute("aria-current", "page");
+      else item.removeAttribute("aria-current");
+    });
+  }
+  function navigateApp(next) {
+    if (next === "back") {
+      const previous = routeHistory.pop() ?? "home";
+      if (previous === appRoute) return;
+      suppressRouteHistory = true;
+      navigateApp(previous);
+      suppressRouteHistory = false;
+      return;
+    }
+    switch (next) {
+      case "home":
+        openHomeScreen();
+        break;
+      case "collection":
+        openCollectionScreen();
+        break;
+      case "decks":
+        openDecksScreen();
+        break;
+      case "store":
+        openShop();
+        break;
+      case "profile":
+        openProfile();
+        break;
+      case "events":
+        openEventsScreen();
+        break;
+      case "packs":
+        openBoosterPanel();
+        break;
+      case "mastery":
+        openBP();
+        break;
+      case "battle":
+        setAppRoute("battle");
+        $("menu").classList.add("hidden");
+        for (const id of ["collection", "decksScreen", "eventsScreen", "profileModal", "shopModal", "bpModal", "boosterModal", "campaignModal"])
+          document.getElementById(id)?.classList.add("hidden");
+        $("battle").classList.remove("hidden");
+        break;
+    }
+  }
+  document.getElementById("ecQuickNav")?.addEventListener("click", (ev) => {
+    const route = ev.target?.closest?.("[data-route]");
+    const value = route?.dataset.route;
+    if (value && ["back", "home", "collection", "decks", "store", "profile", "events", "packs", "mastery"].includes(value)) {
+      Audio_.uiClick();
+      navigateApp(value);
+    }
+  });
   var FACTION_IDS = ["Aurites" /* Aurites */, "Necrus" /* Necrus */, "Terramorph" /* Terramorph */, "Pyromancer" /* Pyromancer */, "Ethereal" /* Ethereal */];
   var FACTION_SIGIL = {
     Aurites: "\u2735",
@@ -21854,7 +22310,7 @@
     End: "\u0421\u0442\u0430\u0434\u0438\u044F \u043A\u043E\u043D\u0446\u0430: \u0441\u0440\u0430\u0431\u0430\u0442\u044B\u0432\u0430\u043D\u0438\u044F \xAB\u0432 \u043A\u043E\u043D\u0446\u0435 \u0445\u043E\u0434\u0430\xBB, \u043F\u0440\u043E\u0432\u0435\u0440\u043A\u0430 \u0440\u0430\u0437\u043C\u0435\u0440\u0430 \u0440\u0443\u043A\u0438"
   };
   var ELEM_RU = { None: "\u2014", Fire: "\u041E\u0433\u043E\u043D\u044C", Water: "\u0412\u043E\u0434\u0430", Earth: "\u0417\u0435\u043C\u043B\u044F", Air: "\u0412\u043E\u0437\u0434\u0443\u0445", Chaos: "\u0425\u0430\u043E\u0441" };
-  var RARITY_RU = { Common: "\u041E\u0431\u044B\u0447\u043D\u0430\u044F", Rare: "\u0420\u0435\u0434\u043A\u0430\u044F", Epic: "\u042D\u043F\u0438\u0447\u0435\u0441\u043A\u0430\u044F", Legendary: "\u041B\u0435\u0433\u0435\u043D\u0434\u0430\u0440\u043D\u0430\u044F" };
+  var RARITY_RU = { Common: "\u041E\u0431\u044B\u0447\u043D\u0430\u044F", Uncommon: "\u041D\u0435\u043E\u0431\u044B\u0447\u043D\u0430\u044F", Rare: "\u0420\u0435\u0434\u043A\u0430\u044F", Epic: "\u042D\u043F\u0438\u0447\u0435\u0441\u043A\u0430\u044F", Legendary: "\u041B\u0435\u0433\u0435\u043D\u0434\u0430\u0440\u043D\u0430\u044F" };
   var KW_RU = {
     Taunt: "\u041F\u0440\u043E\u0432\u043E\u043A\u0430\u0446\u0438\u044F",
     Lifesteal: "\u0412\u0430\u043C\u043F\u0438\u0440\u0438\u0437\u043C",
@@ -21900,9 +22356,11 @@
   }
   var { db } = buildDatabase(cardsJson);
   var deckList = decksJson.decks;
-  var deckById = new Map(
-    deckList.map((d) => [d.id, d])
-  );
+  var deckById = new Map(deckList.map((d) => [d.id, d]));
+  var STARTER_DECK_FORMAT = "starter";
+  var starterDeckForFaction = (faction) => deckList.find((d) => d.format === STARTER_DECK_FORMAT && d.faction === faction);
+  var isStarterDeckId = (id) => deckById.get(id)?.format === STARTER_DECK_FORMAT;
+  var STARTER_CARD_IDS = new Set(deckList.filter((d) => d.format === STARTER_DECK_FORMAT).flatMap((d) => d.cards));
   var ALL_CARDS = cardsJson.cards;
   function readPassiveMul() {
     const fc = cardsJson.meta.factionCoefficients;
@@ -21927,18 +22385,22 @@
     const kws = (card.keywords ?? []).map((k) => kwName(k));
     if (card.type === "Spell" /* Spell */ && card.subtype === "Ritual" /* Ritual */) kws.unshift(bi("\u25F7 \u0420\u0438\u0442\u0443\u0430\u043B", "\u25F7 Ritual"));
     else if (card.type === "Spell" /* Spell */ && card.subtype === "Instant" /* Instant */) kws.unshift(bi("\u26A1 \u041C\u0433\u043D\u043E\u0432\u0435\u043D\u043D\u043E\u0435", "\u26A1 Instant"));
-    return kws.length ? `<span class="kw">${kws.join(" \xB7 ")}</span><br>` : "";
+    return kws.length ? `<span class="kw">${kws.map((k) => `<strong class="cardKeyword">${esc(k)}</strong>`).join(" \xB7 ")}</span><br>` : "";
   }
-  function renderCard(card) {
+  function resolvedAppearance(card, appearance) {
+    return appearance === "auto" ? isBorderlessEquipped(card.id) ? "borderless" : "classic" : appearance;
+  }
+  function renderCard(card, appearance = "auto") {
     const col = colorOf(card.faction);
     const rarCol = RARITY_COLORS[card.rarity] ?? "#cfd6dd";
+    const cardStyle = resolvedAppearance(card, appearance);
     const FAC_ICO = { Aurites: "\u2726", Necrus: "\u2620", Terramorph: "\u26F0", Pyromancer: "\u2668", Ethereal: "\u263E", Neutral: "\u25C8" };
-    const node = el("div", `card f-${card.faction} r-${card.rarity.toLowerCase()} t-${card.type.toLowerCase()}`);
+    const node = el("div", `card f-${card.faction} r-${card.rarity.toLowerCase()} t-${card.type.toLowerCase()}${cardStyle === "borderless" ? " borderless" : ""}`);
     node.insertAdjacentHTML("afterbegin", `<span class="facIco" title="${FACTION_RU[card.faction]}">${FAC_ICO[card.faction] ?? "\u25C8"}</span>`);
     node.insertAdjacentHTML("afterbegin", '<img class="frameOv" src="img/card_frame.png" alt="" draggable="false" onerror="this.remove()">');
     node.dataset.cardId = card.id;
     node.dataset.rarity = card.rarity;
-    const ability = cardText(card);
+    const ability = highlightCardKeywords(cardText(card));
     node.innerHTML = `
     <div class="banner" style="background:linear-gradient(90deg,${col.primary},${col.accent})"></div>
     <div class="innerframe"></div>
@@ -21958,6 +22420,8 @@
         <span class="cstats">${card.type === "Creature" /* Creature */ ? `<span class="catk">${card.attack ?? 0}</span><span class="chp">${card.health ?? 0}</span>` : `<span style="color:#767c8e">${FACTION_SIGIL[card.faction]}</span>`}</span>
       </div>
     </div>`;
+    node.dataset.cardAppearance = cardStyle;
+    node.dataset.cardVariantId = `${card.id}:${cardStyle}`;
     const ctNode = node.querySelector(".ctext");
     if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => fitText(ctNode));
     else fitText(ctNode);
@@ -21970,7 +22434,7 @@
     <div class="ttName" style="color:${col.primary}">${cardName(card)}</div>
     <div class="ttType">${typeName(card.type)} \xB7 ${factionName(card.faction)} \xB7 ${rarityName(card.rarity)} \xB7 ${card.cost} ${bi("\u043C\u0430\u043D\u044B", "Mana")}${card.element !== "None" /* None */ ? " \xB7 " + elemName(card.element) : ""}</div>
     ${card.type === "Creature" /* Creature */ ? `<div style="color:#ffd98a;font-size:.92rem">\u2694 ${card.attack ?? 0} &nbsp; \u2764 ${card.health ?? 0}</div>` : ""}
-    <div class="ttText">${cardText(card) || "\u2014"}</div>
+    <div class="ttText">${highlightCardKeywords(cardText(card)) || "\u2014"}</div>
     ${cardFlavor(card) ? `<div class="ttFlavor">${cardFlavor(card)}</div>` : ""}`;
     tooltip.classList.add("show");
     const w = 238;
@@ -22027,7 +22491,7 @@
     const rules = [];
     const ts = Date.now();
     if (b) rules.push(`#hand .cardback,#enemyBacks .cardback,.pbacks .cardback{background:url("${b}?t=${ts}") center/cover no-repeat !important;border-color:rgba(255,216,122,.35) !important}`);
-    if (tb) rules.push(`#backdrop .bgArt{background:url("${tb}?t=${ts}") center/cover no-repeat}`);
+    if (tb) rules.push(`#backdrop .bgArt{background-image:url("${tb}?t=${ts}")!important;background-position:center center!important;background-size:cover!important;background-repeat:no-repeat!important}`);
     if (r) rules.push(`.runeChip{background-image:url("${r}?t=${ts}");background-size:cover;background-position:center}`);
     st.textContent = rules.join("\n");
   }
@@ -22091,11 +22555,12 @@
   }
   var zoomPreview = $("zoomPreview");
   var zoomHideTimer = null;
-  function renderCardLarge(card, size = "xl") {
+  function renderCardLarge(card, size = "xl", appearance = "auto") {
     const col = colorOf(card.faction);
     const rarCol = RARITY_COLORS[card.rarity] ?? "#cfd6dd";
+    const cardStyle = resolvedAppearance(card, appearance);
     const FAC_ICO2 = { Aurites: "\u2726", Necrus: "\u2620", Terramorph: "\u26F0", Pyromancer: "\u2668", Ethereal: "\u263E", Neutral: "\u25C8" };
-    const node = el("div", `card f-${card.faction} r-${card.rarity.toLowerCase()} t-${card.type.toLowerCase()} ${size}`);
+    const node = el("div", `card f-${card.faction} r-${card.rarity.toLowerCase()} t-${card.type.toLowerCase()} ${size}${cardStyle === "borderless" ? " borderless" : ""}`);
     node.insertAdjacentHTML("afterbegin", `<span class="facIco" title="${FACTION_RU[card.faction]}">${FAC_ICO2[card.faction] ?? "\u25C8"}</span>`);
     node.insertAdjacentHTML("afterbegin", '<img class="frameOv" src="img/card_frame.png" alt="" draggable="false" onerror="this.remove()">');
     node.dataset.cardId = card.id;
@@ -22109,27 +22574,32 @@
       </div>
       <div class="ctype">${typeName(card.type)}${card.element !== "None" /* None */ ? " \xB7 " + elemName(card.element) : ""}</div>
       <div class="cart">${artSvg(card, size === "xxl" ? 340 : 300, size === "xxl" ? 330 : 290)}</div>
-      <div class="ctext">${keywordsLine(card)}${cardText(card) || "\u2014"}${card.flavor ? `<div class="zflavor">${card.flavor}</div>` : ""}</div>
+      <div class="ctext">${keywordsLine(card)}${highlightCardKeywords(cardText(card)) || "\u2014"}${card.flavor ? `<div class="zflavor">${card.flavor}</div>` : ""}</div>
       <div class="cfoot">
         <span class="rar" style="background:${rarCol};color:${rarCol}" title="${RARITY_RU[card.rarity]}"></span>
         <span class="cstats">${card.type === "Creature" /* Creature */ ? `<span class="catk">${card.attack ?? 0}</span><span class="chp">${card.health ?? 0}</span>` : `<span style="color:#767c8e">${FACTION_SIGIL[card.faction]}</span>`}</span>
       </div>
       <div class="zmeta">${FACTION_RU[card.faction]} \xB7 ${RARITY_RU[card.rarity]}${card.type === "Spell" /* Spell */ && card.subtype === "Instant" /* Instant */ ? " \xB7 \u26A1 \u043C\u0433\u043D\u043E\u0432\u0435\u043D\u043D\u043E\u0435" : card.type === "Spell" /* Spell */ && card.subtype === "Ritual" /* Ritual */ ? " \xB7 \u25F7 \u0440\u0438\u0442\u0443\u0430\u043B" : ""}</div>
     </div>`;
+    node.dataset.cardAppearance = cardStyle;
+    node.dataset.cardVariantId = `${card.id}:${cardStyle}`;
     return node;
   }
-  function showZoom(card, x, y, place = "auto") {
+  function showZoom(card, x, y, place = "auto", appearance = "auto") {
     if (!settings.preview) return;
     if (zoomHideTimer !== null) {
       window.clearTimeout(zoomHideTimer);
       zoomHideTimer = null;
     }
-    const prevId = zoomPreview.dataset.cardId;
-    if (prevId !== card.id) {
+    const previewStyle = resolvedAppearance(card, appearance);
+    const prevVariantId = zoomPreview.dataset.cardVariantId;
+    if (prevVariantId !== `${card.id}:${previewStyle}`) {
       zoomPreview.innerHTML = "";
-      zoomPreview.appendChild(renderCardLarge(card));
+      zoomPreview.appendChild(renderCardLarge(card, "xxl", appearance));
       fitText(zoomPreview.querySelector(".ctext"), 8);
       zoomPreview.dataset.cardId = card.id;
+      zoomPreview.dataset.cardAppearance = previewStyle;
+      zoomPreview.dataset.cardVariantId = `${card.id}:${previewStyle}`;
     }
     zoomPreview.classList.add("show");
     const vw = window.innerWidth;
@@ -22153,6 +22623,8 @@
     zoomHideTimer = window.setTimeout(() => {
       zoomPreview.classList.remove("show");
       delete zoomPreview.dataset.cardId;
+      delete zoomPreview.dataset.cardAppearance;
+      delete zoomPreview.dataset.cardVariantId;
       zoomHideTimer = null;
     }, 120);
   }
@@ -22164,7 +22636,8 @@
       const c = db.get(host.dataset.cardId);
       if (c) {
         const place = host.classList.contains("unit") ? "right" : "auto";
-        showZoom(c, ev.clientX, ev.clientY, place);
+        const appearance = host.dataset.cardAppearance === "borderless" || host.dataset.cardAppearance === "classic" ? host.dataset.cardAppearance : "auto";
+        showZoom(c, ev.clientX, ev.clientY, place, appearance);
       }
       if (battle.pendingTarget && battle.aimFrom) battle.updateAim(ev, host);
     } else {
@@ -22296,6 +22769,16 @@
     const ru = c.abilityText ?? "";
     return isEN() ? localeCache?.[`card_${c.id}_text`] || ru : ru;
   }
+  function highlightCardKeywords(text) {
+    let html = esc(text);
+    const terms = [...new Set(Object.values(isEN() ? KW_EN : KW_RU))].sort((a, b) => b.length - a.length);
+    for (const term of terms) {
+      const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const re = new RegExp(`(^|[^\\p{L}\\p{N}_])(${escaped})(?=$|[^\\p{L}\\p{N}_])`, "giu");
+      html = html.replace(re, '$1<strong class="cardKeyword">$2</strong>');
+    }
+    return html;
+  }
   function cardFlavor(c) {
     const ru = c.flavor ?? "";
     return isEN() ? localeCache?.[`card_${c.id}_flavor`] || ru : ru;
@@ -22335,7 +22818,8 @@
     ["death", "\u2620 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u043F\u043E\u0433\u0438\u0431\u043B\u043E"],
     ["heal", "\u2764 \u043B\u0435\u0447\u0435\u043D\u0438\u0435"],
     ["heroHit", "\u{1F4A5} \u0443\u0440\u043E\u043D \u0433\u0435\u0440\u043E\u044E"],
-    ["summon", "\u26FA \u043F\u0440\u0438\u0437\u044B\u0432 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0430"]
+    ["summon", "\u26FA \u043F\u0440\u0438\u0437\u044B\u0432 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0430"],
+    ["status", "\u2726 \u0441\u0442\u0430\u0442\u0443\u0441 \u043D\u0430\u043B\u043E\u0436\u0435\u043D \u0438\u043B\u0438 \u0441\u043D\u044F\u0442"]
   ];
   var subsTimer = 0;
   function caption(text) {
@@ -22383,6 +22867,10 @@
       this.turnDone = null;
       /** Существа, призванные с прошлого рендера: им показываем анимацию выхода. */
       this.summonedUids = /* @__PURE__ */ new Set();
+      /** VFX призыва ждут рендера: событие приходит раньше DOM-узла существа. */
+      this.pendingSummonFx = /* @__PURE__ */ new Map();
+      /** Статусные события привязаны к узлу после рендера или к шагу соответствующей атаки. */
+      this.pendingStatusFx = [];
       /** было ли существо тапнутым в прошлом рендере — для волны антапа */
       this.prevTapped = /* @__PURE__ */ new Map();
       this.pendingDraw = null;
@@ -22467,20 +22955,23 @@
       this.combatSnap = null;
       this.unitNodes.clear();
       this.dyingUnits.clear();
+      this.pendingSummonFx.clear();
+      this.pendingStatusFx = [];
       logBuffer.length = 0;
-      const pDef = resolveDeck(this.playerDeckId, deckList) ?? deckById.get(this.playerFaction);
+      const pDef = resolveDeck(this.playerDeckId, deckList) ?? starterDeckForFaction(this.playerFaction) ?? deckById.get(this.playerFaction);
       const pDeck = pDef.cards.slice();
-      if (!deckById.has(pDef.id)) {
+      if (!isStarterDeckId(pDef.id)) {
         const unowned = pDeck.filter((id) => ownedCount(id) === 0);
         if (unowned.length > 0) {
           this.running = false;
-          pushLog(`\u26D4 \u0412 \u043A\u043E\u043B\u043E\u0434\u0435 ${unowned.length} \u043A\u0430\u0440\u0442 \u0440\u0430\u0441\u0448\u0438\u0440\u0435\u043D\u0438\u044F, \u043A\u043E\u0442\u043E\u0440\u044B\u0445 \u043D\u0435\u0442 \u0432 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u0438: \u043E\u043D\u0438 \u0432\u044B\u043F\u0430\u0434\u0430\u044E\u0442 \u0442\u043E\u043B\u044C\u043A\u043E \u0438\u0437 \u0431\u0443\u0441\u0442\u0435\u0440\u043E\u0432.`, "big");
+          pushLog(`\u26D4 \u0412 \u043A\u043E\u043B\u043E\u0434\u0435 ${unowned.length} \u043A\u0430\u0440\u0442, \u043A\u043E\u0442\u043E\u0440\u044B\u0445 \u043F\u043E\u043A\u0430 \u043D\u0435\u0442 \u0432 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u0438: \u043E\u0442\u043A\u0440\u043E\u0439\u0442\u0435 \u0431\u0443\u0441\u0442\u0435\u0440\u044B, \u0441\u043E\u0431\u044B\u0442\u0438\u044F \u0438\u043B\u0438 \u0431\u043E\u0435\u0432\u043E\u0439 \u043F\u0440\u043E\u043F\u0443\u0441\u043A.`, "big");
           this.setWho("\u041A\u043E\u043B\u043E\u0434\u0430 \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u043D\u0430");
           this.renderAll();
           return;
         }
       }
-      const eDeck = deckById.get(this.enemyFaction).cards.slice();
+      const enemyDef = isStarterDeckId(pDef.id) ? starterDeckForFaction(this.enemyFaction) ?? deckById.get(this.enemyFaction) : deckById.get(this.enemyFaction);
+      const eDeck = enemyDef.cards.slice();
       this.engine = new GameEngine(db, [pDeck, eDeck], {
         factions: [this.playerFaction, this.enemyFaction],
         names: ["\u0412\u044B", this.friendFoe ?? (this.bossPower ? `\u0411\u041E\u0421\u0421 \xB7 ${FACTION_RU[this.enemyFaction]}` : FACTION_RU[this.enemyFaction])],
@@ -22520,6 +23011,7 @@
         blunderRate: Math.max(0.02, Math.round((1 - this.difficulty) * 0.5 * 100) / 100),
         lookahead: this.difficulty >= 1
       });
+      setAppRoute("battle");
       $("menu").classList.add("hidden");
       $("gameover").classList.add("hidden");
       $("battle").classList.remove("hidden");
@@ -22607,7 +23099,7 @@
         await this.combatWindow();
         if (!this.running) return;
       }
-      e.finishMainPhase();
+      await e.finishMainPhase();
       this.aiInstantResponse("\u0432 \u043A\u043E\u043D\u0435\u0446 \u0432\u0430\u0448\u0435\u0433\u043E \u0445\u043E\u0434\u0430");
       this.renderAll();
     }
@@ -22677,9 +23169,12 @@
       if (win) {
         meta.wins += 1;
         meta.facW[fac] = (meta.facW[fac] ?? 0) + 1;
-        if (!unranked) meta.mmr += 12;
+        if (!unranked) {
+          meta.mmr += 12;
+          if (!meta.borderlessEventClaimed) meta.borderlessEventWins = Math.min(BORDERLESS_EVENT_WINS, (meta.borderlessEventWins ?? 0) + 1);
+        }
         meta.xp += 80 + e.turn * 2;
-        questBump("win_fac");
+        questBump("win_fac", 1, fac);
       } else {
         meta.losses += 1;
         meta.facL[fac] = (meta.facL[fac] ?? 0) + 1;
@@ -22756,7 +23251,7 @@
       if (go2) {
         const line = document.createElement("div");
         line.style.cssText = "margin-top:.5rem;color:#ffe9b0;font-family:Philosopher,serif;font-size:.9rem";
-        line.textContent = `\u041D\u0430\u0433\u0440\u0430\u0434\u044B: +${win ? 80 + e.turn * 2 : 20 + e.turn} \u043E\u043F\u044B\u0442\u0430, +${win ? unranked ? 60 : 120 : unranked ? 25 : 60} \u043E\u043F\u044B\u0442\u0430 \u043F\u0440\u043E\u043F\u0443\u0441\u043A\u0430` + (unranked ? " (\u043C\u0430\u0442\u0447 \u0431\u0435\u0437 \u0440\u0435\u0439\u0442\u0438\u043D\u0433\u0430)" : `, \u0440\u0435\u0439\u0442\u0438\u043D\u0433 ${meta.mmr} \u2014 ${rankOf(meta.mmr).title}`) + (reward ? `, \u25C8${reward}${gemReward ? ` \u0438 \u{1F48E}${gemReward}` : ""} \u0437\u0430 \u043A\u0430\u043C\u043F\u0430\u043D\u0438\u044E` : "");
+        line.textContent = `\u041D\u0430\u0433\u0440\u0430\u0434\u044B: +${win ? 80 + e.turn * 2 : 20 + e.turn} \u043E\u043F\u044B\u0442\u0430, +${win ? unranked ? 60 : 120 : unranked ? 25 : 60} \u043E\u043F\u044B\u0442\u0430 \u043F\u0440\u043E\u043F\u0443\u0441\u043A\u0430` + (unranked ? " (\u043C\u0430\u0442\u0447 \u0431\u0435\u0437 \u0440\u0435\u0439\u0442\u0438\u043D\u0433\u0430)" : `, \u0440\u0435\u0439\u0442\u0438\u043D\u0433 ${meta.mmr} \u2014 ${rankOf(meta.mmr).title}`) + (reward ? `, \u{1FA99}${reward}${gemReward ? ` \u0438 \u{1F48E}${gemReward}` : ""} \u0437\u0430 \u043A\u0430\u043C\u043F\u0430\u043D\u0438\u044E` : "");
         go2.appendChild(line);
       }
       if (reward) shardsAdd(reward);
@@ -22858,7 +23353,7 @@
       }
       await this.responseWindow("\u043F\u0435\u0440\u0435\u0434 \u0430\u0442\u0430\u043A\u043E\u0439 \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430");
       if (!this.running) return;
-      e.finishMainPhase();
+      await e.finishMainPhase();
       await this.responseWindow("\u043A\u043E\u043D\u0435\u0446 \u0445\u043E\u0434\u0430 \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430");
       this.setBusy(false);
       this.renderAll();
@@ -22969,6 +23464,7 @@
         await sleep2(200);
         this.combatBusy = false;
         this.combatSnap = null;
+        this.flushPendingStatusFx();
         this.renderStats();
         return;
       }
@@ -22978,6 +23474,7 @@
       this.combatBusy = false;
       this.combatSnap = null;
       this.renderAll();
+      this.flushPendingStatusFx();
       await sleep2(160);
     }
     /** Ядро проигрывания очереди атак: авто-бой и ручные атаки стрелкой. */
@@ -23054,18 +23551,13 @@
             const target = rec.attackerSide === 0 /* Player */ ? 1 /* Opponent */ : 0 /* Player */;
             this.combatSnap.hp[target] = Math.max(0, this.combatSnap.hp[target] - rec.heroDamage);
           }
-          const dealt = rec.defenderDamage > 0 ? rec.defenderDamage : rec.heroDamage;
-          if (dealt > 0) {
-            const anode = this.unitNodes.get(rec.attackerUid);
-            const aid = anode?.dataset.cardId ?? this.engine.p(rec.attackerSide).creatures.find((c) => c.uid === rec.attackerUid)?.cardId;
-            const acard = aid ? db.get(aid) : void 0;
-            if (acard && (acard.keywords ?? []).includes("Lifesteal" /* Lifesteal */)) {
-              const cap0 = DEFAULT_CONFIG.heroHealth;
-              this.combatSnap.hp[rec.attackerSide] = Math.min(cap0, this.combatSnap.hp[rec.attackerSide] + dealt);
-              this.floatHero(rec.attackerSide, `+${dealt}`, true);
-              healFx(centerOf(rec.attackerSide === 0 /* Player */ ? $("playerHero") : $("enemyHero"), 0.4));
-              Audio_.heal();
-            }
+          const healed = rec.lifestealAmount ?? 0;
+          if (rec.lifesteal && healed > 0) {
+            const cap0 = this.engine.p(rec.attackerSide).maxHealth;
+            this.combatSnap.hp[rec.attackerSide] = Math.min(cap0, this.combatSnap.hp[rec.attackerSide] + healed);
+            this.floatHero(rec.attackerSide, `+${healed}`, true);
+            healFx(centerOf(rec.attackerSide === 0 /* Player */ ? $("playerHero") : $("enemyHero"), 0.4));
+            Audio_.heal();
           }
         }
         if (rec.attackerDamage > 0 && attacker) this.floatUnit(rec.attackerUid, `-${rec.attackerDamage}`, false);
@@ -23076,6 +23568,8 @@
           strikeAnim.cancel?.();
         } else await sleep2(140);
         if (attacker) attacker.classList.remove("attacking");
+        if (rec.defenderUid !== void 0) this.flushPendingStatusFx(rec.defenderUid);
+        this.flushPendingStatusFx(rec.attackerUid);
         this.renderAll();
         await sleep2(70);
       }
@@ -23252,15 +23746,40 @@
           motes(centerOf(this.unitNodes.get(e.uid)), "#7fe0a0", 12, 70);
           Audio_.heal();
           break;
+        case "StatusApplied" /* StatusApplied */: {
+          const status = String(e.data?.status ?? "");
+          if (e.uid !== void 0) {
+            this.pendingStatusFx.push({ uid: e.uid, status, text: e.text });
+            if (!this.combatBusy) this.flushPendingStatusFx(e.uid);
+          }
+          if (e.text) pushLog(e.text, "status");
+          captionFor("status");
+          break;
+        }
+        case "StatusExpired" /* StatusExpired */: {
+          const status = String(e.data?.status ?? "");
+          if (e.uid !== void 0) {
+            this.pendingStatusFx.push({ uid: e.uid, status, text: e.text, expired: true });
+            if (!this.combatBusy) this.flushPendingStatusFx(e.uid);
+          }
+          if (e.text) pushLog(e.text, "status");
+          break;
+        }
         case "CreatureDeath" /* CreatureDeath */:
           this.killUnit(e.uid, e.cardName);
           break;
-        case "CreatureSummoned" /* CreatureSummoned */:
+        case "CreatureSummoned" /* CreatureSummoned */: {
+          const side = e.side ?? 0 /* Player */;
+          if (side === 0 /* Player */) questBump("creatures");
           this.summonedUids.add(e.uid);
-          summonFx(centerOf(this.unitNodes.get(e.uid)), paletteOf(this.engine?.p(e.side ?? 0 /* Player */).faction ?? "Neutral" /* Neutral */).primary);
+          this.pendingSummonFx.set(e.uid, {
+            side,
+            faction: this.engine?.db.get(e.cardId ?? "")?.faction ?? this.engine?.p(side).faction ?? "Neutral" /* Neutral */
+          });
           Audio_.summon();
           captionFor("summon");
           break;
+        }
         case "StackPushed" /* StackPushed */:
           this.renderStack();
           if (!this.stackBusy) {
@@ -23379,22 +23898,85 @@
         setTimeout(() => hpEl?.classList.remove("damaged"), 430);
       }
     }
+    flushPendingSummonFx() {
+      for (const [uid, info] of this.pendingSummonFx) {
+        const node = this.unitNodes.get(uid);
+        const zone = info.side === 0 /* Player */ ? $("playerBoard") : $("enemyBoard");
+        summonFx(centerOf(node ?? zone), paletteOf(info.faction).primary);
+        this.pendingSummonFx.delete(uid);
+      }
+    }
+    flushPendingStatusFx(onlyUid) {
+      const colors = {
+        Burn: "#ff793c",
+        Poison: "#7be36c",
+        Freeze: "#7bdcff",
+        Shield: "#8ecbff",
+        Fury: "#ffd66e",
+        Silence: "#c6a8ed"
+      };
+      const remain = [];
+      for (const info of this.pendingStatusFx) {
+        if (onlyUid !== void 0 && info.uid !== onlyUid) {
+          remain.push(info);
+          continue;
+        }
+        const node = this.unitNodes.get(info.uid) ?? this.dyingUnits.get(info.uid);
+        if (!node) {
+          if (this.engine?.findCreature(info.uid)) remain.push(info);
+          continue;
+        }
+        const at = centerOf(node);
+        const color = info.expired ? "#b7b7c4" : colors[info.status] ?? "#d8b45a";
+        ripple(at, color, info.expired ? 1 : 2, 135);
+        if (!info.expired) motes(at, color, 8, 42);
+        if (this.fxOk()) node.animate?.([
+          { filter: "brightness(1) saturate(1)" },
+          { filter: `brightness(1.45) saturate(1.35) drop-shadow(0 0 9px ${color})` },
+          { filter: "brightness(1) saturate(1)" }
+        ], { duration: 440, easing: "ease-out" });
+      }
+      this.pendingStatusFx = remain;
+    }
     killUnit(uid, name) {
       const node = this.unitNodes.get(uid) ?? this.dyingUnits.get(uid);
       pushLog(`\u271D \xAB${name ?? node?.querySelector(".uname")?.textContent ?? "\u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E"}\xBB \u043F\u043E\u0433\u0438\u0431\u0430\u0435\u0442`, "dmg");
-      if (!node || this.dyingUnits.has(uid)) return;
-      this.dyingUnits.set(uid, node);
+      if (!node) {
+        this.pendingSummonFx.delete(uid);
+        return;
+      }
+      if (this.dyingUnits.has(uid)) return;
+      const rect = node.getBoundingClientRect();
+      const corpse = node.cloneNode(true);
+      corpse.classList.remove("attacking", "targetable");
+      corpse.classList.add("deathGhost");
+      Object.assign(corpse.style, {
+        position: "fixed",
+        left: `${rect.left}px`,
+        top: `${rect.top}px`,
+        width: `${rect.width}px`,
+        height: `${rect.height}px`,
+        margin: "0",
+        zIndex: "2",
+        pointerEvents: "none",
+        transformOrigin: "center center"
+      });
+      const layer2 = $("floatLayer") ?? document.body;
+      layer2.appendChild(corpse);
+      node.style.visibility = "hidden";
+      this.dyingUnits.set(uid, corpse);
       const c = this.engine?.findCreature(uid);
-      const at = centerOf(node);
+      const card = this.engine?.db.get(node.dataset.cardId ?? "");
+      const at = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
       const ownerSide = node.dataset.side === String(0 /* Player */) ? 0 /* Player */ : 1 /* Opponent */;
       const hero = centerOf(ownerSide === 0 /* Player */ ? $("playerHero") : $("enemyHero"), 0.42);
-      deathFx(at, hero, paletteOf(c?.faction ?? "Neutral" /* Neutral */).primary);
+      deathFx(at, hero, paletteOf(c?.faction ?? card?.faction ?? "Neutral" /* Neutral */).primary);
       Audio_.death();
       captionFor("death");
-      dissolve(node, 620);
+      dissolve(corpse, 620);
       setTimeout(() => {
-        this.dyingUnits.delete(uid);
-      }, 660);
+        if (this.dyingUnits.get(uid) === corpse) this.dyingUnits.delete(uid);
+      }, 700);
     }
     flashHero(side, echo) {
       const panel = side === 0 /* Player */ ? $("playerHero") : $("enemyHero");
@@ -23515,6 +24097,8 @@
         this.renderStats();
         this.renderBoard(1 /* Opponent */, $("enemyBoard"), "\u0432\u043E\u0439\u0441\u043A\u0430 \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430");
         this.renderBoard(0 /* Player */, $("playerBoard"), "\u0432\u0430\u0448\u0438 \u0432\u043E\u0439\u0441\u043A\u0430");
+        this.flushPendingSummonFx();
+        if (!this.combatBusy) this.flushPendingStatusFx();
         this.renderRunes(1 /* Opponent */, $("enemyRunes"));
         this.renderRunes(0 /* Player */, $("playerRunes"));
         this.renderHand();
@@ -23604,6 +24188,10 @@
       node.dataset.side = String(c.owner);
       const mine = c.owner === 0 /* Player */;
       const canAtk = mine && this.engine.canAttack(c);
+      const maxAttacks = c.keywords.includes("Windfury" /* Windfury */) ? 2 : 1;
+      const attacksRemaining = Math.max(0, maxAttacks - c.attacksThisTurn);
+      const attackMarkTitle = c.attacksThisTurn > 0 ? `\u0411\u0443\u0440\u044F: \u043C\u043E\u0436\u0435\u0442 \u0430\u0442\u0430\u043A\u043E\u0432\u0430\u0442\u044C \u0435\u0449\u0451 ${attacksRemaining} \u0440\u0430\u0437` : "\u0413\u043E\u0442\u043E\u0432\u043E \u043A \u0430\u0442\u0430\u043A\u0435";
+      const attackMark = canAtk ? `<span class="attackReadyMark${c.attacksThisTurn > 0 ? " again" : ""}" title="${esc(attackMarkTitle)}" aria-label="${esc(attackMarkTitle)}">${c.attacksThisTurn > 0 ? `\u0415\u0449\u0451 ${attacksRemaining}` : "\u2694"}</span>` : "";
       if (canAtk) node.classList.add("ready");
       if (mine && !canAtk) node.classList.add("exhausted");
       if (c.attacksThisTurn > 0) node.classList.add("tapped");
@@ -23630,7 +24218,8 @@
       for (const s of c.statuses) {
         const b = STATUS_BADGE[s.type];
         if (!b) continue;
-        badges.push(`<span class="badge ${b.cls}" title="${b.title}">${b.ico}${s.value > 1 ? s.value : ""}</span>`);
+        const duration = s.turnsLeft < 0 ? "\u043F\u043E\u0441\u0442\u043E\u044F\u043D\u043D\u043E" : `${s.turnsLeft} \u0445\u043E\u0434.`;
+        badges.push(`<span class="badge ${b.cls}" title="${b.title} \xB7 ${duration}">${b.ico}${s.value > 1 ? s.value : ""}</span>`);
       }
       for (const kw of c.keywords ?? []) {
         const b = KW_BADGE[kw];
@@ -23642,7 +24231,7 @@
         <div class="uart">${artSvg(card, 104, 134)}</div>
         <div class="uname">${cardName(card)}</div>
         <div class="stats"><span class="atk">${c.attack}</span><span class="hp${c.health <= 0 ? " lethal" : ""}">${Math.max(0, this.displayHpOf(c.uid, c.health))}</span></div>
-      </div>`;
+      </div>${attackMark}`;
       const ft = this.dmgFlash.get(c.uid);
       if (ft && Date.now() - ft < 500) {
         const hpEl = node.querySelector(".hp");
@@ -24216,7 +24805,7 @@
       }
       metaSave();
       tutGatePractice();
-      showToast(`\u{1F393} ${LESSONS[n - 1].ru} \u0432\u044B\u043F\u043E\u043B\u043D\u0435\u043D!${first ? ` +\u25C8${rw}` : ""}` + (n >= 4 && !meta.tutReward ? " \xB7 \u0417\u0430\u0431\u0435\u0440\u0438\u0442\u0435 \u043D\u0430\u0433\u0440\u0430\u0434\u0443 \u0432 \u043C\u0435\u043D\u044E \xAB\u{1F393} \u041E\u0431\u0443\u0447\u0435\u043D\u0438\u0435\xBB" : ""));
+      showToast(`\u{1F393} ${LESSONS[n - 1].ru} \u0432\u044B\u043F\u043E\u043B\u043D\u0435\u043D!${first ? ` +\u{1FA99}${rw}` : ""}` + (n >= 4 && !meta.tutReward ? " \xB7 \u0417\u0430\u0431\u0435\u0440\u0438\u0442\u0435 \u043D\u0430\u0433\u0440\u0430\u0434\u0443 \u0432 \u043C\u0435\u043D\u044E \xAB\u{1F393} \u041E\u0431\u0443\u0447\u0435\u043D\u0438\u0435\xBB" : ""));
     }
     /* -------- спека «6. Обучение»: пошаговые уроки (20 шагов, зеркало tutorial.json) -------- */
     /** Карта урока сыграна (телеметрия или кладбище) — для шагов «разыграйте X». */
@@ -24479,15 +25068,25 @@
   }
   var battle = new Battle();
   var PICK_KEY = "ec.pickedFaction";
+  var MENU_DECK_KEY = "ec.menuSelectedDeckId";
   var picked = "Aurites" /* Aurites */;
+  var menuSelectedDeckId = null;
   try {
     const savedPick = window.localStorage?.getItem(PICK_KEY);
     if (savedPick && FACTION_IDS.includes(savedPick)) picked = savedPick;
+    menuSelectedDeckId = window.localStorage?.getItem(MENU_DECK_KEY) || null;
   } catch {
   }
   var savePicked = () => {
     try {
       window.localStorage?.setItem(PICK_KEY, picked);
+    } catch {
+    }
+  };
+  var saveMenuDeck = () => {
+    try {
+      if (menuSelectedDeckId) window.localStorage?.setItem(MENU_DECK_KEY, menuSelectedDeckId);
+      else window.localStorage?.removeItem(MENU_DECK_KEY);
     } catch {
     }
   };
@@ -24498,42 +25097,65 @@
   };
   window.addEventListener("pointerdown", unlockAudio);
   var META_KEY = "ec_meta_v1";
-  var DAILY_REWARD = { win_fac: 200, runes: 120, pack: 80 };
+  var DAILY_REWARD = { win_fac: 200, creatures: 200, runes: 120, pack: 80 };
   var QUEST_RU = {
     win_fac: (q) => `\u0412\u044B\u0438\u0433\u0440\u0430\u0439\u0442\u0435 ${q.goal} \u043C\u0430\u0442\u0447\u0430 \u0444\u0440\u0430\u043A\u0446\u0438\u0435\u0439 ${FACTION_RU[q.fac ?? "Aurites"]}`,
-    runes: (q) => `\u0420\u0430\u0437\u044B\u0433\u0440\u0430\u0439\u0442\u0435 ${q.goal} \u0440\u0443\u043D`,
+    creatures: (q) => `\u0420\u0430\u0437\u044B\u0433\u0440\u0430\u0439\u0442\u0435 ${q.goal} \u0441\u0443\u0449\u0435\u0441\u0442\u0432`,
+    runes: (q) => `\u041F\u0440\u0438\u043C\u0435\u043D\u0438\u0442\u0435 ${q.goal} \u0440\u0443\u043D\u044B`,
     pack: (q) => `\u041E\u0442\u043A\u0440\u043E\u0439\u0442\u0435 ${q.goal} \u0431\u0443\u0441\u0442\u0435\u0440`
   };
-  function todayStr() {
-    return (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+  function todayStr(date = /* @__PURE__ */ new Date()) {
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
   }
   function freshQuests() {
     const fac = FACTION_IDS[(/* @__PURE__ */ new Date()).getDate() % FACTION_IDS.length];
     return [
       { id: "win_fac", prog: 0, goal: 2, claimed: false, fac },
-      { id: "runes", prog: 0, goal: 6, claimed: false },
+      { id: "creatures", prog: 0, goal: 20, claimed: false },
+      { id: "runes", prog: 0, goal: 2, claimed: false },
       { id: "pack", prog: 0, goal: 1, claimed: false }
     ];
   }
   var SEASON_MS = 30 * 24 * 3600 * 1e3;
-  function weekStr() {
-    const d = /* @__PURE__ */ new Date();
-    const jan1 = new Date(d.getFullYear(), 0, 1);
-    const wk = Math.ceil(((d.getTime() - jan1.getTime()) / 864e5 + jan1.getDay() + 1) / 7);
-    return `${d.getFullYear()}-W${wk}`;
+  function weekStr(date = /* @__PURE__ */ new Date()) {
+    const monday = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+    monday.setDate(monday.getDate() - (monday.getDay() + 6) % 7);
+    return todayStr(monday);
+  }
+  function nextDailyResetMs(now = /* @__PURE__ */ new Date()) {
+    const next = new Date(now);
+    next.setHours(24, 0, 0, 0);
+    return next.getTime();
+  }
+  function nextWeeklyResetMs(now = /* @__PURE__ */ new Date()) {
+    const next = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const days = (8 - next.getDay()) % 7 || 7;
+    next.setDate(next.getDate() + days);
+    return next.getTime();
+  }
+  function formatQuestCountdown(ms) {
+    const total = Math.max(0, Math.floor(ms / 1e3));
+    const days = Math.floor(total / 86400);
+    const hours = Math.floor(total % 86400 / 3600);
+    const minutes = Math.floor(total % 3600 / 60);
+    const seconds = total % 60;
+    const clock = `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+    return days ? `${days} \u0434 ${clock}` : clock;
   }
   function freshWQuests() {
     return [
       { id: "w_win3", prog: 0, goal: 3, claimed: false },
       { id: "w_runes", prog: 0, goal: 15, claimed: false },
+      { id: "w_creatures", prog: 0, goal: 60, claimed: false },
       { id: "w_dmg", prog: 0, goal: 300, claimed: false }
     ];
   }
-  var WEEK_REWARD = { w_win3: 300, w_runes: 250, w_dmg: 350 };
+  var WEEK_REWARD = { w_win3: 300, w_runes: 250, w_creatures: 300, w_dmg: 350 };
   var WQUEST_RU = {
-    w_win3: "\u041D\u0435\u0434\u0435\u043B\u044F: \u0432\u044B\u0438\u0433\u0440\u0430\u0439\u0442\u0435 3 \u043C\u0430\u0442\u0447\u0430",
-    w_runes: "\u041D\u0435\u0434\u0435\u043B\u044F: \u0440\u0430\u0437\u044B\u0433\u0440\u0430\u0439\u0442\u0435 15 \u0440\u0443\u043D",
-    w_dmg: "\u041D\u0435\u0434\u0435\u043B\u044F: \u043D\u0430\u043D\u0435\u0441\u0438\u0442\u0435 300 \u0443\u0440\u043E\u043D\u0430"
+    w_win3: "\u0412\u044B\u0438\u0433\u0440\u0430\u0439\u0442\u0435 3 \u043C\u0430\u0442\u0447\u0430 \u0437\u0430 \u043D\u0435\u0434\u0435\u043B\u044E",
+    w_runes: "\u0420\u0430\u0437\u044B\u0433\u0440\u0430\u0439\u0442\u0435 15 \u0440\u0443\u043D \u0437\u0430 \u043D\u0435\u0434\u0435\u043B\u044E",
+    w_creatures: "\u0420\u0430\u0437\u044B\u0433\u0440\u0430\u0439\u0442\u0435 60 \u0441\u0443\u0449\u0435\u0441\u0442\u0432 \u0437\u0430 \u043D\u0435\u0434\u0435\u043B\u044E",
+    w_dmg: "\u041D\u0430\u043D\u0435\u0441\u0438\u0442\u0435 300 \u0443\u0440\u043E\u043D\u0430 \u0437\u0430 \u043D\u0435\u0434\u0435\u043B\u044E"
   };
   var META_DEFAULT = {
     xp: 0,
@@ -24556,7 +25178,7 @@
     nick: "\u0413\u043E\u0441\u0442\u044C",
     avatarFac: "Aurites",
     frame: "bronze",
-    gems: 100,
+    gems: 500,
     signedIn: false,
     pid: "",
     bpXp: 0,
@@ -24565,12 +25187,16 @@
     seasonStart: 0,
     bestMmr: 1e3,
     foilTokens: 0,
-    premOpens: 0,
-    freeOpens: 0,
+    premOpens: 1,
+    freeOpens: 5,
     bundles: [],
     tableSkin: "classic",
     runeSkin: "classic",
     avatarsOwned: [],
+    borderlessOwned: [],
+    borderlessEquipped: [],
+    borderlessEventWins: 0,
+    borderlessEventClaimed: false,
     tablesOwned: [],
     runesOwned: [],
     friends: [],
@@ -24584,24 +25210,53 @@
     replays: []
   };
   var meta = META_DEFAULT;
+  function normalizeQuestSet(existing, templates) {
+    const previous = Array.isArray(existing) ? existing : [];
+    return templates.map((template) => {
+      const saved = previous.find((q) => q?.id === template.id);
+      if (!saved) return { ...template };
+      const prog = Number.isFinite(Number(saved.prog)) ? Number(saved.prog) : 0;
+      return {
+        ...template,
+        ...saved,
+        goal: template.goal,
+        prog: Math.max(0, Math.min(template.goal, prog)),
+        claimed: !!saved.claimed,
+        fac: saved.fac ?? template.fac
+      };
+    });
+  }
   function metaLoad() {
+    const freshMeta = () => JSON.parse(JSON.stringify(META_DEFAULT));
     try {
       const raw = window.localStorage.getItem(META_KEY);
-      if (raw) meta = { ...META_DEFAULT, ...JSON.parse(raw) };
+      if (raw) {
+        const saved = JSON.parse(raw);
+        meta = { ...freshMeta(), ...saved };
+        if (saved.gems == null) meta.gems = 100;
+        if (saved.freeOpens == null) meta.freeOpens = 0;
+        if (saved.premOpens == null) meta.premOpens = 0;
+      } else {
+        meta = freshMeta();
+      }
     } catch {
-      meta = META_DEFAULT;
+      meta = freshMeta();
     }
-    if (meta.questDate !== todayStr()) {
-      meta.questDate = todayStr();
+    const today = todayStr();
+    if (meta.questDate !== today) {
+      meta.questDate = today;
       meta.quests = freshQuests();
-    }
-    if (!meta.quests?.length) meta.quests = freshQuests();
+    } else meta.quests = normalizeQuestSet(meta.quests, freshQuests());
     if (!meta.seasonStart) meta.seasonStart = Date.now();
     if (!meta.bestMmr) meta.bestMmr = meta.mmr;
     if (meta.bpXp == null) meta.bpXp = meta.xp ?? 0;
     if (meta.foilTokens == null) meta.foilTokens = 0;
     if (meta.premOpens == null) meta.premOpens = 0;
     if (!meta.tutClaims) meta.tutClaims = [];
+    if (!Array.isArray(meta.borderlessOwned)) meta.borderlessOwned = [];
+    if (!Array.isArray(meta.borderlessEquipped)) meta.borderlessEquipped = [];
+    if (!Number.isFinite(meta.borderlessEventWins)) meta.borderlessEventWins = 0;
+    if (typeof meta.borderlessEventClaimed !== "boolean") meta.borderlessEventClaimed = false;
     if (Date.now() > meta.seasonStart + SEASON_MS) {
       meta.seasonStart = Date.now();
       meta.bpXp = 0;
@@ -24609,11 +25264,11 @@
       meta.bpClaimedP = [];
       meta.bpPremium = false;
     }
-    if (meta.wquestWeek !== weekStr()) {
-      meta.wquestWeek = weekStr();
+    const currentWeek = weekStr();
+    if (meta.wquestWeek !== currentWeek) {
+      meta.wquestWeek = currentWeek;
       meta.wquests = freshWQuests();
-    }
-    if (!meta.wquests?.length) meta.wquests = freshWQuests();
+    } else meta.wquests = normalizeQuestSet(meta.wquests, freshWQuests());
     if (!meta.pid) {
       meta.pid = `ec-${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`;
       try {
@@ -24629,7 +25284,73 @@
     }
     scheduleSync();
   }
+  function syncQuestPeriods() {
+    let changed = false;
+    const today = todayStr();
+    const currentWeek = weekStr();
+    if (meta.questDate !== today) {
+      meta.questDate = today;
+      meta.quests = freshQuests();
+      changed = true;
+    }
+    if (meta.wquestWeek !== currentWeek) {
+      meta.wquestWeek = currentWeek;
+      meta.wquests = freshWQuests();
+      changed = true;
+    }
+    if (changed) metaSave();
+    return changed;
+  }
   metaLoad();
+  var BORDERLESS_BOOSTER_CHANCE = 1e-3;
+  var BORDERLESS_EVENT_WINS = 3;
+  function hasBorderless(id) {
+    return (meta.borderlessOwned ?? []).includes(id);
+  }
+  function isBorderlessEquipped(id) {
+    return (meta.borderlessEquipped ?? []).includes(id);
+  }
+  function unlockBorderless(id) {
+    if (!ALL_CARDS.some((card) => card.id === id) || hasBorderless(id)) return false;
+    meta.borderlessOwned.push(id);
+    return true;
+  }
+  function grantRandomBorderless() {
+    const candidates = ALL_CARDS.filter((card2) => !hasBorderless(card2.id));
+    if (!candidates.length) return null;
+    const card = candidates[Math.floor(Math.random() * candidates.length)];
+    return unlockBorderless(card.id) ? card : null;
+  }
+  function borderlessRollIsBonus(roll) {
+    return Number.isFinite(roll) && roll >= 0 && roll < BORDERLESS_BOOSTER_CHANCE;
+  }
+  function maybeBorderlessPackBonus() {
+    if (!borderlessRollIsBonus(Math.random())) return null;
+    return grantRandomBorderless();
+  }
+  window.ecBorderlessChanceForRoll = (roll) => borderlessRollIsBonus(roll);
+  function setBorderlessEquipped(id, equip) {
+    if (!ALL_CARDS.some((card) => card.id === id) || equip && !hasBorderless(id)) return false;
+    const equipped = new Set(meta.borderlessEquipped ?? []);
+    const wasEquipped = equipped.has(id);
+    if (wasEquipped === equip) return equip;
+    if (equip) equipped.add(id);
+    else equipped.delete(id);
+    meta.borderlessEquipped = [...equipped];
+    metaSave();
+    return equip;
+  }
+  function toggleBorderless(id) {
+    if (!hasBorderless(id)) return false;
+    return setBorderlessEquipped(id, !isBorderlessEquipped(id));
+  }
+  window.ecGrantBorderless = (id) => {
+    const ok = unlockBorderless(id);
+    if (ok) metaSave();
+    return ok;
+  };
+  window.ecToggleBorderless = (id) => toggleBorderless(id);
+  window.ecBorderlessOwned = () => [...meta.borderlessOwned ?? []];
   var META_API = () => `http://${window.location.hostname}:8081`;
   var syncTimer = 0;
   function scheduleSync() {
@@ -24683,8 +25404,10 @@
             tableSkin: meta.tableSkin ?? "classic",
             runeSkin: meta.runeSkin ?? "classic"
           },
+          questDate: meta.questDate,
+          wquestWeek: meta.wquestWeek,
           quests: {
-            daily: (meta.quests ?? []).map((q) => ({ id: q.id, prog: q.prog, goal: q.goal, claimed: q.claimed })),
+            daily: (meta.quests ?? []).map((q) => ({ id: q.id, prog: q.prog, goal: q.goal, claimed: q.claimed, fac: q.fac })),
             weekly: (meta.wquests ?? []).map((q) => ({ id: q.id, prog: q.prog, goal: q.goal, claimed: q.claimed }))
           },
           history: (meta.history ?? []).slice(0, 20)
@@ -24707,22 +25430,123 @@
     } catch {
     }
   }
-  function questBump(id, n = 1) {
+  function questBump(id, n = 1, faction) {
+    if (!(n > 0)) return;
+    let changed = false;
     const q = meta.quests.find((x) => x.id === id);
-    if (q && !q.claimed) {
+    const matchesQuestFaction = id !== "win_fac" || !faction || q?.fac === faction;
+    if (q && !q.claimed && matchesQuestFaction) {
       q.prog = Math.min(q.goal, q.prog + n);
-      metaSave();
+      changed = true;
     }
-    const WMAP = { win_fac: "w_win3", runes: "w_runes", dmg: "w_dmg" };
+    const WMAP = {
+      win_fac: "w_win3",
+      runes: "w_runes",
+      creatures: "w_creatures",
+      dmg: "w_dmg"
+    };
     const wid = WMAP[id];
     if (wid) {
       const wq = (meta.wquests ?? []).find((x) => x.id === wid);
       if (wq && !wq.claimed) {
         wq.prog = Math.min(wq.goal, wq.prog + n);
-        metaSave();
+        changed = true;
       }
     }
+    if (changed) {
+      metaSave();
+      if (!document.getElementById("menu")?.classList.contains("hidden")) renderHomeQuests();
+    }
   }
+  window.ecTestQuestBump = (id, n = 1, faction) => questBump(id, n, faction);
+  function updateQuestCountdowns() {
+    const now = /* @__PURE__ */ new Date();
+    document.querySelectorAll('[data-quest-reset="daily"],[data-quest-reset="weekly"]').forEach((node) => {
+      const resetAt = node.dataset.questReset === "weekly" ? nextWeeklyResetMs(now) : nextDailyResetMs(now);
+      const prefix = node.dataset.resetPrefix ?? "\u0421\u0431\u0440\u043E\u0441 \u0447\u0435\u0440\u0435\u0437";
+      node.textContent = `${prefix} ${formatQuestCountdown(resetAt - now.getTime())}`;
+      node.setAttribute("aria-label", `${prefix} ${formatQuestCountdown(resetAt - now.getTime())}`);
+    });
+  }
+  function questGlyph(id) {
+    if (id.includes("win")) return "\u2694";
+    if (id.includes("creature")) return "\u265F";
+    if (id.includes("rune")) return "\u25C7";
+    if (id.includes("pack")) return "\u25A3";
+    if (id.includes("dmg")) return "\u2726";
+    return "\u25C6";
+  }
+  function renderQuestTask(q, kind) {
+    const weekly = kind === "weekly";
+    const done = q.prog >= q.goal;
+    const claimed = !!q.claimed;
+    const reward = weekly ? WEEK_REWARD[q.id] ?? 0 : DAILY_REWARD[q.id] ?? 0;
+    const bp = weekly ? 250 : 150;
+    const label = QUEST_RU[q.id]?.(q) ?? WQUEST_RU[q.id] ?? q.id;
+    const progress = Math.max(0, Math.min(q.goal || 0, Number(q.prog) || 0));
+    const percent = q.goal > 0 ? Math.round(progress / q.goal * 100) : 0;
+    const canClaim = done && !claimed;
+    const icon = questGlyph(q.id);
+    const artId = encodeURIComponent(q.id);
+    const status = claimed ? "questTaskClaimed" : done ? "questTaskDone" : "";
+    const reset = done ? `<span class="questTaskReset questReset" data-quest-reset="${kind}" data-reset-prefix="\u0421\u0431\u0440\u043E\u0441 \u0447\u0435\u0440\u0435\u0437">\u2014</span>` : "";
+    const buttonLabel = claimed ? "\u041F\u043E\u043B\u0443\u0447\u0435\u043D\u043E \u2713" : canClaim ? "\u0417\u0430\u0431\u0440\u0430\u0442\u044C" : `\u{1FA99}${reward}`;
+    return `<article class="questTask ${status}" data-quest-card="${kind}:${esc(q.id)}" role="listitem">
+    <span class="questTaskIcon" aria-hidden="true"><b>${icon}</b><img src="/cosm/quests/${artId}?t=${Date.now()}" alt="" loading="lazy" onload="this.closest('.questTaskIcon')?.classList.add('hasArt')" onerror="this.remove()"></span>
+    <div class="questTaskMain">
+      <strong class="questTaskTitle">${esc(label)}</strong>
+      <div class="questTaskProgressLine">
+        <span class="questTaskProgressText">${progress}/${q.goal}</span>
+        <div class="questTaskProgressBar" role="progressbar" aria-label="${esc(label)}" aria-valuemin="0" aria-valuemax="${q.goal}" aria-valuenow="${progress}"><i style="width:${percent}%"></i></div>
+      </div>
+      <span class="questTaskReward">\u041D\u0430\u0433\u0440\u0430\u0434\u0430 \xB7 \u{1FA99}${reward} <i>+${bp} BP</i></span>
+      ${reset}
+    </div>
+    <button type="button" class="btn homeQuestClaim" data-kind="${kind}" data-q="${esc(q.id)}" ${canClaim ? "" : "disabled"} aria-label="${canClaim ? `\u0417\u0430\u0431\u0440\u0430\u0442\u044C \u043D\u0430\u0433\u0440\u0430\u0434\u0443 \u0437\u0430 \u0437\u0430\u0434\u0430\u043D\u0438\u0435: ${esc(label)}` : claimed ? `\u041D\u0430\u0433\u0440\u0430\u0434\u0430 \u0437\u0430 \u0437\u0430\u0434\u0430\u043D\u0438\u0435 \u043F\u043E\u043B\u0443\u0447\u0435\u043D\u0430: ${esc(label)}` : `\u0417\u0430\u0434\u0430\u043D\u0438\u0435 ${esc(label)}, ${progress} \u0438\u0437 ${q.goal}`}" title="${canClaim ? "\u0417\u0430\u0431\u0440\u0430\u0442\u044C \u043D\u0430\u0433\u0440\u0430\u0434\u0443" : claimed ? "\u0423\u0436\u0435 \u043F\u043E\u043B\u0443\u0447\u0435\u043D\u043E" : "\u0412\u044B\u043F\u043E\u043B\u043D\u044F\u0439\u0442\u0435 \u0446\u0435\u043B\u044C \u0432 \u043C\u0430\u0442\u0447\u0430\u0445"}">${buttonLabel}</button>
+  </article>`;
+  }
+  function renderHomeQuests() {
+    const daily = document.getElementById("homeDailyQuests");
+    const weekly = document.getElementById("homeWeeklyQuests");
+    if (!daily || !weekly) return;
+    daily.innerHTML = (meta.quests ?? []).map((q) => renderQuestTask(q, "daily")).join("");
+    weekly.innerHTML = (meta.wquests ?? []).map((q) => renderQuestTask(q, "weekly")).join("");
+    updateQuestCountdowns();
+  }
+  function claimQuestReward(kind, id, keepHome = false) {
+    const weekly = kind === "weekly";
+    const q = (weekly ? meta.wquests : meta.quests).find((x) => x.id === id);
+    if (!q || q.claimed || q.prog < q.goal) return false;
+    q.claimed = true;
+    const reward = weekly ? WEEK_REWARD[q.id] ?? 0 : DAILY_REWARD[q.id] ?? 0;
+    const bpReward2 = weekly ? 250 : 150;
+    shardsAdd(reward);
+    meta.bpXp = (meta.bpXp ?? 0) + bpReward2;
+    metaSave();
+    renderShards();
+    apiSend("/api/quests/claim", { id: q.id, kind, prog: q.prog, goal: q.goal });
+    if (keepHome) {
+      renderHomeQuests();
+      [...document.querySelectorAll(".homeQuestClaim")].find((button) => button.dataset.kind === kind && button.dataset.q === id)?.focus();
+    } else if (!document.getElementById("profileModal")?.classList.contains("hidden")) openProfile();
+    else if (!document.getElementById("menu")?.classList.contains("hidden")) renderHomeQuests();
+    showToast(`${weekly ? "\u041D\u0435\u0434\u0435\u043B\u044C\u043D\u043E\u0435 \u0437\u0430\u0434\u0430\u043D\u0438\u0435" : "\u0417\u0430\u0434\u0430\u043D\u0438\u0435"}: \u{1FA99}${reward} \u0438 +${bpReward2} \u043E\u043F\u044B\u0442\u0430 \u043F\u0440\u043E\u043F\u0443\u0441\u043A\u0430`);
+    return true;
+  }
+  document.addEventListener("click", (ev) => {
+    const button = ev.target?.closest?.(".homeQuestClaim");
+    if (!button || button.disabled) return;
+    const kind = button.dataset.kind === "weekly" ? "weekly" : "daily";
+    if (button.dataset.q) claimQuestReward(kind, button.dataset.q, true);
+  });
+  window.setInterval(() => {
+    const reset = syncQuestPeriods();
+    if (reset) {
+      if (!document.getElementById("menu")?.classList.contains("hidden")) renderHomeQuests();
+      if (!document.getElementById("profileModal")?.classList.contains("hidden")) openProfile();
+    }
+    updateQuestCountdowns();
+  }, 1e3);
   var RANKS = [
     { n: "\u0423\u0447\u0435\u043D\u0438\u043A", min: 800, div: 1 },
     { n: "\u0410\u0434\u0435\u043F\u0442", min: 1e3, div: 3 },
@@ -24765,7 +25589,7 @@
     toastTimer = window.setTimeout(() => n.classList.remove("on"), 2400);
   }
   var CRAFT_COST = { Common: 5, Uncommon: 10, Rare: 20, Epic: 100, Legendary: 400 };
-  var DUST_GAIN = { Common: 1, Uncommon: 2, Rare: 5, Epic: 20, Legendary: 100 };
+  var DISENCHANT_COINS = { Common: 1, Uncommon: 2, Rare: 5, Epic: 20, Legendary: 100 };
   window.ecMeta = () => meta;
   window.ecSetShards = (n) => shardsSet(n);
   window.ecSetGems = (n) => gemsAdd(n - gemsGet());
@@ -24799,7 +25623,15 @@
     } catch {
     }
     if (owned.size === 0) {
-      for (const c of db.values()) if (!isExpansionId(c.id)) owned.set(c.id, 1);
+      const starters = deckList.filter((d) => d.format === STARTER_DECK_FORMAT);
+      if (starters.length) {
+        for (const deck of starters) for (const id of deck.cards) {
+          owned.set(id, Math.min(4, (owned.get(id) ?? 0) + 1));
+        }
+      } else {
+        for (const c of db.values()) if (!isExpansionId(c.id)) owned.set(c.id, 1);
+      }
+      ownedSave();
     }
   }
   function ownedSave() {
@@ -24842,8 +25674,8 @@
       if (v !== null) return Number(v) || 0;
     } catch {
     }
-    shardsSet(1200);
-    return 1200;
+    shardsSet(3500);
+    return 3500;
   }
   function shardsSet(n) {
     try {
@@ -24874,8 +25706,8 @@
     owned.set(id, n);
     ownedSave();
   };
-  function drawBooster(forcedId, comp) {
-    const pool = forcedId ? [...db.values()] : [...db.values()].filter((c) => isExpansionId(c.id));
+  function drawBooster(forcedId, comp, allowBorderless = true) {
+    const pool = [...db.values()];
     const compList = comp ?? [
       "Common" /* Common */,
       "Common" /* Common */,
@@ -24904,6 +25736,10 @@
       if (converted > 0) shardsAdd(converted);
       out.push({ card: c, foil, converted });
     });
+    if (allowBorderless) {
+      const bonus = maybeBorderlessPackBonus();
+      if (bonus) out.push({ card: bonus, foil: false, converted: 0, borderless: true, bonus: true });
+    }
     ownedSave();
     foilSave();
     meta.packs += 1;
@@ -24914,7 +25750,7 @@
   }
   window.ecTestPack = (forcedId) => {
     const before = shardsGet();
-    const slots = drawBooster(forcedId);
+    const slots = drawBooster(forcedId, void 0, false);
     return {
       converted: slots.reduce((a, b) => a + b.converted, 0),
       shardsBefore: before,
@@ -24923,17 +25759,38 @@
     };
   };
   var pendingPack = null;
+  var pendingPackKind = null;
+  var boosterReturnFocus = null;
+  function packTypeTitle(kind) {
+    if (kind === "booster_premium") return "\u041F\u0440\u0435\u043C\u0438\u0443\u043C-\u0431\u0443\u0441\u0442\u0435\u0440";
+    if (kind.startsWith("pack_")) return `\u0424\u0440\u0430\u043A\u0446\u0438\u043E\u043D\u043D\u044B\u0439 \u0431\u0443\u0441\u0442\u0435\u0440 \xB7 ${FACTION_RU[kind.slice(5)] ?? "\u0444\u0440\u0430\u043A\u0446\u0438\u044F"}`;
+    return "\u041E\u0431\u044B\u0447\u043D\u044B\u0439 \u0431\u0443\u0441\u0442\u0435\u0440 \xB7 \u042D\u0445\u043E-\u0426\u0438\u0442\u0430\u0434\u0435\u043B\u044C";
+  }
   function showSealedPack(slots, kind = "booster") {
     pendingPack = slots;
+    pendingPackKind = kind;
     const st = document.getElementById("packStage");
     const sealed = document.getElementById("packSealed");
     const row = document.getElementById("packRow");
     if (!st || !sealed || !row) {
-      renderPackSlots(slots);
+      if (slots) renderPackSlots(slots);
       return;
     }
     row.innerHTML = "";
+    st.classList.remove("hasResults", "opening");
     st.classList.add("hasSealed");
+    const title = packTypeTitle(kind);
+    const status = document.getElementById("packStageStatus");
+    if (status) status.textContent = `\u0412\u044B\u0431\u0440\u0430\u043D\u043E \xB7 ${title} \xB7 \u0437\u0430\u043F\u0430\u0441 \u043D\u0435 \u0441\u043F\u0438\u0441\u0430\u043D`;
+    const subtitle = document.getElementById("packTypeSubtitle");
+    if (subtitle) subtitle.textContent = `${title} \xB7 5 \u043A\u0430\u0440\u0442 \u0432 \u043D\u0430\u0431\u043E\u0440\u0435`;
+    sealed.setAttribute("aria-label", `\u0412\u0441\u043A\u0440\u044B\u0442\u044C: ${title}`);
+    const top = sealed.querySelector(".psTop");
+    if (top) top.textContent = kind === "booster_premium" ? "MYTHIC" : kind.startsWith("pack_") ? "FACTION" : "ECH I";
+    const bottom = sealed.querySelector(".psBot");
+    if (bottom) bottom.textContent = kind === "booster_premium" ? "\u041C\u0418\u0424\u0418\u0427\u0415\u0421\u041A\u0418\u0419 \u0411\u0423\u0421\u0422\u0415\u0420" : kind.startsWith("pack_") ? FACTION_RU[kind.slice(5)] ?? "\u0411\u0423\u0421\u0422\u0415\u0420 \u0424\u0420\u0410\u041A\u0426\u0418\u0418" : "\u042D\u0425\u041E-\u0426\u0418\u0422\u0410\u0414\u0415\u041B\u042C";
+    const flipAll = document.getElementById("btnPackFlip");
+    if (flipAll) flipAll.disabled = true;
     sealed.classList.remove("hidden", "cracking");
     void sealed.offsetWidth;
     sealed.focus();
@@ -24945,14 +25802,23 @@
   }
   function setPackArt(img, kind) {
     if (!img) return;
+    const inner = img.closest(".packSealedInner");
+    if (inner) {
+      inner.classList.remove("hasArt");
+      inner.style.removeProperty("--pack-art");
+    }
+    const procedural = img.parentElement?.querySelector(".packSealedArt");
+    procedural?.classList.remove("gone");
+    img.classList.remove("artOn");
+    img.style.removeProperty("display");
     const chain = [`/cosm/offers/${kind}?t=${Date.now()}`];
     if (kind !== "booster") chain.push(`/cosm/offers/booster?t=${Date.now()}`);
     let i = 0;
     img.onload = () => {
-      const inner = img.closest(".packSealedInner");
-      if (inner) {
-        inner.classList.add("hasArt");
-        inner.style.setProperty("--pack-art", `url("${img.currentSrc || img.src}")`);
+      const inner2 = img.closest(".packSealedInner");
+      if (inner2) {
+        inner2.classList.add("hasArt");
+        inner2.style.setProperty("--pack-art", `url("${img.currentSrc || img.src}")`);
       }
       const proc = img.parentElement?.querySelector(".packSealedArt");
       if (proc) proc.classList.add("gone");
@@ -24971,16 +25837,87 @@
   function hideSealedInstant() {
     const st = document.getElementById("packStage");
     const sealed = document.getElementById("packSealed");
-    if (st) st.classList.remove("hasSealed");
+    if (st) st.classList.remove("hasSealed", "opening");
     if (sealed) {
       sealed.classList.add("hidden");
       sealed.classList.remove("cracking");
     }
     pendingPack = null;
+    pendingPackKind = null;
+  }
+  function openBoosterPanel(returnFocusTo) {
+    if ($("battle").classList.contains("hidden")) setAppRoute("packs");
+    $("menu").classList.add("hidden");
+    for (const id of ["homeScreen", "eventsScreen", "decksScreen", "collection", "shopModal", "bpModal", "profileModal", "campaignModal"])
+      document.getElementById(id)?.classList.add("hidden");
+    const modal = $("boosterModal");
+    if (modal.classList.contains("hidden")) {
+      const active = document.activeElement;
+      boosterReturnFocus = returnFocusTo ?? (active instanceof HTMLElement ? active : null);
+    }
+    $("shopModal").classList.add("hidden");
+    if (!pendingPack && !pendingPackKind) {
+      hideSealedInstant();
+      const row = document.getElementById("packRow");
+      if (row) row.innerHTML = "";
+      const stage = document.getElementById("packStage");
+      stage?.classList.remove("hasResults", "hasSealed", "opening");
+      const status = document.getElementById("packStageStatus");
+      if (status) status.textContent = "\u0412\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u0431\u0443\u0441\u0442\u0435\u0440 \u0441\u043B\u0435\u0432\u0430";
+      const flipAll = document.getElementById("btnPackFlip");
+      if (flipAll) flipAll.disabled = true;
+    }
+    modal.classList.remove("hidden");
+    renderShards();
+    window.requestAnimationFrame(() => {
+      const first = document.querySelector(".boosterInvCard.has-stock");
+      (first ?? document.getElementById("btnPackNew"))?.focus();
+    });
+  }
+  function closeBoosterPanel(renderCards = false) {
+    const stage = document.getElementById("packStage");
+    if (!pendingPack && stage?.classList.contains("hasResults")) {
+      stage.classList.remove("hasResults", "hasSealed", "opening");
+      const row = document.getElementById("packRow");
+      if (row) row.innerHTML = "";
+      const status = document.getElementById("packStageStatus");
+      if (status) status.textContent = "\u0412\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u0431\u0443\u0441\u0442\u0435\u0440 \u0441\u043B\u0435\u0432\u0430";
+      const subtitle = document.getElementById("packTypeSubtitle");
+      if (subtitle) subtitle.textContent = "\u0412\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u0442\u0438\u043F \xB7 5 \u043A\u0430\u0440\u0442 \u0432 \u043D\u0430\u0431\u043E\u0440\u0435";
+      pendingPackKind = null;
+      renderShards();
+    }
+    $("boosterModal").classList.add("hidden");
+    if (renderCards) renderCollection();
+    const target = boosterReturnFocus;
+    boosterReturnFocus = null;
+    if (target?.isConnected && !target.closest(".hidden")) target.focus();
+    else document.getElementById("btnBoosters")?.focus();
   }
   function revealPack() {
-    const slots = pendingPack;
-    if (!slots) return;
+    let slots = pendingPack;
+    if (!slots) {
+      const kind = pendingPackKind;
+      if (!kind) return;
+      if (kind === "booster" || kind === "booster_premium") {
+        const available = kind === "booster" ? meta.freeOpens ?? 0 : meta.premOpens ?? 0;
+        if (available <= 0) {
+          showToast("\u042D\u0442\u043E\u0442 \u0442\u0438\u043F \u0431\u0443\u0441\u0442\u0435\u0440\u0430 \u0437\u0430\u043A\u043E\u043D\u0447\u0438\u043B\u0441\u044F \u2014 \u0432\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u0434\u0440\u0443\u0433\u043E\u0439");
+          pendingPackKind = null;
+          hideSealedInstant();
+          renderShards();
+          return;
+        }
+        if (kind === "booster") meta.freeOpens = available - 1;
+        else meta.premOpens = available - 1;
+        metaSave();
+        slots = kind === "booster_premium" ? drawPremiumBooster() : drawBooster();
+        pendingPack = slots;
+        renderShards();
+      } else {
+        return;
+      }
+    }
     const st = document.getElementById("packStage");
     const sealed = document.getElementById("packSealed");
     if (!sealed || !st) {
@@ -24989,6 +25926,7 @@
       return;
     }
     if (sealed.classList.contains("cracking")) return;
+    st.classList.add("opening");
     sealed.classList.add("cracking");
     const burst = document.createElement("div");
     burst.className = "packSealedBurst";
@@ -25011,19 +25949,14 @@
     window.setTimeout(() => {
       sealed.classList.add("hidden");
       sealed.classList.remove("cracking");
-      st.classList.remove("hasSealed");
+      st.classList.remove("hasSealed", "opening");
       renderPackSlots(slots);
       pendingPack = null;
     }, 560);
   }
   function attachVolumetric(root = document) {
-    const els = root.querySelectorAll?.(".packOffer, .ofCard, .bpTile, .packSealedInner, .cardback, .packSlot .back, .packSlot .face .card, .ofArt") ?? [];
-    const list = [];
-    if (root.querySelectorAll) {
-      root.querySelectorAll(".packOffer, .ofCard, .bpTile, .packSealedInner, .cardback, .packSlot .back, .packSlot .face .card, .ofArt").forEach((n) => list.push(n));
-    } else {
-      document.querySelectorAll(".packOffer, .ofCard, .bpTile, .packSealedInner, .cardback, .packSlot .back, .packSlot .face .card, .ofArt").forEach((n) => list.push(n));
-    }
+    const selector = ".boosterInvCard, .packOffer, .ofCard, .bpTile, .packSealedInner, .cardback, .packSlot .back, .packSlot .face .card, .ofArt";
+    const list = Array.from(root.querySelectorAll(selector));
     list.forEach((el2) => {
       if (el2.dataset.volAttached) return;
       el2.dataset.volAttached = "1";
@@ -25057,6 +25990,15 @@
   function renderPackSlots(slots) {
     const row = $("packRow");
     if (!row) return;
+    const stage = document.getElementById("packStage");
+    if (stage) {
+      stage.classList.remove("hasSealed", "opening");
+      stage.classList.add("hasResults");
+    }
+    const status = document.getElementById("packStageStatus");
+    if (status) status.textContent = slots.some((slot) => slot.borderless) ? "\u25C7 Borderless-\u0432\u0430\u0440\u0438\u0430\u043D\u0442 \u043F\u043E\u043B\u0443\u0447\u0435\u043D \xB7 \u043A\u043E\u0441\u043C\u0435\u0442\u0438\u043A\u0430, \u043F\u0440\u0430\u0432\u0438\u043B\u0430 \u043A\u0430\u0440\u0442\u044B \u043D\u0435 \u043C\u0435\u043D\u044F\u044E\u0442\u0441\u044F" : "\u041A\u0430\u0440\u0442\u044B \u0432\u0441\u043A\u0440\u044B\u0442\u044B \xB7 \u043D\u0430\u0436\u043C\u0438\u0442\u0435 \u043D\u0430 \u043A\u0430\u0436\u0434\u0443\u044E, \u0447\u0442\u043E\u0431\u044B \u043F\u0435\u0440\u0435\u0432\u0435\u0440\u043D\u0443\u0442\u044C";
+    const flipAll = document.getElementById("btnPackFlip");
+    if (flipAll) flipAll.disabled = slots.length === 0;
     row.innerHTML = "";
     row.classList.remove("crack");
     void row.offsetWidth;
@@ -25085,8 +26027,9 @@
         }
       }
       const face = slot.querySelector(".face");
-      face.appendChild(renderCard(sl.card));
-      if (sl.converted > 0) face.appendChild(el("div", "convNote", `\u0434\u0443\u0431\u043B\u0438\u043A\u0430\u0442 \u2192 \u25C8${sl.converted}`));
+      if (sl.borderless) slot.classList.add("borderlessBonusSlot");
+      face.appendChild(renderCard(sl.card, sl.borderless ? "borderless" : "auto"));
+      if (sl.converted > 0) face.appendChild(el("div", "convNote", `\u0434\u0443\u0431\u043B\u0438\u043A\u0430\u0442 \u2192 \u{1FA99}${sl.converted}`));
       if (sl.foil) face.appendChild(el("div", "foilNote", "\u2726 \u0444\u043E\u0439\u043B"));
       const doFlip = () => {
         if (slot.classList.contains("flip")) return;
@@ -25131,37 +26074,73 @@
     } catch {
     }
   }
-  function newPack() {
-    const row = $("packRow");
-    if (!row) return false;
-    if ((meta.freeOpens ?? 0) > 0) {
-      meta.freeOpens = (meta.freeOpens ?? 0) - 1;
-      metaSave();
-    } else {
-      if (shardsGet() < PACK_PRICE) return false;
-      shardsAdd(-PACK_PRICE);
+  function selectStoredBooster(kind) {
+    if (pendingPack || document.getElementById("packStage")?.classList.contains("hasResults")) {
+      showToast("\u0422\u0438\u043F \u0431\u0443\u0441\u0442\u0435\u0440\u0430 \u043D\u0435\u043B\u044C\u0437\u044F \u043C\u0435\u043D\u044F\u0442\u044C \u043F\u043E\u0441\u043B\u0435 \u0432\u0441\u043A\u0440\u044B\u0442\u0438\u044F \u043A\u0430\u0440\u0442");
+      return false;
     }
-    const slots = drawBooster();
-    renderShards();
-    showSealedPack(slots, "booster");
+    const available = kind === "booster" ? meta.freeOpens ?? 0 : meta.premOpens ?? 0;
+    if (available <= 0) {
+      showToast("\u042D\u0442\u043E\u0433\u043E \u0442\u0438\u043F\u0430 \u0431\u0443\u0441\u0442\u0435\u0440\u0430 \u043D\u0435\u0442 \u0432 \u0437\u0430\u043F\u0430\u0441\u0435");
+      return false;
+    }
+    if (pendingPackKind === kind && document.getElementById("packStage")?.classList.contains("hasSealed")) return true;
+    showSealedPack(null, kind);
+    renderPackInventory();
     return true;
+  }
+  function newPack() {
+    return selectStoredBooster("booster");
   }
   function drawPremiumBooster() {
     const ep = () => Math.random() < 0.125 ? "Legendary" /* Legendary */ : "Epic" /* Epic */;
     return drawBooster(void 0, ["Common" /* Common */, "Common" /* Common */, "Rare" /* Rare */, ep(), ep()]);
   }
   function newPremPack() {
-    const row = $("packRow");
-    if (!row || (meta.premOpens ?? 0) <= 0) return false;
-    meta.premOpens = (meta.premOpens ?? 0) - 1;
-    metaSave();
-    const slots = drawPremiumBooster();
-    renderShards();
-    showSealedPack(slots, "booster_premium");
-    return true;
+    return selectStoredBooster("booster_premium");
+  }
+  function renderPackInventory() {
+    const host = document.getElementById("boosterInventory");
+    if (!host) return;
+    const standard = Math.max(0, Number(meta.freeOpens ?? 0) || 0);
+    const premium = Math.max(0, Number(meta.premOpens ?? 0) || 0);
+    const packs = [
+      { kind: "standard", packKind: "booster", art: "booster", title: "\u0411\u0443\u0441\u0442\u0435\u0440 \xAB\u042D\u0445\u043E-\u0426\u0438\u0442\u0430\u0434\u0435\u043B\u044C\xBB", sub: "5 \u043A\u0430\u0440\u0442 \xB7 0,1% \u0448\u0430\u043D\u0441 \u043D\u0430 Borderless-\u0431\u043E\u043D\u0443\u0441", count: standard, mark: "ECH I", sigil: "\u2726" },
+      { kind: "premium", packKind: "booster_premium", art: "booster_premium", title: "\u041C\u0438\u0444\u0438\u0447\u0435\u0441\u043A\u0438\u0439 \u0431\u0443\u0441\u0442\u0435\u0440", sub: "5 \u043A\u0430\u0440\u0442 \xB7 0,1% \u0448\u0430\u043D\u0441 \u043D\u0430 Borderless-\u0431\u043E\u043D\u0443\u0441", count: premium, mark: "MYTHIC", sigil: "\u2726" }
+    ];
+    const total = standard + premium;
+    const packStage = document.getElementById("packStage");
+    const selectionLocked = !!pendingPack || !!packStage?.classList.contains("opening") || !!packStage?.classList.contains("hasResults");
+    const totalNode = document.getElementById("boosterCountTotal");
+    if (totalNode) totalNode.textContent = String(total);
+    host.innerHTML = packs.map((p) => `<button type="button" class="boosterInvCard${p.count > 0 ? " has-stock" : ""}${pendingPackKind === p.packKind ? " selected" : ""}" data-pack="${p.kind}" ${p.count <= 0 || selectionLocked ? "disabled" : ""}
+      aria-pressed="${pendingPackKind === p.packKind}" aria-label="${selectionLocked ? "\u0421\u043D\u0430\u0447\u0430\u043B\u0430 \u0437\u0430\u043A\u0440\u043E\u0439\u0442\u0435 \u043F\u0440\u043E\u0441\u043C\u043E\u0442\u0440 \u0443\u0436\u0435 \u0432\u0441\u043A\u0440\u044B\u0442\u044B\u0445 \u043A\u0430\u0440\u0442" : p.count > 0 ? `\u0412\u044B\u0431\u0440\u0430\u0442\u044C ${p.title}, \u0432 \u0437\u0430\u043F\u0430\u0441\u0435 ${p.count}; \u0441\u043F\u0438\u0441\u0430\u043D\u0438\u0435 \u043F\u0440\u0438 \u0432\u0441\u043A\u0440\u044B\u0442\u0438\u0438` : `${p.title}, \u043D\u0435\u0442 \u0432 \u0437\u0430\u043F\u0430\u0441\u0435`}">
+      <span class="boosterInvVisual">
+        <span class="boosterInvFallback" aria-hidden="true"><b>${p.sigil}</b><small>${p.mark}</small></span>
+        ${cosmImg("offers", p.art, "boosterInvArt")}
+        <span class="boosterInvCount">\xD7${p.count}</span>
+      </span>
+      <span class="boosterInvCopy"><strong>${p.title}</strong><small>${p.sub}</small>
+        <span class="boosterInvOpen">${p.count > 0 ? pendingPackKind === p.packKind ? "\u0412\u044B\u0431\u0440\u0430\u043D\u043E \xB7 \u043D\u0430\u0436\u043C\u0438\u0442\u0435 \u043F\u0430\u0447\u043A\u0443 \u0434\u043B\u044F \u0432\u0441\u043A\u0440\u044B\u0442\u0438\u044F" : "\u0412\u044B\u0431\u0440\u0430\u0442\u044C \xB7 \u0437\u0430\u043F\u0430\u0441 \u0441\u043F\u0438\u0448\u0435\u0442\u0441\u044F \u043F\u0440\u0438 \u0432\u0441\u043A\u0440\u044B\u0442\u0438\u0438 \u2192" : "\u041D\u0435\u0442 \u0432 \u0437\u0430\u043F\u0430\u0441\u0435"}</span></span>
+    </button>`).join("");
+    host.querySelectorAll(".boosterInvArt").forEach((img) => {
+      const markArt = () => img.closest(".boosterInvVisual")?.classList.add("hasArt");
+      img.addEventListener("load", markArt, { once: true });
+      if (img.complete && img.naturalWidth > 0) markArt();
+    });
+    host.querySelectorAll(".boosterInvCard").forEach((button) => {
+      button.addEventListener("click", () => {
+        if (button.dataset.pack === "standard") newPack();
+        else if (button.dataset.pack === "premium") newPremPack();
+      });
+    });
+    try {
+      attachVolumetric(host);
+    } catch {
+    }
   }
   function drawFactionPack(fac) {
-    const all = [...db.values()].filter((c) => isExpansionId(c.id));
+    const all = [...db.values()];
     let pool = all.filter((c) => c.faction === fac);
     if (pool.length < 8) pool = all;
     const comp = [
@@ -25189,6 +26168,8 @@
       if (converted > 0) shardsAdd(converted);
       out.push({ card: c, foil, converted });
     });
+    const bonus = maybeBorderlessPackBonus();
+    if (bonus) out.push({ card: bonus, foil: false, converted: 0, borderless: true, bonus: true });
     meta.packs += 1;
     questBump("pack");
     checkAchs();
@@ -25201,39 +26182,47 @@
     const have = ownedCount(id);
     const cost = CRAFT_COST[c.rarity] ?? 100;
     if (have >= PLAYSET) return "\u0414\u043E\u0441\u0442\u0438\u0433\u043D\u0443\u0442 \u043F\u0440\u0435\u0434\u0435\u043B 4 \u043A\u043E\u043F\u0438\u0439";
-    if (shardsGet() < cost) return `\u041D\u0443\u0436\u043D\u043E \u25C8${cost}`;
+    if (shardsGet() < cost) return `\u041D\u0443\u0436\u043D\u043E ${cost} \u043C\u043E\u043D\u0435\u0442`;
     shardsAdd(-cost);
     owned.set(id, have + 1);
     ownedSave();
     renderShards();
-    return `\u0421\u043E\u0437\u0434\u0430\u043D\u043E \u0437\u0430 \u25C8${cost}`;
+    return `\u0421\u043E\u0437\u0434\u0430\u043D\u043E \u0437\u0430 ${cost} \u043C\u043E\u043D\u0435\u0442`;
   }
-  function dustCard(id) {
+  function disenchantCard(id) {
     const c = db.get(id);
     if (!c) return "\u041A\u0430\u0440\u0442\u0430 \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D\u0430";
     const have = ownedCount(id);
-    const min = isExpansionId(id) ? 0 : 1;
-    if (have <= min) return min === 1 ? "\u0411\u0430\u0437\u043E\u0432\u0443\u044E \u043A\u0430\u0440\u0442\u0443 \u0440\u0430\u0437\u043E\u0431\u0440\u0430\u0442\u044C \u043D\u0435\u043B\u044C\u0437\u044F" : "\u041D\u0435\u0442 \u043A\u043E\u043F\u0438\u0439";
+    const min = STARTER_CARD_IDS.has(id) ? 1 : 0;
+    if (have <= min) return min === 1 ? "\u041F\u043E\u0441\u043B\u0435\u0434\u043D\u044E\u044E \u0441\u0442\u0430\u0440\u0442\u043E\u0432\u0443\u044E \u043A\u043E\u043F\u0438\u044E \u043D\u0435\u043B\u044C\u0437\u044F \u0440\u0430\u0437\u043E\u0431\u0440\u0430\u0442\u044C" : "\u041D\u0435\u0442 \u043A\u043E\u043F\u0438\u0439";
     owned.set(id, have - 1);
     ownedSave();
-    shardsAdd(DUST_GAIN[c.rarity] ?? 20);
+    const coins = DISENCHANT_COINS[c.rarity] ?? 20;
+    shardsAdd(coins);
     renderShards();
-    return `\u0420\u0430\u0437\u043E\u0431\u0440\u0430\u043D\u043E: +\u25C8${DUST_GAIN[c.rarity] ?? 20}`;
+    return `\u0420\u0430\u0437\u043E\u0431\u0440\u0430\u043D\u043E: +${coins} \u043C\u043E\u043D\u0435\u0442`;
   }
   function renderShards() {
     const b = $("shardBal");
     if (b) b.textContent = String(shardsGet());
     const g = $("gemBal");
     if (g) g.textContent = String(gemsGet());
+    const boosterShards = document.getElementById("boosterShardBal");
+    if (boosterShards) boosterShards.textContent = String(shardsGet());
+    const boosterGems = document.getElementById("boosterGemBal");
+    if (boosterGems) boosterGems.textContent = String(gemsGet());
+    renderPackInventory();
     const bb = $("btnPackNew");
     if (bb) {
-      bb.disabled = shardsGet() < PACK_PRICE && (meta.freeOpens ?? 0) <= 0;
-      bb.textContent = (meta.freeOpens ?? 0) > 0 ? `\u041E\u0442\u043A\u0440\u044B\u0442\u044C \u0431\u0443\u0441\u0442\u0435\u0440 (\u0431\u0435\u0441\u043F\u043B\u0430\u0442\u043D\u044B\u0445: ${meta.freeOpens})` : `\u041E\u0442\u043A\u0440\u044B\u0442\u044C \u0431\u0443\u0441\u0442\u0435\u0440 \xB7 \u25C8${PACK_PRICE}`;
+      bb.disabled = false;
+      bb.textContent = "\u041C\u0430\u0433\u0430\u0437\u0438\u043D \u0431\u0443\u0441\u0442\u0435\u0440\u043E\u0432";
+      bb.title = "\u041F\u0435\u0440\u0435\u0439\u0442\u0438 \u043A \u043D\u0430\u0431\u043E\u0440\u0430\u043C \u0438 \u043A\u0443\u043F\u0438\u0442\u044C \u0431\u0443\u0441\u0442\u0435\u0440\u044B";
     }
     const bpr = $("btnPackPrem");
     if (bpr) {
-      bpr.disabled = (meta.premOpens ?? 0) <= 0;
-      bpr.textContent = `\u{1F31F} \u041F\u0440\u0435\u043C\u0438\u0443\u043C-\u0431\u0443\u0441\u0442\u0435\u0440 (\u0432 \u0437\u0430\u043F\u0430\u0441\u0435: ${meta.premOpens ?? 0})`;
+      const stage = document.getElementById("packStage");
+      bpr.disabled = (meta.premOpens ?? 0) <= 0 || !!pendingPack || !!stage?.classList.contains("opening") || !!stage?.classList.contains("hasResults");
+      bpr.textContent = `\u{1F31F} \u041F\u0440\u0435\u043C\u0438\u0443\u043C-\u0431\u0443\u0441\u0442\u0435\u0440 \xB7 \xD7${meta.premOpens ?? 0}`;
     }
     const bc = $("btnCollection");
     if (bc) {
@@ -25253,6 +26242,8 @@
   function pickFaction(f) {
     const changed = f !== picked;
     picked = f;
+    menuSelectedDeckId = starterDeckForFaction(f)?.id ?? f;
+    saveMenuDeck();
     savePicked();
     Audio_.uiClick();
     if (changed) Audio_.whoosh();
@@ -25279,15 +26270,36 @@
   if (_origRenderShards) {
   }
   function getAllDecksForGrid() {
-    const customs = loadCustomDecks();
     const all = [];
     for (const d of deckList) {
-      all.push({ id: d.id, name: d.name, faction: d.faction, cards: d.cards.slice(), updated: 0, isPrecon: true });
+      if (d.id === "Starter") continue;
+      all.push({ id: d.id, name: d.name, faction: d.faction, cards: d.cards.slice(), format: d.format, updated: 0, isPrecon: true });
     }
-    for (const c of customs) {
-      all.push({ id: c.id, name: c.name, faction: c.faction, cards: c.cards.slice(), updated: c.updated ?? 0, isPrecon: false });
+    for (const c of loadCustomDecks()) {
+      all.push({
+        id: c.id,
+        name: c.name,
+        faction: c.faction,
+        cards: c.cards.slice(),
+        avatarCardId: c.avatarCardId,
+        updated: c.updated ?? 0,
+        isPrecon: false
+      });
     }
     return all;
+  }
+  function deckArtCards(cardIds) {
+    const rarityRank = {
+      ["Legendary" /* Legendary */]: 4,
+      ["Epic" /* Epic */]: 3,
+      ["Rare" /* Rare */]: 2,
+      ["Uncommon" /* Uncommon */]: 1,
+      ["Common" /* Common */]: 0
+    };
+    return [...new Set(cardIds)].map((id) => db.get(id)).filter((card) => !!card).sort((a, b) => (rarityRank[b.rarity] ?? 0) - (rarityRank[a.rarity] ?? 0) || Number(b.type === "Creature" /* Creature */) - Number(a.type === "Creature" /* Creature */) || b.cost - a.cost || cardName(a).localeCompare(cardName(b), "ru"));
+  }
+  function suggestedDeckArt(cardIds) {
+    return deckArtCards(cardIds)[0];
   }
   function deckColorIcon(faction) {
     const sig = { Aurites: "\u2735", Necrus: "\u2620", Terramorph: "\u26F0", Pyromancer: "\u{1F702}", Ethereal: "\u2601", Neutral: "\u25C8" };
@@ -25329,16 +26341,17 @@
       all.sort((a, b) => (b.updated || 0) - (a.updated || 0));
     }
     grid.innerHTML = "";
-    const addBox = document.createElement("div");
+    const addBox = document.createElement("button");
+    addBox.type = "button";
     addBox.className = "deckBox addBox";
     addBox.title = "\u0421\u043E\u0437\u0434\u0430\u0442\u044C \u043D\u043E\u0432\u0443\u044E \u043A\u043E\u043B\u043E\u0434\u0443";
+    addBox.setAttribute("aria-label", "\u0421\u043E\u0437\u0434\u0430\u0442\u044C \u043D\u043E\u0432\u0443\u044E \u043A\u043E\u043B\u043E\u0434\u0443");
     addBox.innerHTML = `<div class="deckAddIcon">+</div><div class="deckAddLabel">\u041D\u043E\u0432\u0430\u044F \u043A\u043E\u043B\u043E\u0434\u0430</div>`;
     addBox.addEventListener("click", () => {
       Audio_.uiClick();
       const fac = document.getElementById("dbFaction")?.value || picked;
-      editing = { id: null, name: "", faction: fac, counts: /* @__PURE__ */ new Map() };
-      closeDecksScreen();
-      $("collection").classList.remove("hidden");
+      editing = newEditing(fac);
+      openCollectionScreen();
       const tabB = document.getElementById("tabBuilder");
       if (tabB) tabB.click();
       else {
@@ -25351,13 +26364,24 @@
       const box = document.createElement("div");
       box.className = "deckBox" + (isSel ? " sel" : "");
       box.dataset.deckId = d.id;
-      const firstId = d.cards[0];
-      const firstCard = firstId ? db.get(firstId) : null;
-      const artFaction = firstCard?.faction ?? d.faction;
-      const artId = firstCard?.id ?? d.id;
+      box.tabIndex = 0;
+      box.setAttribute("role", "group");
+      box.setAttribute("aria-label", `\u041A\u043E\u043B\u043E\u0434\u0430 \xAB${d.name}\xBB, ${FACTION_RU[d.faction] ?? d.faction}, ${d.cards.length} \u043A\u0430\u0440\u0442. \u041D\u0430\u0436\u043C\u0438\u0442\u0435 Enter, \u0447\u0442\u043E\u0431\u044B \u0432\u044B\u0431\u0440\u0430\u0442\u044C.`);
+      const firstCard = d.cards[0] ? db.get(d.cards[0]) : null;
+      const chosenAvatar = d.avatarCardId && d.cards.includes(d.avatarCardId) ? db.get(d.avatarCardId) : null;
+      const suggestedAvatar = suggestedDeckArt(d.cards) ?? firstCard ?? null;
+      const avatarCard = chosenAvatar ?? (!d.isPrecon ? suggestedAvatar : null);
+      const artCard = avatarCard ?? suggestedAvatar;
+      const artFaction = artCard?.faction ?? d.faction;
+      const artId = artCard?.id ?? d.id;
+      const cardArtUrl = `/art/${encodeURIComponent(artFaction)}/${encodeURIComponent(artId)}.png`;
       const fallbackSig = FACTION_SIGIL[d.faction] ?? "\u2726";
       const deckArtUrl = `img/decks/${encodeURIComponent(d.id)}.png`;
-      const artHtml = `<img src="${deckArtUrl}" alt="" loading="lazy" onerror="this.style.display='none'"><img src="/art/${encodeURIComponent(artFaction)}/${encodeURIComponent(artId)}.png" alt="" loading="lazy" style="display:none" onerror="this.previousElementSibling && (this.previousElementSibling.style.display='none'); this.style.display='block'; this.style.mixBlendMode='normal'; this.style.opacity='1'">`;
+      const artHtml = avatarCard ? `<img class="deckAvatarImg" src="${cardArtUrl}" alt="" loading="lazy" decoding="async" onerror="this.style.display='none'">` : `<img class="deckPresetArt" src="${deckArtUrl}" alt="" loading="lazy" decoding="async" onerror="this.style.display='none';if(this.nextElementSibling)this.nextElementSibling.style.display='block'"><img class="deckCardArtFallback" src="${cardArtUrl}" alt="" loading="lazy" decoding="async" style="display:none" onerror="this.style.display='none'">`;
+      const avatarTag = avatarCard ? `<span class="deckAvatarTag" title="\u041E\u0431\u043B\u043E\u0436\u043A\u0430: ${esc(cardName(avatarCard))}">\u{1F3B4} ${esc(cardName(avatarCard))}</span>` : "";
+      const artEdit = !d.isPrecon ? `<button class="deckArtEdit" type="button" title="\u0412\u044B\u0431\u0440\u0430\u0442\u044C \u0430\u0440\u0442 \u0438\u0437 \u043A\u0430\u0440\u0442 \u044D\u0442\u043E\u0439 \u043A\u043E\u043B\u043E\u0434\u044B" aria-label="\u0412\u044B\u0431\u0440\u0430\u0442\u044C \u0430\u0440\u0442 \u0434\u043B\u044F \u043A\u043E\u043B\u043E\u0434\u044B \xAB${esc(d.name)}\xBB" data-deck-art-edit="${esc(d.id)}"><span aria-hidden="true">\u2726</span> \u0418\u0437\u043C\u0435\u043D\u0438\u0442\u044C \u0430\u0440\u0442</button>` : "";
+      box.dataset.avatarCardId = avatarCard?.id ?? "";
+      box.title = avatarCard ? `${d.name} \xB7 \u043E\u0431\u043B\u043E\u0436\u043A\u0430: ${cardName(avatarCard)}` : d.name;
       const deckArtClass = `deckArt f-${d.faction}`;
       const facSet = /* @__PURE__ */ new Set();
       facSet.add(d.faction);
@@ -25368,10 +26392,11 @@
       }
       const colorsHtml = Array.from(facSet).slice(0, 3).map((f) => deckColorIcon(f)).join("");
       box.innerHTML = `
-      <div class="${deckArtClass}">${artHtml}<span class="deckArtFallback">${fallbackSig}</span></div>
+      <div class="${deckArtClass}">${artHtml}<span class="deckArtFallback" aria-hidden="true">${fallbackSig}</span>${avatarTag}</div>
       <div class="deckLabel">
-        <div class="deckColors">${colorsHtml}</div>
-        <div class="deckName" title="${d.name}">${d.name}</div>
+        <div class="deckName" title="${esc(d.name)}">${esc(d.name)}</div>
+        <div class="deckMeta"><div class="deckColors">${colorsHtml}</div><span class="deckCount">${d.format === STARTER_DECK_FORMAT ? "\u0421\u0442\u0430\u0440\u0442\u043E\u0432\u0430\u044F \xB7 30 \u043A\u0430\u0440\u0442" : `${d.cards.length} \u043A\u0430\u0440\u0442`}</span></div>
+        ${artEdit}
       </div>
       <span class="selCheck">\u2713</span>
     `;
@@ -25380,6 +26405,23 @@
         decksSelectedId = d.id;
         renderDeckGrid();
         updateDecksFooter();
+      });
+      box.addEventListener("keydown", (ev) => {
+        if (ev.target !== box || ev.key !== "Enter" && ev.key !== " ") return;
+        ev.preventDefault();
+        box.click();
+      });
+      const artButton = box.querySelector(".deckArtEdit");
+      artButton?.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        Audio_.uiClick();
+        decksSelectedId = d.id;
+        document.querySelectorAll("#deckGrid .deckBox[data-deck-id]").forEach((tile) => {
+          tile.classList.toggle("sel", tile.dataset.deckId === d.id);
+        });
+        updateDecksFooter();
+        openSavedDeckArtPicker(d.id);
       });
       box.addEventListener("dblclick", () => {
         decksSelectedId = d.id;
@@ -25398,16 +26440,169 @@
     updateDecksFooter();
     syncTopWallet();
   }
+  var deckArtReturnFocus = null;
+  var deckArtReturnDeckId = null;
+  function closeDeckArtPicker() {
+    const modal = document.getElementById("deckArtPickerModal");
+    modal?.classList.add("hidden");
+    const focus = deckArtReturnFocus;
+    const deckId = deckArtReturnDeckId;
+    deckArtReturnFocus = null;
+    deckArtReturnDeckId = null;
+    if (focus?.isConnected) focus.focus();
+    else if (deckId) {
+      const replacement = [...document.querySelectorAll(".deckArtEdit")].find((button) => button.dataset.deckArtEdit === deckId);
+      replacement?.focus();
+    }
+  }
+  function renderDeckArtPicker(cardIds, selectedId, deckName, onPick, returnDeckId) {
+    const modal = document.getElementById("deckArtPickerModal");
+    const grid = document.getElementById("deckArtPickerGrid");
+    const title = document.getElementById("deckArtPickerTitle");
+    const hint = document.getElementById("deckArtPickerHint");
+    if (!modal || !grid || !title || !hint) return;
+    deckArtReturnFocus = document.activeElement;
+    deckArtReturnDeckId = returnDeckId;
+    title.textContent = "\u0412\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u0430\u0440\u0442 \u043A\u043E\u043B\u043E\u0434\u044B";
+    hint.textContent = `${deckName ? `\xAB${deckName}\xBB \xB7 ` : ""}\u0412\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u043A\u0430\u0440\u0442\u0443 \u0438\u0437 \u0441\u043E\u0441\u0442\u0430\u0432\u0430. \u0410\u0440\u0442 \u0431\u0443\u0434\u0435\u0442 \u043F\u043E\u043A\u0430\u0437\u0430\u043D \u0446\u0435\u043B\u0438\u043A\u043E\u043C, \u0431\u0435\u0437 \u043E\u0431\u0440\u0435\u0437\u043A\u0438.`;
+    grid.replaceChildren();
+    const options = deckArtCards(cardIds);
+    if (!options.length) {
+      const empty = el("div", "deckArtPickerEmpty");
+      empty.textContent = "\u0414\u043E\u0431\u0430\u0432\u044C\u0442\u0435 \u043A\u0430\u0440\u0442\u044B \u0432 \u043A\u043E\u043B\u043E\u0434\u0443, \u0447\u0442\u043E\u0431\u044B \u0432\u044B\u0431\u0440\u0430\u0442\u044C \u043E\u0431\u043B\u043E\u0436\u043A\u0443.";
+      grid.appendChild(empty);
+    }
+    for (const card of options) {
+      const choice = document.createElement("button");
+      choice.type = "button";
+      choice.className = "deckArtChoice" + (card.id === selectedId ? " isSelected" : "");
+      choice.dataset.cardId = card.id;
+      choice.setAttribute("aria-pressed", card.id === selectedId ? "true" : "false");
+      choice.setAttribute("aria-label", `\u0412\u044B\u0431\u0440\u0430\u0442\u044C \u0430\u0440\u0442 \u043A\u0430\u0440\u0442\u044B \xAB${cardName(card)}\xBB`);
+      choice.title = cardName(card);
+      const media = el("span", "deckArtChoiceMedia");
+      media.setAttribute("aria-hidden", "true");
+      const fallback = el("span", "deckArtChoiceFallback", FACTION_SIGIL[card.faction] ?? "\u25C7");
+      media.appendChild(fallback);
+      const image = document.createElement("img");
+      image.src = `/art/${encodeURIComponent(card.faction)}/${encodeURIComponent(card.id)}.png`;
+      image.alt = "";
+      image.loading = "lazy";
+      image.decoding = "async";
+      image.onerror = () => image.remove();
+      media.appendChild(image);
+      const info = el("span", "deckArtChoiceInfo");
+      const name = el("span", "deckArtChoiceName");
+      name.textContent = cardName(card);
+      const detail = el("span", "deckArtChoiceDetail");
+      detail.textContent = `${RARITY_RU[card.rarity] ?? card.rarity} \xB7 ${card.cost} \u043C\u0430\u043D\u044B`;
+      const selected = el("span", "deckArtChoiceSelected", "\u2713 \u041D\u0430 \u043E\u0431\u043B\u043E\u0436\u043A\u0435");
+      info.append(name, detail, selected);
+      choice.append(media, info);
+      choice.addEventListener("click", () => {
+        onPick(card);
+        closeDeckArtPicker();
+      });
+      grid.appendChild(choice);
+    }
+    modal.classList.remove("hidden");
+    document.getElementById("btnDeckArtPickerClose")?.focus();
+  }
+  function openSavedDeckArtPicker(deckId) {
+    const deck = loadCustomDecks().find((item) => item.id === deckId);
+    if (!deck) {
+      showToast("\u0421\u043E\u0445\u0440\u0430\u043D\u0451\u043D\u043D\u0430\u044F \u043A\u043E\u043B\u043E\u0434\u0430 \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D\u0430");
+      return;
+    }
+    const current = deck.avatarCardId && deck.cards.includes(deck.avatarCardId) ? deck.avatarCardId : suggestedDeckArt(deck.cards)?.id ?? null;
+    renderDeckArtPicker(deck.cards, current, deck.name, (card) => {
+      const latest = loadCustomDecks().find((item) => item.id === deckId);
+      if (!latest || !latest.cards.includes(card.id)) {
+        showToast("\u041A\u0430\u0440\u0442\u0430 \u0431\u043E\u043B\u044C\u0448\u0435 \u043D\u0435 \u0432\u0445\u043E\u0434\u0438\u0442 \u0432 \u044D\u0442\u0443 \u043A\u043E\u043B\u043E\u0434\u0443");
+        return;
+      }
+      upsertCustomDeck({ ...latest, avatarCardId: card.id, updated: Date.now() });
+      renderDeckGrid();
+      showToast(`\u041E\u0431\u043B\u043E\u0436\u043A\u0430 \xAB${cardName(card)}\xBB \u0441\u043E\u0445\u0440\u0430\u043D\u0435\u043D\u0430`);
+    }, deckId);
+  }
+  function openEditorDeckArtPicker() {
+    if (!editing) return;
+    renderDeckArtPicker(editingCards(), editing.avatarCardId, editing.name, (card) => {
+      if (!editing?.counts.has(card.id)) return;
+      editing.avatarCardId = card.id;
+      const avatarSelect = document.getElementById("dbAvatarCard");
+      if (avatarSelect) avatarSelect.value = card.id;
+      renderDeckAvatarPreview();
+    }, null);
+  }
+  function deckPlayProblem(deck) {
+    const minimum = isStarterDeckId(deck.id) ? 30 : 60;
+    const sizeCheck = validateDeckSize(deck.cards, dbLookup, minimum);
+    if (!sizeCheck.ok) return sizeCheck.problems[0] ?? "\u043A\u043E\u043B\u043E\u0434\u0430 \u043D\u0435 \u0441\u043E\u0431\u0440\u0430\u043D\u0430";
+    if (!isStarterDeckId(deck.id)) {
+      if (!deckById.has(deck.id)) {
+        const factionCheck = validateDeck(deck.cards, deck.faction, dbLookup);
+        if (!factionCheck.ok) return factionCheck.problems[0] ?? "\u0441\u043E\u0441\u0442\u0430\u0432 \u043A\u043E\u043B\u043E\u0434\u044B \u043D\u0435\u043A\u043E\u0440\u0440\u0435\u043A\u0442\u0435\u043D";
+      }
+      const counts = /* @__PURE__ */ new Map();
+      for (const id of deck.cards) counts.set(id, (counts.get(id) ?? 0) + 1);
+      for (const [id, count] of counts) {
+        const have = ownedCount(id);
+        if (count > have) return `\xAB${dbLookup(id)?.name ?? id}\xBB: \u0432 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u0438 ${have} \u0438\u0437 ${count} \u043D\u0443\u0436\u043D\u044B\u0445 \u043A\u043E\u043F\u0438\u0439`;
+      }
+    }
+    return null;
+  }
+  function launchDeckForBattle(deckId) {
+    const deck = resolveDeck(deckId, deckList);
+    if (!deck) {
+      showToast("\u041A\u043E\u043B\u043E\u0434\u0430 \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D\u0430");
+      return false;
+    }
+    const problem = deckPlayProblem(deck);
+    if (problem) {
+      showToast(`\u041D\u0435\u043B\u044C\u0437\u044F \u043D\u0430\u0447\u0430\u0442\u044C \u0431\u043E\u0439: ${problem}`);
+      return false;
+    }
+    if (FACTION_IDS.includes(deck.faction)) picked = deck.faction;
+    menuSelectedDeckId = deck.id;
+    saveMenuDeck();
+    savePicked();
+    buildMenu();
+    sel("deckPick").value = deck.id;
+    updatePlayGate();
+    if (btn("btnPlay").disabled) {
+      showToast(btn("btnPlay").title || "\u042D\u0442\u0430 \u043A\u043E\u043B\u043E\u0434\u0430 \u043F\u043E\u043A\u0430 \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u043D\u0430");
+      return false;
+    }
+    const enemySelect = sel("enemyFaction");
+    if (enemySelect.value === picked) {
+      enemySelect.value = FACTION_IDS.find((f) => f !== picked) ?? "__random";
+    }
+    battle.playerDeckId = deck.id;
+    battle.playerFaction = picked;
+    battle.launchMode = "menu";
+    openHomeScreen();
+    btn("btnPlay").click();
+    return true;
+  }
   function updateDecksFooter() {
     const selId = decksSelectedId;
     const sel2 = selId ? getAllDecksForGrid().find((d) => d.id === selId) : null;
     const info = document.getElementById("decksSelInfo");
     const btnEdit = document.getElementById("btnDecksEdit");
+    const btnPlayDeck = document.getElementById("btnDecksPlay");
     const btnExp = document.getElementById("btnDecksExport");
     const btnClone = document.getElementById("btnDecksClone");
     const btnDel = document.getElementById("btnDecksDelete");
     if (info) info.textContent = sel2 ? `${sel2.name} \xB7 ${FACTION_RU[sel2.faction] ?? sel2.faction} \xB7 ${sel2.cards.length} \u043A\u0430\u0440\u0442` : "\u0412\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u043A\u043E\u043B\u043E\u0434\u0443";
     if (btnEdit) btnEdit.disabled = !sel2;
+    if (btnPlayDeck) {
+      const problem = sel2 ? deckPlayProblem(sel2) : null;
+      btnPlayDeck.disabled = !sel2 || !!problem;
+      btnPlayDeck.title = problem ? `\u041D\u0435\u043B\u044C\u0437\u044F \u043D\u0430\u0447\u0430\u0442\u044C \u0431\u043E\u0439: ${problem}` : "\u041D\u0430\u0447\u0430\u0442\u044C \u0431\u043E\u0439 \u0432\u044B\u0431\u0440\u0430\u043D\u043D\u043E\u0439 \u043A\u043E\u043B\u043E\u0434\u043E\u0439";
+    }
     if (btnExp) btnExp.disabled = !sel2;
     if (btnClone) btnClone.disabled = !sel2;
     if (btnDel) {
@@ -25417,16 +26612,24 @@
     }
     if (sel2) {
       const dp = document.getElementById("deckPick");
-      if (dp) dp.value = sel2.id;
+      if (dp) {
+        dp.value = sel2.id;
+        updatePlayGate();
+      }
     }
   }
   function openDecksScreen() {
+    setAppRoute("decks");
+    $("menu").classList.add("hidden");
+    $("homeScreen")?.classList.add("hidden");
+    $("eventsScreen")?.classList.add("hidden");
     Audio_.uiClick();
     $("collection").classList.add("hidden");
     $("shopModal").classList.add("hidden");
     $("bpModal").classList.add("hidden");
     $("profileModal").classList.add("hidden");
     $("campaignModal").classList.add("hidden");
+    $("boosterModal").classList.add("hidden");
     const ds = document.getElementById("decksScreen");
     if (ds) ds.classList.remove("hidden");
     document.querySelectorAll(".topTab").forEach((el2) => el2.classList.toggle("active", el2.dataset.tab === "decks"));
@@ -25499,21 +26702,26 @@
   });
   document.querySelectorAll("#decksColorFilters .colorDot").forEach((el2) => {
     el2.addEventListener("click", () => {
-      el2.classList.toggle("on");
+      const on = el2.classList.toggle("on");
+      el2.setAttribute("aria-pressed", String(on));
       renderDeckGrid();
     });
   });
+  document.getElementById("btnDeckArtPickerClose")?.addEventListener("click", closeDeckArtPicker);
+  document.getElementById("btnDeckArtPickerDone")?.addEventListener("click", closeDeckArtPicker);
+  document.getElementById("deckArtPickerModal")?.addEventListener("click", (ev) => {
+    if (ev.target === document.getElementById("deckArtPickerModal")) closeDeckArtPicker();
+  });
   document.getElementById("btnDecksClose")?.addEventListener("click", () => {
     Audio_.uiClick();
-    closeDecksScreen();
+    navigateApp("back");
+  });
+  document.getElementById("btnDecksPlay")?.addEventListener("click", () => {
+    if (decksSelectedId) launchDeckForBattle(decksSelectedId);
   });
   document.getElementById("btnDecksCollection")?.addEventListener("click", () => {
     Audio_.uiClick();
-    closeDecksScreen();
-    $("collection").classList.remove("hidden");
-    const tabC = document.getElementById("tabCollection");
-    if (tabC) tabC.click();
-    renderCollection();
+    openCollectionScreen();
   });
   document.getElementById("btnDecksImport")?.addEventListener("click", () => {
     Audio_.uiClick();
@@ -25533,7 +26741,7 @@
         return;
       }
       const newId = `custom-${Date.now().toString(36)}`;
-      const deck = { id: newId, name: `\u0418\u043C\u043F\u043E\u0440\u0442 ${(/* @__PURE__ */ new Date()).toLocaleDateString("ru-RU")}`, faction: fac, cards: ids, updated: Date.now() };
+      const deck = { id: newId, name: `\u0418\u043C\u043F\u043E\u0440\u0442 ${(/* @__PURE__ */ new Date()).toLocaleDateString("ru-RU")}`, faction: fac, cards: ids, avatarCardId: suggestedDeckArt(ids)?.id ?? ids[0], updated: Date.now() };
       upsertCustomDeck(deck);
       decksSelectedId = newId;
       renderDeckGrid();
@@ -25559,7 +26767,7 @@
     const src = getAllDecksForGrid().find((x) => x.id === decksSelectedId);
     if (!src) return;
     const newId = `custom-${Date.now().toString(36)}`;
-    const copy = { id: newId, name: `${src.name} (\u043A\u043E\u043F\u0438\u044F)`, faction: src.faction, cards: src.cards.slice(), updated: Date.now() };
+    const copy = { id: newId, name: `${src.name} (\u043A\u043E\u043F\u0438\u044F)`, faction: src.faction, cards: src.cards.slice(), avatarCardId: src.avatarCardId ?? suggestedDeckArt(src.cards)?.id ?? src.cards[0], updated: Date.now() };
     upsertCustomDeck(copy);
     decksSelectedId = newId;
     renderDeckGrid();
@@ -25584,9 +26792,14 @@
     if (!sel2) return;
     const counts = /* @__PURE__ */ new Map();
     for (const id of sel2.cards) counts.set(id, (counts.get(id) ?? 0) + 1);
-    editing = { id: sel2.isPrecon ? null : sel2.id, name: sel2.name, faction: sel2.faction, counts };
-    closeDecksScreen();
-    $("collection").classList.remove("hidden");
+    editing = {
+      id: sel2.isPrecon ? null : sel2.id,
+      name: sel2.name,
+      faction: sel2.faction,
+      counts,
+      avatarCardId: sel2.avatarCardId ?? null
+    };
+    openCollectionScreen();
     const tabB = document.getElementById("tabBuilder");
     if (tabB) tabB.click();
     const selFac = document.getElementById("dbFaction");
@@ -25605,7 +26818,15 @@
   window.closeDecksScreen = closeDecksScreen;
   window.renderDeckGrid = renderDeckGrid;
   function openHomeScreen() {
+    if (!$("battle").classList.contains("hidden")) {
+      battle.tutCleanup();
+      battle.stop();
+      $("battle").classList.add("hidden");
+    }
+    $("gameover").classList.add("hidden");
+    setAppRoute("home");
     Audio_.uiClick();
+    buildMenu(false);
     $("decksScreen")?.classList.add("hidden");
     $("collection").classList.add("hidden");
     $("shopModal").classList.add("hidden");
@@ -25624,6 +26845,9 @@
     document.querySelectorAll(".topTab").forEach((el2) => el2.classList.toggle("active", el2.dataset.tab === "home"));
   }
   function openEventsScreen() {
+    setAppRoute("events");
+    $("menu").classList.add("hidden");
+    $("homeScreen")?.classList.add("hidden");
     Audio_.uiClick();
     $("decksScreen")?.classList.add("hidden");
     document.getElementById("homeScreen")?.classList.add("hidden");
@@ -25631,11 +26855,16 @@
     $("shopModal").classList.add("hidden");
     $("bpModal").classList.add("hidden");
     $("profileModal").classList.add("hidden");
+    $("boosterModal").classList.add("hidden");
+    $("campaignModal")?.classList.add("hidden");
     const es = document.getElementById("eventsScreen");
     if (es) es.classList.remove("hidden");
     const grid = document.getElementById("eventsGrid");
     if (grid) {
+      const borderlessProgress = Math.min(BORDERLESS_EVENT_WINS, meta.borderlessEventWins ?? 0);
+      const canClaimBorderless = borderlessProgress >= BORDERLESS_EVENT_WINS && !meta.borderlessEventClaimed;
       const events = [
+        { title: "\u0413\u0430\u043B\u0435\u0440\u0435\u044F \u0431\u0435\u0437 \u0433\u0440\u0430\u043D\u0438\u0446", sub: "\u0421\u043E\u0431\u044B\u0442\u0438\u0435 \xB7 Borderless", art: "/art/Ethereal/eth_03.png", borderless: true },
         { title: "\u041F\u0440\u0435\u043C\u044C\u0435\u0440-\u0434\u0440\u0430\u0444\u0442", sub: "\u041B\u0438\u043C\u0438\u0442", art: "/art/Pyromancer/pyr_01.png" },
         { title: "\u0411\u044B\u0441\u0442\u0440\u044B\u0439 \u0441\u0442\u0430\u0440\u0442", sub: "\u0412 \u0431\u044B\u0441\u0442\u0440\u0443\u044E \u0438\u0433\u0440\u0443", art: "/art/Aurites/aur_01.png" },
         { title: "\u0418\u0441\u043F\u044B\u0442\u0430\u043D\u0438\u0435 \u0441\u0442\u0438\u0445\u0438\u0439", sub: "\u041E\u0431\u0443\u0447\u0435\u043D\u0438\u0435", art: "/art/Ethereal/eth_01.png" },
@@ -25648,20 +26877,47 @@
         { title: "\u041A\u043B\u0430\u0441\u0441\u0438\u0447\u0435\u0441\u043A\u0438\u0439 \u0442\u0443\u0440\u043D\u0438\u0440", sub: "\u041A\u043E\u043D\u0441\u0442\u0440\u0443\u043A\u0442\u0435\u0434", art: "/art/Pyromancer/pyr_03.png" }
       ];
       grid.innerHTML = events.map((ev) => `
-      <div class="draftCard" style="height:118px;flex-direction:column;align-items:stretch;padding:0;border-radius:8px;overflow:hidden">
+      <div class="draftCard${ev.borderless ? " borderlessEventCard" : ""}" data-event-id="${ev.borderless ? "borderless" : ""}" style="height:${ev.borderless ? "172px" : "118px"};flex-direction:column;align-items:stretch;padding:0;border-radius:8px;overflow:hidden">
         <div class="draftArt" style="position:absolute;inset:0"><img src="${ev.art}" alt="" loading="lazy" onerror="this.style.display='none'"></div>
-        <div style="position:absolute;left:0;right:0;bottom:0;background:linear-gradient(180deg,transparent,rgba(0,0,0,.78));padding:.5rem .6rem .45rem;z-index:1">
-          <div style="font-family:Philosopher,serif;color:#ffe9b0;font-size:.78rem">${ev.title}</div>
-          <div style="font-size:.58rem;color:#cbb98a">${ev.sub}</div>
+        <div class="eventArtShade"></div>
+        <div class="eventCardCopy">
+          <div class="eventCardTitle">${ev.title}</div>
+          <div class="eventCardSub">${ev.sub}</div>
+          ${ev.borderless ? `<div class="eventRewardBox">
+            <div class="eventProgressLabel"><span>\u0420\u0435\u0439\u0442\u0438\u043D\u0433\u043E\u0432\u044B\u0435 \u043F\u043E\u0431\u0435\u0434\u044B</span><b>${borderlessProgress}/${BORDERLESS_EVENT_WINS}</b></div>
+            <div class="eventProgressTrack"><i style="width:${borderlessProgress / BORDERLESS_EVENT_WINS * 100}%"></i></div>
+            <button type="button" class="eventRewardClaim" data-borderless-claim ${canClaimBorderless ? "" : "disabled"}>
+              ${meta.borderlessEventClaimed ? "\u041F\u043E\u043B\u0443\u0447\u0435\u043D\u043E \u2713" : canClaimBorderless ? "\u0417\u0430\u0431\u0440\u0430\u0442\u044C Borderless \u043D\u0430\u0433\u0440\u0430\u0434\u0443" : `\u0415\u0449\u0451 ${BORDERLESS_EVENT_WINS - borderlessProgress} \u043F\u043E\u0431\u0435\u0434\u044B`}
+            </button>
+            <small>1 \u043A\u043E\u0441\u043C\u0435\u0442\u0438\u0447\u0435\u0441\u043A\u0438\u0439 \u0432\u0430\u0440\u0438\u0430\u043D\u0442 \u043A\u0430\u0440\u0442\u044B \xB7 \u0431\u0430\u043B\u0430\u043D\u0441 \u043D\u0435 \u043C\u0435\u043D\u044F\u0435\u0442\u0441\u044F</small>
+          </div>` : ""}
         </div>
+        ${ev.borderless ? '<span class="eventBorderlessTag">\u25C7 BORDERLESS</span>' : ""}
       </div>
     `).join("");
+      grid.onclick = (ev) => {
+        const target = ev.target;
+        const claim = target?.closest?.("[data-borderless-claim]");
+        if (claim) {
+          ev.stopPropagation();
+          if (claim.disabled || meta.borderlessEventClaimed) return;
+          const reward = grantRandomBorderless();
+          if (!reward) {
+            showToast("\u0412\u0441\u0435 Borderless-\u0432\u0430\u0440\u0438\u0430\u043D\u0442\u044B \u0443\u0436\u0435 \u0441\u043E\u0431\u0440\u0430\u043D\u044B");
+            return;
+          }
+          meta.borderlessEventClaimed = true;
+          metaSave();
+          showToast(`\u25C7 \u041F\u043E\u043B\u0443\u0447\u0435\u043D Borderless-\u0432\u0430\u0440\u0438\u0430\u043D\u0442: \xAB${cardName(reward)}\xBB`);
+          openEventsScreen();
+          return;
+        }
+        const tile = target?.closest?.(".draftCard");
+        if (tile && tile.dataset.eventId !== "borderless") showToast("\u0421\u043E\u0431\u044B\u0442\u0438\u0435 \u0441\u043A\u043E\u0440\u043E \u043E\u0442\u043A\u0440\u043E\u0435\u0442\u0441\u044F");
+      };
       grid.style.marginRight = "";
     }
     syncTopWallet();
-  }
-  function closeEventsScreen() {
-    document.getElementById("eventsScreen")?.classList.add("hidden");
   }
   document.getElementById("homePlayBtn")?.addEventListener("click", () => {
     Audio_.uiClick();
@@ -25680,8 +26936,7 @@
   });
   document.getElementById("btnEventsClose")?.addEventListener("click", () => {
     Audio_.uiClick();
-    closeEventsScreen();
-    openHomeScreen();
+    navigateApp("back");
   });
   (function patchTopTabs2() {
     const tabs = document.querySelectorAll(".topTab");
@@ -25705,11 +26960,7 @@
           document.getElementById("eventsScreen")?.classList.add("hidden");
           openDecksScreen();
         } else if (t === "packs") {
-          Audio_.uiClick();
-          document.getElementById("homeScreen")?.classList.add("hidden");
-          document.getElementById("eventsScreen")?.classList.add("hidden");
-          $("decksScreen")?.classList.add("hidden");
-          $("boosterModal").classList.remove("hidden");
+          openBoosterPanel();
           document.querySelectorAll(".topTab").forEach((x) => x.classList.toggle("active", x.dataset.tab === "packs"));
         } else if (t === "store") {
           Audio_.uiClick();
@@ -25891,14 +27142,29 @@
       artChain(img, [`/heroes/${fac}`, `img/menu_${fac.toLowerCase()}.jpg`]);
     }
   }
-  function buildMenu() {
+  function buildMenu(showTour = true) {
+    const customs = loadCustomDecks();
+    const validSelected = menuSelectedDeckId && (deckById.has(menuSelectedDeckId) || customs.some((d) => d.id === menuSelectedDeckId));
+    if (!validSelected) {
+      menuSelectedDeckId = starterDeckForFaction(picked)?.id ?? picked;
+      saveMenuDeck();
+    }
     const mh = $("menuHeroes");
     if (mh) {
-      mh.innerHTML = FACTION_IDS.map((f, i) => `<div class="heroChip${f === picked ? " sel" : ""}" data-f="${f}" role="button" tabindex="0"
-        title="${FACTION_RU[f]} (${HUB_ELEM_RU[f] ?? ""}) \u2014 \u043A\u043B\u0438\u043A \u0432\u044B\u0431\u0438\u0440\u0430\u0435\u0442 \u0444\u0440\u0430\u043A\u0446\u0438\u044E">
-        <span class="orbCore"><img class="orbIcon" src="img/ico_fac_${i}.png" alt="" onerror="this.style.display='none'"></span>
+      mh.innerHTML = FACTION_IDS.map((f) => `<div class="heroChip${f === picked ? " sel" : ""}" data-f="${f}" role="button" tabindex="0"
+        aria-label="\u0411\u044B\u0441\u0442\u0440\u044B\u0439 \u0432\u044B\u0431\u043E\u0440 \u0444\u0440\u0430\u043A\u0446\u0438\u0438: ${FACTION_RU[f]}" aria-pressed="${f === picked}"
+        title="${FACTION_RU[f]} (${HUB_ELEM_RU[f] ?? ""}) \u2014 \u0431\u044B\u0441\u0442\u0440\u043E \u0432\u044B\u0431\u0440\u0430\u0442\u044C \u0444\u0440\u0430\u043A\u0446\u0438\u044E">
+        <span class="orbCore"><img class="orbIcon" src="" alt="" loading="lazy" decoding="async"></span>
         <span class="chipName">${HUB_ELEM_RU[f] ?? FACTION_RU[f]}</span>
       </div>`).join("");
+      mh.querySelectorAll(".heroChip").forEach((chip) => {
+        const f = chip.dataset.f;
+        const i = f ? FACTION_IDS.indexOf(f) : -1;
+        if (f && i >= 0) artChain(
+          chip.querySelector(".orbIcon"),
+          [`/heroes/${f}`, `img/ico_fac_${i}.png`]
+        );
+      });
     }
     const host = $("playerFactions");
     host.innerHTML = "";
@@ -25932,6 +27198,49 @@
       host.appendChild(node);
       artChain(node.querySelector(".fcardArtImg"), hubArtUrls(f));
     }
+    if (customs.length) {
+      const label = el("div", "menuDeckSectionTitle", "\u041C\u041E\u0418 \u041A\u041E\u041B\u041E\u0414\u042B \xB7 \u0412\u042B\u0411\u0415\u0420\u0418\u0422\u0415 \u0421\u041E\u0425\u0420\u0410\u041D\u0401\u041D\u041D\u0423\u042E \u041A\u041E\u041B\u041E\u0414\u0423");
+      host.appendChild(label);
+      for (const deck of customs) {
+        const f = deck.faction;
+        const avatar = deck.avatarCardId && deck.cards.includes(deck.avatarCardId) ? db.get(deck.avatarCardId) : void 0;
+        const artCard = avatar ?? suggestedDeckArt(deck.cards);
+        const artUrls = artCard ? [`/art/${encodeURIComponent(artCard.faction)}/${encodeURIComponent(artCard.id)}.png`, `/heroes/${encodeURIComponent(f)}`] : [`/heroes/${encodeURIComponent(f)}`, `img/menu_${f.toLowerCase()}.jpg`];
+        const node = el("div", "fcard customDeckCard" + (deck.id === menuSelectedDeckId ? " sel" : ""));
+        node.dataset.deckId = deck.id;
+        node.dataset.f = f;
+        node.dataset.faction = f;
+        node.dataset.format = "constructed";
+        node.setAttribute("role", "button");
+        node.setAttribute("tabindex", "0");
+        node.setAttribute("aria-label", `\u0412\u044B\u0431\u0440\u0430\u0442\u044C \u043A\u043E\u043B\u043E\u0434\u0443 \xAB${deck.name}\xBB, ${deck.cards.length} \u043A\u0430\u0440\u0442`);
+        node.innerHTML = `<div class="fcardArt">
+          <span class="fcardArtPh" aria-hidden="true"><img src="" alt=""></span>
+          <img class="fcardArtImg" src="" alt="" loading="lazy" decoding="async">
+          <div class="fcardArtGrad"></div>
+          <span class="fcardLvl customDeckRibbon">\u041C\u041E\u042F \u041A\u041E\u041B\u041E\u0414\u0410</span>
+        </div>
+        <div class="fcardBody">
+          <div class="fname" title="${esc(deck.name)}">${esc(deck.name)}</div>
+          <div class="fclass">${esc(FACTION_RU[f] ?? f)} \xB7 Constructed</div>
+        </div>
+        <div class="fcardStats customDeckStats"><span>${deck.cards.length} \u043A\u0430\u0440\u0442</span><span>\u0412\u042B\u0411\u0420\u0410\u0422\u042C</span></div>
+        <span class="fcardCheck" title="\u0412\u044B\u0431\u0440\u0430\u043D\u0430 \u043A\u043E\u043B\u043E\u0434\u0430">\u2713</span>`;
+        const ph = node.querySelector(".fcardArtPh img");
+        artChain(ph, [`/heroes/${encodeURIComponent(f)}`, `img/ico_fac_${FACTION_IDS.indexOf(f)}.png`]);
+        artChain(node.querySelector(".fcardArtImg"), artUrls);
+        node.title = `\u0412\u044B\u0431\u0440\u0430\u0442\u044C \u043A\u043E\u043B\u043E\u0434\u0443 \xAB${deck.name}\xBB \xB7 ${deck.cards.length} \u043A\u0430\u0440\u0442`;
+        node.addEventListener("click", () => selectMainMenuDeck(deck.id));
+        node.addEventListener("keydown", (ev) => {
+          const key = ev.key;
+          if (key === "Enter" || key === " ") {
+            ev.preventDefault();
+            node.click();
+          }
+        });
+        host.appendChild(node);
+      }
+    }
     sel("enemyFaction").innerHTML = FACTION_IDS.filter((f) => f !== picked).map((f) => `<option value="${f}">${FACTION_RU[f]}</option>`).join("") + '<option value="__random">\u0421\u043B\u0443\u0447\u0430\u0439\u043D\u0430\u044F \u0444\u0440\u0430\u043A\u0446\u0438\u044F</option>';
     const mh2 = $("menuHeroes");
     if (mh2 && !mh2.ecBound) {
@@ -25942,19 +27251,47 @@
         if (!f) return;
         pickFaction(f);
       });
+      mh2.addEventListener("keydown", (ev) => {
+        const key = ev.key;
+        if (key !== "Enter" && key !== " ") return;
+        const chip = ev.target?.closest?.(".heroChip");
+        if (!chip) return;
+        ev.preventDefault();
+        chip.click();
+      });
     }
-    const customs = loadCustomDecks();
     renderShards();
     tutGatePractice();
-    if (!meta.tutDone) window.setTimeout(() => tourShow(), 400);
+    if (showTour && !meta.tutDone) window.setTimeout(() => tourShow(), 400);
     const cnt = $("menuCardCount");
     if (cnt) cnt.textContent = String(ALL_CARDS.length);
-    sel("deckPick").innerHTML = deckList.map((d) => `<option value="${d.id}">${esc(d.name)} \xB7 \u0431\u0430\u0437\u0430 (${d.cards.length})</option>`).join("") + (customs.length ? `<optgroup label="\u041C\u043E\u0438 \u043A\u043E\u043B\u043E\u0434\u044B">${customs.map((d) => `<option value="${d.id}">${esc(d.name)} (${d.cards.length} \u043A\u0430\u0440\u0442)</option>`).join("")}</optgroup>` : "");
-    if (deckById.has(picked)) sel("deckPick").value = picked;
+    sel("deckPick").innerHTML = deckList.filter((d) => d.id !== "Starter").map((d) => `<option value="${esc(d.id)}">${esc(d.name)} \xB7 ${d.format === STARTER_DECK_FORMAT ? "\u0441\u0442\u0430\u0440\u0442\u043E\u0432\u0430\u044F" : "Constructed"} (${d.cards.length})</option>`).join("") + (customs.length ? `<optgroup label="\u041C\u043E\u0438 \u043A\u043E\u043B\u043E\u0434\u044B">${customs.map((d) => `<option value="${esc(d.id)}">${esc(d.name)} (${d.cards.length} \u043A\u0430\u0440\u0442)</option>`).join("")}</optgroup>` : "");
+    sel("deckPick").value = menuSelectedDeckId ?? "";
+    if (!sel("deckPick").value) {
+      menuSelectedDeckId = starterDeckForFaction(picked)?.id ?? picked;
+      sel("deckPick").value = menuSelectedDeckId;
+    }
     applyMenuBg();
     updatePlayGate();
     updateChallengePanel();
     updateEcProfile();
+    renderHomeQuests();
+  }
+  function selectMainMenuDeck(deckId) {
+    const deck = resolveDeck(deckId, deckList);
+    if (!deck) return;
+    menuSelectedDeckId = deckId;
+    saveMenuDeck();
+    if (FACTION_IDS.includes(deck.faction)) {
+      const changed = picked !== deck.faction;
+      picked = deck.faction;
+      savePicked();
+      if (changed) Audio_.whoosh();
+    }
+    Audio_.uiClick();
+    buildMenu();
+    sel("deckPick").value = deckId;
+    updatePlayGate();
   }
   function applyMenuBg() {
     const bg = document.querySelector(".menuBg:not(.menuBgFx)");
@@ -26160,6 +27497,7 @@
     else if (adminTab === "users") renderAdminUsers(body);
     else if (adminTab === "economy") renderAdminEconomy(body);
     else if (adminTab === "cards") renderAdminCards(body);
+    else if (adminTab === "borderless") renderAdminBorderless(body);
     else if (adminTab === "decks") renderAdminDecks(body);
     else if (adminTab === "system") renderAdminSystem(body);
     let usersN = 6;
@@ -26171,7 +27509,7 @@
     body.insertAdjacentHTML("afterbegin", `<div class="admKpi" aria-label="\u041A\u043B\u044E\u0447\u0435\u0432\u044B\u0435 \u043F\u043E\u043A\u0430\u0437\u0430\u0442\u0435\u043B\u0438">
     <div class="admKpiChip"><span class="k">\u{1F3AF} \u041C\u0430\u0442\u0447\u0435\u0439</span><span class="v">${(meta.wins ?? 0) + (meta.losses ?? 0)}</span></div>
     <div class="admKpiChip"><span class="k">\u{1F465} \u0418\u0433\u0440\u043E\u043A\u043E\u0432</span><span class="v">${usersN}</span></div>
-    <div class="admKpiChip"><span class="k">\u{1F0CF} \u041A\u0430\u0440\u0442 \u0432 \u0431\u0430\u0437\u0435</span><span class="v">${ALL_CARDS.length}</span></div>
+    <div class="admKpiChip" title="${ALL_CARDS.length} \u0438\u0433\u0440\u043E\u0432\u044B\u0445 \u043A\u0430\u0440\u0442, \u043A\u0430\u0436\u0434\u0430\u044F \u043C\u043E\u0436\u0435\u0442 \u0438\u043C\u0435\u0442\u044C \u043A\u043B\u0430\u0441\u0441\u0438\u0447\u0435\u0441\u043A\u043E\u0435 \u0438 Borderless-\u043E\u0444\u043E\u0440\u043C\u043B\u0435\u043D\u0438\u0435"><span class="k">\u{1F3B4} \u041A\u0430\u0440\u0442\u044B / \u0432\u0430\u0440\u0438\u0430\u043D\u0442\u044B</span><span class="v">${ALL_CARDS.length} / ${ALL_CARDS.length * 2}</span></div>
     <div class="admKpiChip"><span class="k">\u{1F48E} \u0421\u0430\u043C\u043E\u0446\u0432\u0435\u0442\u043E\u0432</span><span class="v">${gemsGet()}</span></div>
   </div>`);
   }
@@ -26198,11 +27536,11 @@
     </div>
     <div class="admCard">
       <h4>\u{1F4B0} \u0412\u0430\u043B\u044E\u0442\u0430</h4>
-      <div class="admField"><label>\u25C8 \u041F\u044B\u043B\u044C</label><input id="admShards" type="number" min="0" value="${shardsGet()}"></div>
+      <div class="admField"><label>\u{1FA99} \u041C\u043E\u043D\u0435\u0442\u044B</label><input id="admShards" type="number" min="0" value="${shardsGet()}"></div>
       <div class="admField"><label>\u{1F48E} \u0413\u0435\u043C\u044B</label><input id="admGems" type="number" min="0" value="${gemsGet()}"></div>
       <div class="admField"><label>\u0411\u0443\u0441\u0442\u0435\u0440\u043E\u0432</label><input id="admPacks" type="number" min="0" value="${meta.freeOpens || 0}"></div>
       <div class="admField"><label>BP XP</label><input id="admBpXp" type="number" min="0" value="${meta.bpXp || 0}"></div>
-      <div style="display:flex;gap:.4rem;margin-top:.5rem;flex-wrap:wrap"><button class="btn" data-give="shard500">+500 \u25C8</button><button class="btn" data-give="shard2000">+2000 \u25C8</button><button class="btn" data-give="gem100">+100 \u{1F48E}</button><button class="btn" data-give="pack1">+1 \u0431\u0443\u0441\u0442\u0435\u0440</button></div>
+      <div style="display:flex;gap:.4rem;margin-top:.5rem;flex-wrap:wrap"><button class="btn" data-give="shard500">+500 \u{1FA99}</button><button class="btn" data-give="shard2000">+2000 \u{1FA99}</button><button class="btn" data-give="gem100">+100 \u{1F48E}</button><button class="btn" data-give="pack1">+1 \u0431\u0443\u0441\u0442\u0435\u0440</button></div>
     </div>
     <div class="admCard">
       <h4>\u{1F3AF} \u041A\u0432\u0435\u0441\u0442\u044B \u0438 \u043F\u0440\u043E\u043F\u0443\u0441\u043A</h4>
@@ -26323,7 +27661,7 @@
     <button class="btn" id="admUserExport">\u042D\u043A\u0441\u043F\u043E\u0440\u0442 CSV</button>
   </div>
   <div style="overflow:auto;max-height:52vh;border:1px solid rgba(255,255,255,.06);border-radius:8px">
-    <table class="admTable"><thead><tr><th>\u0418\u0433\u0440\u043E\u043A</th><th>\u0423\u0440 / MMR</th><th>W-L</th><th>\u25C8 / \u{1F48E}</th><th>\u0421\u0442\u0430\u0442\u0443\u0441</th><th>\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u044F</th></tr></thead><tbody id="admUserTbody"></tbody></table>
+    <table class="admTable"><thead><tr><th>\u0418\u0433\u0440\u043E\u043A</th><th>\u0423\u0440 / MMR</th><th>W-L</th><th>\u{1FA99} / \u{1F48E}</th><th>\u0421\u0442\u0430\u0442\u0443\u0441</th><th>\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u044F</th></tr></thead><tbody id="admUserTbody"></tbody></table>
   </div>
   <div style="font-size:.62rem;color:#8b93ab;margin-top:.4rem">\u0412\u0441\u0435\u0433\u043E ${users.length} \xB7 \u0432 \u043F\u0440\u043E\u0434\u0435 \u043F\u043E\u0434\u043C\u0435\u043D\u0438 localStorage \u043D\u0430 GET /api/admin/users?search=&filter=</div>`;
     const tbody = host.querySelector("#admUserTbody");
@@ -26339,9 +27677,9 @@
       <td><div style="display:flex;align-items:center;gap:.45rem"><span style="width:28px;height:28px;border-radius:50%;background:var(--panel);border:1px solid rgba(255,216,122,.18);display:flex;align-items:center;justify-content:center;font-size:.72rem">${FACTION_SIGIL[u.avatarFac] || "\u25C8"}</span><div><div style="font-size:.78rem;color:#ffe9b0">${esc(u.nick)} ${u.pid === meta.pid ? '<span class="admBadge">\u0432\u044B</span>' : ""}</div><div style="font-size:.62rem;color:#8b93ab">${esc(u.pid)} \xB7 ${esc(FACTION_RU[u.avatarFac] || u.avatarFac)} \xB7 ${u.frame}</div></div></div></td>
       <td><b>${u.level}</b> <span style="color:#8b93ab">/ ${u.mmr}</span></td>
       <td>${u.wins}-${u.losses} <span style="color:#8b93ab">${(u.wins / Math.max(1, u.wins + u.losses) * 100).toFixed(0)}%</span></td>
-      <td>\u25C8${u.shards} \xB7 \u{1F48E}${u.gems}</td>
+      <td>\u{1FA99}${u.shards} \xB7 \u{1F48E}${u.gems}</td>
       <td>${u.banned ? '<span class="admBadge" style="border-color:#7c3a34;background:rgba(124,58,52,.12);color:#ffb3a6">\u0431\u0430\u043D</span>' : '<span class="admBadge">\u0430\u043A\u0442\u0438\u0432\u0435\u043D</span>'} \xB7 ${u.lastSeen}</td>
-      <td><div class="admActions"><button class="btn" data-act="edit" data-pid="${u.pid}">\u270E</button><button class="btn" data-act="give" data-pid="${u.pid}">\u25C8</button><button class="btn" data-act="ban" data-pid="${u.pid}">${u.banned ? "\u2713" : "\u26D4"}</button><button class="btn danger" data-act="del" data-pid="${u.pid}">\u2715</button></div></td>
+      <td><div class="admActions"><button class="btn" data-act="edit" data-pid="${u.pid}">\u270E</button><button class="btn" data-act="give" data-pid="${u.pid}">\u{1FA99}</button><button class="btn" data-act="ban" data-pid="${u.pid}">${u.banned ? "\u2713" : "\u26D4"}</button><button class="btn danger" data-act="del" data-pid="${u.pid}">\u2715</button></div></td>
     </tr>`).join("");
       tbody.querySelectorAll("[data-act]").forEach((b) => {
         b.addEventListener("click", () => {
@@ -26364,7 +27702,7 @@
             render();
             showToast("\u0421\u043E\u0445\u0440\u0430\u043D\u0435\u043D\u043E");
           } else if (act === "give") {
-            const sh = parseInt(prompt("\u0412\u044B\u0434\u0430\u0442\u044C \u25C8 (\u043F\u044B\u043B\u044C)", "500") || "0") || 0;
+            const sh = parseInt(prompt("\u0412\u044B\u0434\u0430\u0442\u044C \u043C\u043E\u043D\u0435\u0442\u044B", "500") || "0") || 0;
             const ge = parseInt(prompt("\u0412\u044B\u0434\u0430\u0442\u044C \u{1F48E}", "50") || "0") || 0;
             users[idx].shards += sh;
             users[idx].gems += ge;
@@ -26374,7 +27712,7 @@
             }
             saveAdminUsers(users);
             render();
-            showToast("\u0412\u044B\u0434\u0430\u043D\u043E \u25C8" + sh + " \u{1F48E}" + ge);
+            showToast("\u0412\u044B\u0434\u0430\u043D\u043E \u{1FA99}" + sh + " \u{1F48E}" + ge);
           } else if (act === "ban") {
             users[idx].banned = !users[idx].banned;
             saveAdminUsers(users);
@@ -26418,7 +27756,7 @@
   function renderAdminEconomy(host) {
     host.innerHTML = `<div class="admGrid">
     <div class="admCard"><h4>\u{1F4B0} \u0411\u0430\u043B\u0430\u043D\u0441 (\u043C\u043E\u0439)</h4>
-      <div class="admField"><label>\u25C8 \u041F\u044B\u043B\u044C</label><input id="admEcoSh" type="number" value="${shardsGet()}"><button class="btn" data-eco="sh+500">+500</button></div>
+      <div class="admField"><label>\u{1FA99} \u041C\u043E\u043D\u0435\u0442\u044B</label><input id="admEcoSh" type="number" value="${shardsGet()}"><button class="btn" data-eco="sh+500">+500</button></div>
       <div class="admField"><label>\u{1F48E} \u0413\u0435\u043C\u044B</label><input id="admEcoGe" type="number" value="${gemsGet()}"><button class="btn" data-eco="ge+100">+100</button></div>
       <div class="admField"><label>\u0411\u0443\u0441\u0442\u0435\u0440\u044B</label><input id="admEcoPk" type="number" value="${meta.freeOpens || 0}"><button class="btn" data-eco="pk+1">+1</button></div>
       <div class="admField"><label>BP XP</label><input id="admEcoBp" type="number" value="${meta.bpXp || 0}"><button class="btn" data-eco="bp+260">+\u0443\u0440\u043E\u0432\u0435\u043D\u044C</button></div>
@@ -26427,15 +27765,15 @@
     <div class="admCard"><h4>\u{1F381} \u0412\u044B\u0434\u0430\u0442\u044C \u043D\u0430\u0431\u043E\u0440</h4>
       <div style="display:flex;gap:.4rem;flex-wrap:wrap;margin:.4rem 0">
         <button class="btn" data-kit="starter">\u0421\u0442\u0430\u0440\u0442\u043E\u0432\u044B\u0439: 5 \u043F\u0430\u043A\u043E\u0432 + 2500 \u{1F48E}</button>
-        <button class="btn" data-kit="daily">\u0414\u0435\u0439\u043B\u0438\u043A: 500 \u25C8</button>
+        <button class="btn" data-kit="daily">\u0414\u0435\u0439\u043B\u0438\u043A: 500 \u{1FA99}</button>
         <button class="btn" data-kit="bp">BP \u0431\u0443\u0441\u0442\u0435\u0440</button>
         <button class="btn" data-kit="foil">1 \u0444\u043E\u0439\u043B-\u0436\u0435\u0442\u043E\u043D</button>
       </div>
       <div style="font-size:.62rem;color:#8b93ab">\u0412 \u043F\u0440\u043E\u0434\u0435: POST /api/admin/grant {pid, shards, gems, packs}</div>
-      <div class="admField" style="margin-top:.6rem"><label>\u0426\u0435\u043D\u0430 \u043F\u0430\u043A\u0430</label><span style="font-size:.74rem;color:#e6d6ac">300 \u25C8 \xB7 \u043B\u0438\u043C\u0438\u0442 4 \u043A\u043E\u043F\u0438\u0438, \u0438\u0437\u043B\u0438\u0448\u0435\u043A \u2192 \u25C8 (1/5/20/100)</span></div>
+      <div class="admField" style="margin-top:.6rem"><label>\u0426\u0435\u043D\u0430 \u043F\u0430\u043A\u0430</label><span style="font-size:.74rem;color:#e6d6ac">300 \u043C\u043E\u043D\u0435\u0442 \xB7 \u043B\u0438\u043C\u0438\u0442 4 \u043A\u043E\u043F\u0438\u0438, \u0434\u0443\u0431\u043B\u0438\u043A\u0430\u0442\u044B \u2192 \u043C\u043E\u043D\u0435\u0442\u044B (1/2/5/20/100)</span></div>
     </div>
     <div class="admCard"><h4>\u{1F4C8} \u041A\u0443\u0440\u0441\u044B</h4>
-      <div class="admField"><label>\u041A\u0440\u0430\u0444\u0442 Common</label><span>5 \u25C8</span><label>\u0420\u0430\u0437\u0431\u043E\u0440 1 \u25C8</label></div>
+      <div class="admField"><label>\u0421\u043E\u0437\u0434\u0430\u043D\u0438\u0435 Common</label><span>5 \u043C\u043E\u043D\u0435\u0442</span><label>\u0420\u0430\u0437\u0431\u043E\u0440 Common</label><span>+1 \u043C\u043E\u043D\u0435\u0442\u0430</span></div>
       <div class="admField"><label>Rare</label><span>20 / 5</span><label>Epic 100 / 20</label></div>
       <div class="admField"><label>Legendary</label><span>400 / 100</span></div>
       <div style="font-size:.62rem;color:#8b93ab;margin-top:.4rem">\u041C\u0435\u043D\u044F\u0435\u0442\u0441\u044F \u0432 src/balance.ts \xB7 \u0430\u0434\u043C\u0438\u043D\u043A\u0430 \u0442\u043E\u043B\u044C\u043A\u043E \u0432\u044B\u0434\u0430\u0451\u0442 \u0432\u0430\u043B\u044E\u0442\u0443, \u043D\u0435 \u043C\u0435\u043D\u044F\u0435\u0442 \u043A\u0443\u0440\u0441\u044B \u0431\u0435\u0437 \u0434\u0435\u043F\u043B\u043E\u044F</div>
@@ -26455,7 +27793,7 @@
       renderShards();
       showToast("\u0421\u043E\u0445\u0440\u0430\u043D\u0435\u043D\u043E");
       const log = host.querySelector("#admEcoLog");
-      if (log) log.textContent = "[" + (/* @__PURE__ */ new Date()).toLocaleTimeString() + "] set \u25C8" + sh + " \u{1F48E}" + ge + " pk" + pk + " bp" + bp + "\n" + log.textContent;
+      if (log) log.textContent = "[" + (/* @__PURE__ */ new Date()).toLocaleTimeString() + "] set \u{1FA99}" + sh + " \u{1F48E}" + ge + " pk" + pk + " bp" + bp + "\n" + log.textContent;
     });
     host.querySelectorAll("[data-eco]").forEach((b) => {
       b.addEventListener("click", () => {
@@ -26511,7 +27849,8 @@
   }
   function renderAdminCards(host) {
     const q = host._q || "";
-    host.innerHTML = `<div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin-bottom:.5rem">
+    host.innerHTML = `<div class="admCollectionHint"><b>\u0418\u0433\u0440\u043E\u0432\u0430\u044F \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u044F \xB7 ${ALL_CARDS.length} \u043A\u0430\u0440\u0442</b><span>\u0423\u043F\u0440\u0430\u0432\u043B\u044F\u0435\u0442 \u0442\u043E\u043B\u044C\u043A\u043E \u043E\u0431\u044B\u0447\u043D\u044B\u043C\u0438 \u043A\u043E\u043F\u0438\u044F\u043C\u0438 \u0434\u043B\u044F \u043A\u043E\u043B\u043E\u0434. Borderless \u2014 \u043A\u043E\u0441\u043C\u0435\u0442\u0438\u0447\u0435\u0441\u043A\u0438\u0439 \u0432\u0438\u0434 \u0442\u0435\u0445 \u0436\u0435 \u043A\u0430\u0440\u0442, \u0431\u0435\u0437 \u0438\u0437\u043C\u0435\u043D\u0435\u043D\u0438\u0439 \u0431\u0430\u043B\u0430\u043D\u0441\u0430; \u0432\u044B\u0434\u0430\u0447\u0430 \u043E\u0442\u0434\u0435\u043B\u044C\u043D\u043E \u0432\u043E \u0432\u043A\u043B\u0430\u0434\u043A\u0435 <b>Borderless</b>.</span><span class="admCollectionTotal">${ALL_CARDS.length} \u0438\u0433\u0440\u043E\u0432\u044B\u0445 \u043A\u0430\u0440\u0442 \xB7 ${ALL_CARDS.length * 2} \u043F\u0440\u0435\u0434\u0441\u0442\u0430\u0432\u043B\u0435\u043D\u0438\u0439</span></div>
+  <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin-bottom:.5rem">
     <input id="admCardSearch" placeholder="\u041F\u043E\u0438\u0441\u043A \u043A\u0430\u0440\u0442\u044B..." value="${esc(q)}" style="flex:1;min-width:180px;background:#14161f;border:1px solid var(--line);color:var(--text);padding:.42rem .5rem;border-radius:6px">
     <select id="admCardFac" style="background:#14161f;border:1px solid var(--line);color:var(--text);padding:.42rem;border-radius:6px"><option value="">\u0412\u0441\u0435 \u0444\u0440\u0430\u043A\u0446\u0438\u0438</option>${["Aurites", "Necrus", "Terramorph", "Pyromancer", "Ethereal", "Neutral"].map((f) => `<option value="${f}">${FACTION_RU[f] || f}</option>`).join("")}</select>
     <button class="btn" id="admCardGive5">\uFF0B5 \u0441\u043B\u0443\u0447\u0430\u0439\u043D\u044B\u0445</button>
@@ -26519,7 +27858,7 @@
     <button class="btn danger" id="admCardWipe">\u267B \u0421\u0431\u0440\u043E\u0441 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u0438</button>
   </div>
   <div id="admCardGrid" style="display:flex;gap:.6rem;flex-wrap:wrap;max-height:52vh;overflow:auto;padding:.2rem"></div>
-  <div style="font-size:.62rem;color:#8b93ab;margin-top:.4rem">\u041A\u043B\u0438\u043A \u043F\u043E \u043A\u0430\u0440\u0442\u0435 \u2014 \u0432\u044B\u0434\u0430\u0442\u044C \xD71 (\u0434\u043E 4), \u043F\u0440\u0430\u0432\u044B\u0439 \u043A\u043B\u0438\u043A \u2014 \u0437\u0430\u0431\u0440\u0430\u0442\u044C, \u0434\u0432\u043E\u0439\u043D\u043E\u0439 \u043A\u043B\u0438\u043A \u2014 \u043E\u043F\u0438\u0441\u0430\u043D\u0438\u0435. \u041A\u043D\u043E\u043F\u043A\u0430 \xAB\u0412\u044B\u0434\u0430\u0442\u044C \u0432\u0441\u0435\xBB \u2014 \u043F\u043E\u043B\u043D\u044B\u0439 \u043F\u043B\u0435\u0439\u0441\u0435\u0442 \u0432\u0441\u0435\u0445 ${ALL_CARDS.length} \u043A\u0430\u0440\u0442. \u0412 \u043F\u0440\u043E\u0434\u0435: POST /api/admin/cards {pid, cardId, delta}</div>`;
+  <div style="font-size:.62rem;color:#8b93ab;margin-top:.4rem">\u041A\u043B\u0438\u043A \u043F\u043E \u043A\u0430\u0440\u0442\u0435 \u2014 \u0432\u044B\u0434\u0430\u0442\u044C \xD71 (\u0434\u043E 4), \u043F\u0440\u0430\u0432\u044B\u0439 \u043A\u043B\u0438\u043A \u2014 \u0437\u0430\u0431\u0440\u0430\u0442\u044C, \u0434\u0432\u043E\u0439\u043D\u043E\u0439 \u043A\u043B\u0438\u043A \u2014 \u043E\u043F\u0438\u0441\u0430\u043D\u0438\u0435. \xAB\u0412\u044B\u0434\u0430\u0442\u044C \u0432\u0441\u0435\xBB \u043D\u0430\u0437\u043D\u0430\u0447\u0430\u0435\u0442 \u043F\u043E\u043B\u043D\u044B\u0439 \u043F\u043B\u0435\u0439\u0441\u0435\u0442 \u0432\u0441\u0435\u0445 ${ALL_CARDS.length} \u0438\u0433\u0440\u043E\u0432\u044B\u0445 \u043A\u0430\u0440\u0442; Borderless-\u0432\u0430\u0440\u0438\u0430\u043D\u0442\u044B \u043D\u0435 \u0437\u0430\u0442\u0440\u0430\u0433\u0438\u0432\u0430\u044E\u0442\u0441\u044F. \u0412 \u043F\u0440\u043E\u0434\u0435: POST /api/admin/cards {pid, cardId, delta}</div>`;
     const grid = host.querySelector("#admCardGrid");
     const facSel = host.querySelector("#admCardFac");
     const search = host.querySelector("#admCardSearch");
@@ -26606,6 +27945,106 @@
       setOwnedMap(nm);
       showToast("\u041A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u044F \u0441\u0431\u0440\u043E\u0448\u0435\u043D\u0430");
       render();
+    });
+    render();
+  }
+  function renderAdminBorderless(host) {
+    const state = host;
+    const ownedIds = new Set((meta.borderlessOwned ?? []).filter((id) => ALL_CARDS.some((card) => card.id === id)));
+    const owned2 = ownedIds.size;
+    const chancePercent = (BORDERLESS_BOOSTER_CHANCE * 100).toLocaleString("ru-RU", { maximumFractionDigits: 3 });
+    const chanceOneIn = Math.max(1, Math.round(1 / BORDERLESS_BOOSTER_CHANCE));
+    host.innerHTML = `<div class="admCard admBorderlessOverview">
+    <div class="admBorderlessIntro"><div><div class="admBorderlessEyebrow">\u041A\u041E\u0421\u041C\u0415\u0422\u0418\u041A\u0410 \xB7 \u0418\u0413\u0420\u041E\u0412\u041E\u0419 \u0411\u0410\u041B\u0410\u041D\u0421 \u041D\u0415 \u041C\u0415\u041D\u042F\u0415\u0422\u0421\u042F</div>
+      <h3>Borderless \xB7 ${ALL_CARDS.length} \u0432\u0430\u0440\u0438\u0430\u043D\u0442\u043E\u0432</h3>
+      <p>\u0422\u0435 \u0436\u0435 \u043A\u0430\u0440\u0442\u044B, \u043D\u0430\u0437\u0432\u0430\u043D\u0438\u044F \u0438 \u0430\u0440\u0442. \u041C\u0435\u043D\u044F\u0435\u0442\u0441\u044F \u0442\u043E\u043B\u044C\u043A\u043E \u043E\u0444\u043E\u0440\u043C\u043B\u0435\u043D\u0438\u0435: Borderless \u2014 \u0431\u0435\u0437 \u0440\u0430\u043C\u043A\u0438, \u0441 \u043F\u043E\u043B\u043D\u043E\u0444\u043E\u0440\u043C\u0430\u0442\u043D\u044B\u043C \u0430\u0440\u0442\u043E\u043C. \u0412\u044B\u0434\u0430\u0447\u0430 \u0437\u0434\u0435\u0441\u044C \u043D\u0435 \u0434\u043E\u0431\u0430\u0432\u043B\u044F\u0435\u0442 \u0438\u0433\u0440\u043E\u0432\u044B\u0435 \u043A\u043E\u043F\u0438\u0438.</p></div>
+      <div class="admBorderlessMetrics"><div><span>\u0412\u044B\u0434\u0430\u043D\u043E</span><b>${owned2} / ${ALL_CARDS.length}</b></div>
+        <div><span>\u0428\u0430\u043D\u0441 \u0438\u0437 \u0431\u0443\u0441\u0442\u0435\u0440\u0430</span><b>${chancePercent}%</b></div>
+        <div><span>\u0427\u0430\u0441\u0442\u043E\u0442\u0430</span><b>\u2248 1 \u0438\u0437 ${chanceOneIn}</b></div></div>
+    </div>
+    <div class="admBorderlessProgress" role="progressbar" aria-label="\u0412\u044B\u0434\u0430\u043D\u043D\u044B\u0435 Borderless-\u0432\u0430\u0440\u0438\u0430\u043D\u0442\u044B" aria-valuemin="0" aria-valuemax="${ALL_CARDS.length}" aria-valuenow="${owned2}"><i style="width:${owned2 / Math.max(1, ALL_CARDS.length) * 100}%"></i></div>
+    <div class="admBorderlessChanceNote">\u0428\u0430\u043D\u0441 \u043E\u0442\u043D\u043E\u0441\u0438\u0442\u0441\u044F \u043A \u043E\u0442\u0434\u0435\u043B\u044C\u043D\u043E\u043C\u0443 \u0431\u043E\u043D\u0443\u0441\u0443 \u043D\u0430 \u0431\u0443\u0441\u0442\u0435\u0440; \u0438\u0433\u0440\u043E\u0432\u0430\u044F \u0447\u0430\u0441\u0442\u044C \u043F\u0430\u043A\u0430 \u043D\u0435 \u043C\u0435\u043D\u044F\u0435\u0442\u0441\u044F. \u0417\u043D\u0430\u0447\u0435\u043D\u0438\u0435 \u0437\u0430\u0434\u0430\u043D\u043E \u0432 \u043A\u043E\u0434\u0435: <code>BORDERLESS_BOOSTER_CHANCE</code>.</div>
+  </div>
+  <div class="admCard admBorderlessManage">
+    <div class="admBorderlessTools">
+      <input id="admBorderlessSearch" placeholder="\u041D\u0430\u0439\u0442\u0438 \u043A\u0430\u0440\u0442\u0443 \u043F\u043E \u043D\u0430\u0437\u0432\u0430\u043D\u0438\u044E \u0438\u043B\u0438 ID\u2026" value="${esc(state._borderlessQ ?? "")}" aria-label="\u041F\u043E\u0438\u0441\u043A Borderless-\u043A\u0430\u0440\u0442\u044B">
+      <select id="admBorderlessFac" aria-label="\u0424\u0438\u043B\u044C\u0442\u0440 Borderless \u043F\u043E \u0444\u0440\u0430\u043A\u0446\u0438\u0438"><option value="">\u0412\u0441\u0435 \u0444\u0440\u0430\u043A\u0446\u0438\u0438</option>${["Aurites", "Necrus", "Terramorph", "Pyromancer", "Ethereal", "Neutral"].map((f) => `<option value="${f}" ${f === state._borderlessFac ? "selected" : ""}>${FACTION_RU[f] || f}</option>`).join("")}</select>
+      <button class="btn" id="admBorderlessRandom" ${owned2 >= ALL_CARDS.length ? "disabled" : ""}>\uFF0B1 \u0441\u043B\u0443\u0447\u0430\u0439\u043D\u044B\u0439</button>
+      <button class="btn primary" id="admBorderlessAll" ${owned2 >= ALL_CARDS.length ? "disabled" : ""}>\u25C7 \u0412\u044B\u0434\u0430\u0442\u044C \u0432\u0441\u0435 ${ALL_CARDS.length}</button>
+      <button class="btn danger" id="admBorderlessReset" ${owned2 === 0 ? "disabled" : ""}>\u0421\u0431\u0440\u043E\u0441\u0438\u0442\u044C Borderless</button>
+    </div>
+    <div id="admBorderlessResults" class="admBorderlessResults" aria-live="polite"></div>
+    <div id="admBorderlessGrid" class="admBorderlessGrid"></div>
+    <div class="admBorderlessHelp">\u041D\u0430\u0436\u043C\u0438\u0442\u0435 \u043D\u0430 \u043A\u0430\u0440\u0442\u0443, \u0447\u0442\u043E\u0431\u044B \u0432\u044B\u0434\u0430\u0442\u044C \u0438\u043B\u0438 \u0437\u0430\u0431\u0440\u0430\u0442\u044C \u0442\u043E\u043B\u044C\u043A\u043E \u0435\u0451 Borderless-\u043E\u0444\u043E\u0440\u043C\u043B\u0435\u043D\u0438\u0435. \u0421\u043D\u044F\u0442\u0438\u0435 \u043A\u043E\u0441\u043C\u0435\u0442\u0438\u043A\u0438 \u0442\u0430\u043A\u0436\u0435 \u0441\u043D\u0438\u043C\u0430\u0435\u0442 \u0435\u0451 \u044D\u043A\u0438\u043F\u0438\u0440\u043E\u0432\u043A\u0443; \u043E\u0431\u044B\u0447\u043D\u044B\u0435 \u043A\u043E\u043F\u0438\u0438 \u043E\u0441\u0442\u0430\u044E\u0442\u0441\u044F \u0431\u0435\u0437 \u0438\u0437\u043C\u0435\u043D\u0435\u043D\u0438\u0439. \u041F\u043E\u0438\u0441\u043A \u043F\u043E\u043A\u0430\u0437\u044B\u0432\u0430\u0435\u0442 \u0434\u043E 60 \u0441\u043E\u0432\u043F\u0430\u0434\u0435\u043D\u0438\u0439.</div>
+  </div>`;
+    const search = host.querySelector("#admBorderlessSearch");
+    const faction = host.querySelector("#admBorderlessFac");
+    const results = host.querySelector("#admBorderlessResults");
+    const grid = host.querySelector("#admBorderlessGrid");
+    const render = () => {
+      const qq = (search.value || "").trim().toLocaleLowerCase();
+      const fac = faction.value;
+      state._borderlessQ = search.value;
+      state._borderlessFac = fac;
+      let list = ALL_CARDS.slice();
+      if (fac) list = list.filter((card) => card.faction === fac);
+      if (qq) list = list.filter((card) => cardName(card).toLocaleLowerCase().includes(qq) || card.id.toLocaleLowerCase().includes(qq));
+      const matches = list.length;
+      list = list.slice(0, 60);
+      results.textContent = `\u041F\u043E\u043A\u0430\u0437\u0430\u043D\u043E ${list.length} \u0438\u0437 ${matches} \u0441\u043E\u0432\u043F\u0430\u0434\u0435\u043D\u0438\u0439 \xB7 \u043F\u043E\u043B\u0443\u0447\u0435\u043D\u043E ${ownedIds.size} \u0438\u0437 ${ALL_CARDS.length}`;
+      grid.innerHTML = "";
+      for (const card of list) {
+        const unlocked2 = hasBorderless(card.id);
+        const node = renderCard(card, "borderless");
+        node.classList.add("admBorderlessTile");
+        node.classList.toggle("admBorderlessLocked", !unlocked2);
+        node.style.position = "relative";
+        const badge = document.createElement("span");
+        badge.className = `admBorderlessBadge${unlocked2 ? " isOwned" : ""}`;
+        badge.textContent = unlocked2 ? "\u25C7 \u0415\u0421\u0422\u042C" : "\uFF0B \u0412\u042B\u0414\u0410\u0422\u042C";
+        node.appendChild(badge);
+        node.title = `${cardName(card)} \xB7 ${unlocked2 ? "Borderless \u043F\u043E\u043B\u0443\u0447\u0435\u043D \u2014 \u043D\u0430\u0436\u043C\u0438\u0442\u0435, \u0447\u0442\u043E\u0431\u044B \u0437\u0430\u0431\u0440\u0430\u0442\u044C" : "Borderless \u043D\u0435 \u043F\u043E\u043B\u0443\u0447\u0435\u043D \u2014 \u043D\u0430\u0436\u043C\u0438\u0442\u0435, \u0447\u0442\u043E\u0431\u044B \u0432\u044B\u0434\u0430\u0442\u044C"}`;
+        node.addEventListener("click", () => {
+          if (hasBorderless(card.id)) {
+            meta.borderlessOwned = (meta.borderlessOwned ?? []).filter((id) => id !== card.id);
+            meta.borderlessEquipped = (meta.borderlessEquipped ?? []).filter((id) => id !== card.id);
+            showToast(`Borderless \u0441\u043D\u044F\u0442: ${cardName(card)}`);
+          } else {
+            unlockBorderless(card.id);
+            showToast(`\u0412\u044B\u0434\u0430\u043D Borderless: ${cardName(card)}`);
+          }
+          metaSave();
+          renderAdmin();
+        });
+        grid.appendChild(node);
+      }
+    };
+    search.addEventListener("input", render);
+    faction.addEventListener("change", render);
+    host.querySelector("#admBorderlessRandom")?.addEventListener("click", () => {
+      const card = grantRandomBorderless();
+      if (!card) {
+        showToast("\u0412\u0441\u0435 Borderless-\u0432\u0430\u0440\u0438\u0430\u043D\u0442\u044B \u0443\u0436\u0435 \u0432\u044B\u0434\u0430\u043D\u044B");
+        return;
+      }
+      metaSave();
+      showToast(`\u0412\u044B\u0434\u0430\u043D Borderless: ${cardName(card)}`);
+      renderAdmin();
+    });
+    host.querySelector("#admBorderlessAll")?.addEventListener("click", () => {
+      if (!confirm(`\u0412\u044B\u0434\u0430\u0442\u044C \u0432\u0441\u0435 ${ALL_CARDS.length} Borderless-\u0432\u0430\u0440\u0438\u0430\u043D\u0442\u043E\u0432? \u041E\u0431\u044B\u0447\u043D\u044B\u0435 \u043A\u043E\u043F\u0438\u0438 \u043A\u0430\u0440\u0442 \u043D\u0435 \u0438\u0437\u043C\u0435\u043D\u044F\u0442\u0441\u044F.`)) return;
+      meta.borderlessOwned = Array.from(/* @__PURE__ */ new Set([...meta.borderlessOwned ?? [], ...ALL_CARDS.map((card) => card.id)]));
+      metaSave();
+      showToast(`\u0412\u044B\u0434\u0430\u043D\u044B \u0432\u0441\u0435 ${ALL_CARDS.length} Borderless-\u0432\u0430\u0440\u0438\u0430\u043D\u0442\u043E\u0432`);
+      renderAdmin();
+    });
+    host.querySelector("#admBorderlessReset")?.addEventListener("click", () => {
+      if (!confirm("\u0417\u0430\u0431\u0440\u0430\u0442\u044C \u0432\u0441\u0435 Borderless-\u0432\u0430\u0440\u0438\u0430\u043D\u0442\u044B \u0438 \u0441\u043D\u044F\u0442\u044C \u0438\u0445 \u044D\u043A\u0438\u043F\u0438\u0440\u043E\u0432\u043A\u0443? \u041E\u0431\u044B\u0447\u043D\u044B\u0435 \u043A\u043E\u043F\u0438\u0438 \u043A\u0430\u0440\u0442 \u043E\u0441\u0442\u0430\u043D\u0443\u0442\u0441\u044F.")) return;
+      meta.borderlessOwned = [];
+      meta.borderlessEquipped = [];
+      metaSave();
+      showToast("Borderless-\u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u044F \u0441\u0431\u0440\u043E\u0448\u0435\u043D\u0430");
+      renderAdmin();
     });
     render();
   }
@@ -26855,7 +28294,8 @@
     const b = btn("btnPlay");
     const id = sel("deckPick").value;
     const deck = resolveDeck(id, deckList);
-    const problems = deck ? validateDeckSize(deck.cards, dbLookup).problems : ["\u043A\u043E\u043B\u043E\u0434\u0430 \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D\u0430"];
+    const problem = deck ? deckPlayProblem(deck) : "\u043A\u043E\u043B\u043E\u0434\u0430 \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D\u0430";
+    const problems = problem ? [problem] : [];
     b.disabled = problems.length > 0;
     b.title = problems.length > 0 ? `\u041A\u043E\u043B\u043E\u0434\u0430 \u043D\u0435 \u0441\u043E\u0431\u0440\u0430\u043D\u0430: ${problems[0]}` : "\u041D\u0430\u0447\u0430\u0442\u044C \u0431\u043E\u0439";
     const ph = document.getElementById("playHint");
@@ -26871,12 +28311,19 @@
   }
   sel("deckPick").addEventListener("change", () => {
     Audio_.uiClick();
-    updatePlayGate();
+    const id = sel("deckPick").value;
+    const deck = resolveDeck(id, deckList);
+    menuSelectedDeckId = id || null;
+    saveMenuDeck();
+    if (deck && FACTION_IDS.includes(deck.faction) && deck.faction !== picked) {
+      picked = deck.faction;
+      savePicked();
+    }
+    buildMenu();
   });
   btn("btnMakeDeck").addEventListener("click", () => {
     Audio_.uiClick();
-    $("collection").classList.remove("hidden");
-    renderCollection();
+    openCollectionScreen();
     btn("tabBuilder").click();
     if (loadCustomDecks().length === 0) btn("btnDbNew").click();
   });
@@ -26906,13 +28353,15 @@
       return null;
     }
   }
-  function applyBattleBg() {
-    const fac = String(battle.playerFaction ?? picked).toLowerCase();
+  function applyBattleBg(playerFaction = picked) {
+    const fac = String(playerFaction || picked).toLowerCase();
     const imgEl = document.getElementById("battleBgImg");
     const vidEl = document.getElementById("battleBgVideo");
     const backdrop = document.getElementById("backdrop");
     if (!backdrop) return;
-    const imgUrls = [`/bg/battle/battle_${fac}`, `/bg/battle/battle`, `img/board_arena.png`];
+    const tableSkin = String(meta.tableSkin || "classic");
+    const tableUrl = [`/cosm/tables/${encodeURIComponent(tableSkin)}`];
+    const imgUrls = [...tableUrl, `/bg/battle/battle_${fac}`, `/bg/battle/battle`, `img/board_arena.png`];
     const vidUrls = [`/bg/animated/battle/battle_${fac}`, `/bg/animated/battle/battle`];
     const loadImg = (idx) => {
       if (idx >= imgUrls.length) {
@@ -26966,7 +28415,7 @@
     audioUnlock();
     musicStart();
     Audio_.uiClick();
-    applyBattleBg();
+    applyBattleBg(picked);
     battle.playerFaction = picked;
     battle.playerDeckId = sel("deckPick").value;
     const fromMenu = battle.launchMode === "menu";
@@ -27032,34 +28481,48 @@
   btn("btnSkip").addEventListener("click", () => battle.endTurnNow());
   btn("btnAutoBattle").addEventListener("click", () => battle.closeCombatWindow());
   btn("btnSkipCombat").addEventListener("click", () => battle.skipCombat());
-  btn("btnBoosters").addEventListener("click", () => {
-    hideSealedInstant();
-    $("boosterModal").classList.remove("hidden");
-    const pr = $("packRow");
-    if (pr) pr.innerHTML = "";
-    const st = document.getElementById("packStage");
-    if (st) st.classList.remove("hasSealed");
-    renderShards();
-  });
+  btn("btnBoosters").addEventListener("click", () => openBoosterPanel(btn("btnBoosters")));
   btn("btnProfile").addEventListener("click", () => openProfile());
-  btn("btnProfileClose").addEventListener("click", () => $("profileModal").classList.add("hidden"));
+  btn("btnProfileClose").addEventListener("click", () => navigateApp("back"));
   btn("btnShop").addEventListener("click", () => openShop());
-  btn("btnShopClose").addEventListener("click", () => $("shopModal").classList.add("hidden"));
+  btn("btnShopClose").addEventListener("click", () => navigateApp("back"));
   btn("btnCampaign").addEventListener("click", () => openCampaign());
   btn("btnCampClose").addEventListener("click", () => $("campaignModal").classList.add("hidden"));
   btn("btnTour").addEventListener("click", () => openTut());
   btn("btnBP").addEventListener("click", () => openBP());
-  btn("btnBPClose").addEventListener("click", () => $("bpModal").classList.add("hidden"));
-  btn("btnPackNew").addEventListener("click", () => newPack());
+  btn("btnBPClose").addEventListener("click", () => navigateApp("back"));
+  btn("btnPackNew").addEventListener("click", () => {
+    shopTab = "boosters";
+    openShop();
+  });
   btn("btnPackPrem").addEventListener("click", () => {
-    if (!newPremPack()) showToast("\u041D\u0435\u0442 \u043F\u0440\u0435\u043C\u0438\u0443\u043C-\u0431\u0443\u0441\u0442\u0435\u0440\u043E\u0432 \u2014 \u043D\u0430\u0433\u0440\u0430\u0434\u0430 \u043F\u0440\u043E\u043F\u0443\u0441\u043A\u0430 (15 \u0443\u0440\u043E\u0432\u0435\u043D\u044C)");
+    newPremPack();
   });
   btn("btnPackClose").addEventListener("click", () => {
-    hideSealedInstant();
-    $("boosterModal").classList.add("hidden");
-    renderCollection();
+    closeBoosterPanel(true);
+    navigateApp("back");
   });
   (() => {
+    const panel = document.getElementById("boosterModal");
+    panel?.addEventListener("keydown", (ev) => {
+      if (ev.key !== "Tab" || panel.classList.contains("hidden")) return;
+      const focusable = Array.from(panel.querySelectorAll(
+        'button:not([disabled]),a[href],input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])'
+      )).filter((el2) => !el2.closest(".hidden") && el2.getAttribute("aria-hidden") !== "true");
+      if (!focusable.length) {
+        ev.preventDefault();
+        return;
+      }
+      const first = focusable[0], last = focusable[focusable.length - 1];
+      const active = document.activeElement;
+      if (ev.shiftKey && (active === first || !panel.contains(active))) {
+        ev.preventDefault();
+        last.focus();
+      } else if (!ev.shiftKey && (active === last || !panel.contains(active))) {
+        ev.preventDefault();
+        first.focus();
+      }
+    });
     const sealed = document.getElementById("packSealed");
     if (sealed) {
       sealed.addEventListener("click", () => revealPack());
@@ -27085,7 +28548,7 @@
   btn("cmDust").addEventListener("click", () => {
     const c = modalList[modalIdx];
     if (!c) return;
-    const msg = dustCard(c.id);
+    const msg = disenchantCard(c.id);
     renderCardModal();
     renderCollection();
     btn("cmDust").title = msg;
@@ -27108,6 +28571,18 @@
     showToast(`\u{1F31F} \xAB${c.name}\xBB \u2014 \u0444\u043E\u0439\u043B-\u0432\u0435\u0440\u0441\u0438\u044F \u0441\u043E\u0437\u0434\u0430\u043D\u0430!`);
     renderCardModal();
     renderCollection();
+  });
+  btn("cmBorderless").addEventListener("click", () => {
+    const c = modalList[modalIdx];
+    if (!c || !hasBorderless(c.id)) return;
+    const equipped = toggleBorderless(c.id);
+    modalStyles[modalIdx] = "auto";
+    renderCardModal();
+    if (!$("collection").classList.contains("hidden")) {
+      if (!$("dbMain").classList.contains("hidden")) renderEditor();
+      else renderCollection();
+    }
+    showToast(equipped ? `\u25C7 Borderless \u043D\u0430\u0434\u0435\u0442: \xAB${cardName(c)}\xBB` : `\u041A\u043B\u0430\u0441\u0441\u0438\u0447\u0435\u0441\u043A\u0438\u0439 \u0441\u0442\u0438\u043B\u044C \u0432\u043A\u043B\u044E\u0447\u0451\u043D: \xAB${cardName(c)}\xBB`);
   });
   var profTab = "gen";
   var FRAME_DEFS = [
@@ -27132,7 +28607,7 @@
       id: "first_win",
       ru: "\u041F\u0435\u0440\u0432\u0430\u044F \u043F\u043E\u0431\u0435\u0434\u0430",
       ico: 0,
-      rewardRu: "\u25C8100",
+      rewardRu: "\u{1FA99}100",
       prog: () => [Math.min(meta.wins, 1), 1],
       check: () => meta.wins >= 1,
       grant: () => shardsAdd(100)
@@ -27141,7 +28616,7 @@
       id: "win10",
       ru: "10 \u043F\u043E\u0431\u0435\u0434",
       ico: 4,
-      rewardRu: "\u25C8200 + \u0440\u0430\u043C\u043A\u0430 \xAB\u0421\u0435\u0440\u0435\u0431\u0440\u043E\xBB",
+      rewardRu: "\u{1FA99}200 + \u0440\u0430\u043C\u043A\u0430 \xAB\u0421\u0435\u0440\u0435\u0431\u0440\u043E\xBB",
       prog: () => [Math.min(meta.wins, 10), 10],
       check: () => meta.wins >= 10,
       grant: () => shardsAdd(200)
@@ -27150,7 +28625,7 @@
       id: "packs10",
       ru: "10 \u0431\u0443\u0441\u0442\u0435\u0440\u043E\u0432 \u043E\u0442\u043A\u0440\u044B\u0442\u043E",
       ico: 2,
-      rewardRu: "\u25C8200 + \u0430\u0432\u0430\u0442\u0430\u0440 \xAB\u041B\u0438\u0447\xBB",
+      rewardRu: "\u{1FA99}200 + \u0430\u0432\u0430\u0442\u0430\u0440 \xAB\u041B\u0438\u0447\xBB",
       prog: () => [Math.min(meta.packs, 10), 10],
       check: () => meta.packs >= 10,
       grant: () => shardsAdd(200)
@@ -27159,7 +28634,7 @@
       id: "mythic",
       ru: "\u0412\u0441\u0435 \u0431\u043E\u0441\u0441\u044B \u043A\u0430\u043C\u043F\u0430\u043D\u0438\u0438 \u043F\u043E\u0431\u0435\u0436\u0434\u0435\u043D\u044B",
       ico: 5,
-      rewardRu: "\u25C8500 + \u{1F48E}50",
+      rewardRu: "\u{1FA99}500 + \u{1F48E}50",
       prog: () => [FACTION_IDS.filter((f) => meta.campaign[f]).length, FACTION_IDS.length],
       check: () => FACTION_IDS.every((f) => meta.campaign[f]),
       grant: () => {
@@ -27290,29 +28765,41 @@
     openProfile();
   });
   function openProfile() {
+    setAppRoute("profile");
+    $("menu").classList.add("hidden");
+    for (const id of ["homeScreen", "eventsScreen", "decksScreen", "collection", "shopModal", "bpModal", "boosterModal", "campaignModal"])
+      document.getElementById(id)?.classList.add("hidden");
     const lvl = Math.floor(meta.xp / 500) + 1;
     const into = meta.xp % 500;
     const rank = rankOf(meta.mmr);
     const best = rankOf(meta.bestMmr ?? meta.mmr);
+    const totalMatches = meta.wins + meta.losses;
+    const winRate = totalMatches ? Math.round(meta.wins / totalMatches * 100) : 0;
+    const ownedBorderless = meta.borderlessOwned?.length ?? 0;
     const head = `
-    <div class="prfHead">
-      <div class="fava avaBig frame-${meta.frame || "bronze"}">${avaGlyph()}${PREMIUM_AVATARS[meta.avatarFac] ? "" : `<img src="/heroes/${encodeURIComponent(meta.avatarFac)}" alt="" onerror="this.remove()">`}</div>
-      <div style="flex:1">
-        <div style="display:flex;align-items:center;gap:.5rem">
-          <input id="nickInput" maxlength="16" value="${esc(meta.nick ?? "\u0413\u043E\u0441\u0442\u044C")}" aria-label="\u041D\u0438\u043A\u043D\u0435\u0439\u043C" title="3\u201316 \u0441\u0438\u043C\u0432\u043E\u043B\u043E\u0432; \u0443\u043D\u0438\u043A\u0430\u043B\u044C\u043D\u043E\u0441\u0442\u044C \u043F\u0440\u043E\u0432\u0435\u0440\u044F\u0435\u0442\u0441\u044F \u043D\u0430 \u0441\u0435\u0440\u0432\u0435\u0440\u0435">
-          <span style="font-size:.66rem;color:#7a7264">${meta.signedIn ? "\xB7 \u0432 \u0430\u043A\u043A\u0430\u0443\u043D\u0442\u0435" : "\xB7 \u0433\u043E\u0441\u0442\u044C"}</span>
+    <section class="profileHero">
+      <div class="prfHead">
+        <div class="fava avaBig frame-${meta.frame || "bronze"}">${avaGlyph()}${PREMIUM_AVATARS[meta.avatarFac] ? "" : `<img src="/heroes/${encodeURIComponent(meta.avatarFac)}" alt="" onerror="this.remove()">`}</div>
+        <div class="profileIdentity">
+          <div class="profileNameRow">
+            <input id="nickInput" maxlength="16" value="${esc(meta.nick ?? "\u0413\u043E\u0441\u0442\u044C")}" aria-label="\u041D\u0438\u043A\u043D\u0435\u0439\u043C" title="3\u201316 \u0441\u0438\u043C\u0432\u043E\u043B\u043E\u0432; \u0443\u043D\u0438\u043A\u0430\u043B\u044C\u043D\u043E\u0441\u0442\u044C \u043F\u0440\u043E\u0432\u0435\u0440\u044F\u0435\u0442\u0441\u044F \u043D\u0430 \u0441\u0435\u0440\u0432\u0435\u0440\u0435">
+            <span class="profileAccountTag">${meta.signedIn ? "\u0410\u041A\u041A\u0410\u0423\u041D\u0422" : "\u0413\u041E\u0421\u0422\u042C"}</span>
+          </div>
+          <div class="profileRankLine"><span class="profileRankMark">\u2726</span><b>${rank.title}</b><span>\u041B\u0443\u0447\u0448\u0438\u0439 \u0440\u0430\u043D\u0433: ${best.title}</span></div>
+          <div class="profileMeterLabel"><span>\u0423\u0440\u043E\u0432\u0435\u043D\u044C ${lvl} \xB7 \u043E\u043F\u044B\u0442</span><span>${into}/500</span></div>
+          <div class="profileMeter"><i class="xpMeter" style="width:${into / 500 * 100}%"></i></div>
+          <div class="profileMeterLabel rankMeterLabel"><span>\u041F\u0440\u043E\u0433\u0440\u0435\u0441\u0441 \u043A \u0440\u0430\u043D\u0433\u0443 ${rank.next}</span><span>${Math.round(rank.prog * 100)}%</span></div>
+          <div class="profileMeter rankMeter"><i class="rankMeterFill" style="width:${rank.prog * 100}%"></i></div>
         </div>
-        <div style="font-family:Philosopher,serif;color:#ffe9b0;font-size:.95rem;margin-top:.2rem">
-          \u0423\u0440\u043E\u0432\u0435\u043D\u044C ${lvl} \xB7 \u0440\u0430\u043D\u0433 <b>${rank.title}</b> <span style="color:#7a7264;font-size:.7rem">(\u043B\u0443\u0447\u0448\u0438\u0439: ${best.title})</span></div>
-        <div style="font-size:.68rem;color:#cbb98a">\u041E\u043F\u044B\u0442: ${into}/500 \xB7 \u0434\u043E \u0440\u0430\u043D\u0433\u0430 ${rank.next}: ${Math.round(rank.prog * 100)}%</div>
-        <div style="height:6px;border-radius:4px;background:rgba(255,255,255,.12);margin-top:.25rem">
-          <div style="height:100%;width:${into / 500 * 100}%;border-radius:4px;background:linear-gradient(90deg,#b98f3e,#ffd87a)"></div></div>
-        <div style="height:5px;border-radius:4px;background:rgba(255,255,255,.08);margin-top:.2rem">
-          <div style="height:100%;width:${rank.prog * 100}%;border-radius:4px;background:linear-gradient(90deg,#4a7ab9,#8fd0ff)"></div></div>
       </div>
-    </div>
-    <div class="ptabs">
-      ${[["gen", "\u041E\u0431\u0449\u0430\u044F"], ["ranked", "\u0420\u0430\u043D\u0433"], ["cosm", "\u0421\u0442\u0438\u043B\u0438"], ["facs", "\u0424\u0440\u0430\u043A\u0446\u0438\u0438"], ["hist", "\u0418\u0441\u0442\u043E\u0440\u0438\u044F"], ["fr", "\u0414\u0440\u0443\u0437\u044C\u044F"]].map(([id, ru]) => `<button class="btn ptab${profTab === id ? " sel" : ""}" data-ptab="${id}">${ru}</button>`).join("")}
+      <div class="profileStatsRow">
+        <div class="profileStat"><small>\u0420\u0415\u0419\u0422\u0418\u041D\u0413</small><b>${fmtNum(meta.mmr)}</b><span>MMR</span></div>
+        <div class="profileStat"><small>\u041F\u041E\u0411\u0415\u0414\u042B</small><b>${fmtNum(meta.wins)}</b><span>${winRate}% \u043F\u043E\u0431\u0435\u0434</span></div>
+        <div class="profileStat"><small>\u041A\u041E\u041B\u041B\u0415\u041A\u0426\u0418\u042F</small><b>${ownedBorderless}<em> / ${ALL_CARDS.length}</em></b><span>Borderless</span></div>
+      </div>
+    </section>
+    <div class="ptabs profileTabs">
+      ${[["gen", "\u041E\u0431\u0437\u043E\u0440"], ["ranked", "\u0420\u0430\u043D\u0433"], ["cosm", "\u041A\u043E\u0441\u043C\u0435\u0442\u0438\u043A\u0430"], ["facs", "\u0424\u0440\u0430\u043A\u0446\u0438\u0438"], ["hist", "\u0418\u0441\u0442\u043E\u0440\u0438\u044F"], ["fr", "\u0414\u0440\u0443\u0437\u044C\u044F"]].map(([id, ru]) => `<button class="btn ptab${profTab === id ? " sel" : ""}" data-ptab="${id}">${ru}</button>`).join("")}
     </div>`;
     let bodyHtml = "";
     if (profTab === "gen") {
@@ -27332,17 +28819,17 @@
       const topStuck = [...stuckC.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([id, n]) => `${db.get(id)?.name ?? id} \xD7${n}`).join(", ") || "\u2014";
       const qs = meta.quests.map((q) => {
         const done = q.prog >= q.goal;
-        return `<div class="setRow" style="margin:0">
-        <div style="flex:1;font-size:.74rem;color:#e6d6ac">${esc(QUEST_RU[q.id]?.(q) ?? q.id)} \u2014 ${q.prog}/${q.goal}</div>
-        <button class="btn qClaim" data-q="${q.id}" ${done && !q.claimed ? "" : "disabled"}>
-          ${q.claimed ? "\u041F\u043E\u043B\u0443\u0447\u0435\u043D\u043E" : `\u25C8${DAILY_REWARD[q.id] ?? 0}`}</button></div>`;
+        return `<div class="setRow profileQuestRow" style="margin:0">
+        <div class="profileQuestText">${esc(QUEST_RU[q.id]?.(q) ?? q.id)} \u2014 ${q.prog}/${q.goal}${done ? '<small class="questInlineReset questReset" data-quest-reset="daily" data-reset-prefix="\u0421\u0431\u0440\u043E\u0441 \u0447\u0435\u0440\u0435\u0437">\u2014</small>' : ""}</div>
+        <button class="btn qClaim" data-q="${esc(q.id)}" ${done && !q.claimed ? "" : "disabled"}>
+          ${q.claimed ? "\u041F\u043E\u043B\u0443\u0447\u0435\u043D\u043E" : `\u{1FA99}${DAILY_REWARD[q.id] ?? 0}`}</button></div>`;
       }).join("");
       const wqs = (meta.wquests ?? []).map((q) => {
         const done = q.prog >= q.goal;
-        return `<div class="setRow" style="margin:0">
-        <div style="flex:1;font-size:.74rem;color:#c9b6e6">${esc(WQUEST_RU[q.id] ?? q.id)} \u2014 ${q.prog}/${q.goal}</div>
-        <button class="btn wqClaim" data-q="${q.id}" ${done && !q.claimed ? "" : "disabled"}>
-          ${q.claimed ? "\u041F\u043E\u043B\u0443\u0447\u0435\u043D\u043E" : `\u25C8${WEEK_REWARD[q.id] ?? 0} +250 BP`}</button></div>`;
+        return `<div class="setRow profileQuestRow" style="margin:0">
+        <div class="profileQuestText profileWeeklyQuestText">${esc(WQUEST_RU[q.id] ?? q.id)} \u2014 ${q.prog}/${q.goal}${done ? '<small class="questInlineReset questReset" data-quest-reset="weekly" data-reset-prefix="\u0421\u0431\u0440\u043E\u0441 \u0447\u0435\u0440\u0435\u0437">\u2014</small>' : ""}</div>
+        <button class="btn wqClaim" data-q="${esc(q.id)}" ${done && !q.claimed ? "" : "disabled"}>
+          ${q.claimed ? "\u041F\u043E\u043B\u0443\u0447\u0435\u043D\u043E" : `\u{1FA99}${WEEK_REWARD[q.id] ?? 0} +250 BP`}</button></div>`;
       }).join("");
       const achs = ACH_DEFS.map((a) => {
         const [p, g] = a.prog();
@@ -27352,14 +28839,27 @@
       const avas = FACTION_IDS.map((f) => `<button class="btn avaBtn${meta.avatarFac === f ? " sel" : ""}" data-f="${f}" title="${FACTION_RU[f]}">${FACTION_SIGIL[f]}</button>`).join("") + Object.entries(PREMIUM_AVATARS).map(([id, a]) => `<button class="btn avaBtn${meta.avatarFac === id ? " sel" : ""}" data-f="${id}" ${a.req() ? "" : "disabled"} title="${a.ru}">${a.req() ? a.glyph : "\u{1F512}"}</button>`).join("");
       const frames = FRAME_DEFS.map((fr) => `<button class="btn frameBtn${meta.frame === fr.id ? " sel" : ""}" data-fr="${fr.id}" title="${fr.ru}">${fr.req() ? "\u25C6" : "\u{1F512}"} ${fr.ru}</button>`).join("");
       bodyHtml = `
-      <div class="jl">\u0412\u0441\u0435\u0433\u043E \u043C\u0430\u0442\u0447\u0435\u0439: <b>${total}</b> \xB7 \u0432\u0438\u043D\u0440\u0435\u0439\u0442 <b>${wrAll}%</b> \xB7 \u043B\u044E\u0431\u0438\u043C\u0430\u044F \u0444\u0440\u0430\u043A\u0446\u0438\u044F: <b>${fav}</b></div>
-      <div class="jl">\u0421\u0440\u0435\u0434\u043D\u044F\u044F \u0434\u043B\u0438\u043D\u0430 \u043C\u0430\u0442\u0447\u0430: ${avgT ? `${avgT} \u0445\u043E\u0434\u043E\u0432 / ${avgS} \u0441` : "\u2014"} \xB7 \u0447\u0430\u0449\u0435 \u0437\u0430\u0441\u0442\u0440\u0435\u0432\u0430\u044E\u0442: ${topStuck}</div>
-      <div class="jl">\u0412\u0430\u043B\u044E\u0442\u044B: \u25C8 ${shardsGet()} \xB7 \u{1F48E} ${gemsGet()} \xB7 \u0431\u0443\u0441\u0442\u0435\u0440\u043E\u0432 \u0432 \u0437\u0430\u043F\u0430\u0441\u0435: ${meta.freeOpens ?? 0} \xB7 \u0440\u0435\u0439\u0442\u0438\u043D\u0433 ${meta.mmr}</div>
-      <h4 class="shopH">\u0410\u0432\u0430\u0442\u0430\u0440 (5 \u0444\u0440\u0430\u043A\u0446\u0438\u0439 + \u043F\u0440\u0435\u043C\u0438\u0443\u043C)</h4><div class="ptabs">${avas}</div>
-      <h4 class="shopH">\u0420\u0430\u043C\u043A\u0430 \u0430\u0432\u0430\u0442\u0430\u0440\u0430 (\u043E\u0442\u043A\u0440\u044B\u0432\u0430\u0435\u0442\u0441\u044F \u0437\u0430 \u0434\u043E\u0441\u0442\u0438\u0436\u0435\u043D\u0438\u044F)</h4><div class="ptabs">${frames}</div>
-      <h4 class="shopH">\u0417\u0430\u0434\u0430\u043D\u0438\u044F \u0434\u043D\u044F</h4>${qs}
-      <h4 class="shopH">\u0417\u0430\u0434\u0430\u043D\u0438\u044F \u043D\u0435\u0434\u0435\u043B\u0438</h4>${wqs}
-      <h4 class="shopH">\u0414\u043E\u0441\u0442\u0438\u0436\u0435\u043D\u0438\u044F</h4>${achs}`;
+      <div class="profileOverviewGrid">
+        <section class="profilePanel profileSummaryPanel">
+          <h3 class="profilePanelTitle">\u0421\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043A\u0430 \u0441\u0435\u0437\u043E\u043D\u0430</h3>
+          <div class="profileMetricGrid">
+            <div class="profileMetric"><small>\u041C\u0410\u0422\u0427\u0418</small><b>${total}</b><span>\u0432\u0441\u0435\u0433\u043E</span></div>
+            <div class="profileMetric"><small>\u0412\u0418\u041D\u0420\u0415\u0419\u0422</small><b>${wrAll}%</b><span>\u043F\u043E\u0431\u0435\u0434</span></div>
+            <div class="profileMetric"><small>\u041B\u042E\u0411\u0418\u041C\u0410\u042F \u0424\u0420\u0410\u041A\u0426\u0418\u042F</small><b class="profileMetricText">${fav}</b><span>\u043F\u043E \u043F\u043E\u0431\u0435\u0434\u0430\u043C</span></div>
+          </div>
+          <div class="profileDetailLine">\u0421\u0440\u0435\u0434\u043D\u044F\u044F \u0434\u043B\u0438\u043D\u0430: <b>${avgT ? `${avgT} \u0445\u043E\u0434\u043E\u0432 / ${avgS} \u0441` : "\u2014"}</b></div>
+          <div class="profileDetailLine">\u0427\u0430\u0449\u0435 \u0437\u0430\u0441\u0442\u0440\u0435\u0432\u0430\u044E\u0442: <b>${esc(topStuck)}</b></div>
+          <div class="profileCurrencyLine">\u{1FA99} <b>${shardsGet()}</b><span>\u043C\u043E\u043D\u0435\u0442</span> \xB7 \u{1F48E} <b>${gemsGet()}</b><span>\u0433\u0435\u043C\u043E\u0432</span> \xB7 \u{1F381} <b>${meta.freeOpens ?? 0}</b><span>\u0431\u0443\u0441\u0442\u0435\u0440\u043E\u0432</span></div>
+        </section>
+        <section class="profilePanel profileCustomizationPanel">
+          <h3 class="profilePanelTitle">\u041F\u0435\u0440\u0441\u043E\u043D\u0430\u043B\u0438\u0437\u0430\u0446\u0438\u044F</h3>
+          <h4 class="shopH">\u0410\u0432\u0430\u0442\u0430\u0440 \xB7 5 \u0444\u0440\u0430\u043A\u0446\u0438\u0439 + \u043F\u0440\u0435\u043C\u0438\u0443\u043C</h4><div class="ptabs profileChoiceGrid">${avas}</div>
+          <h4 class="shopH">\u0420\u0430\u043C\u043A\u0430 \xB7 \u043D\u0430\u0433\u0440\u0430\u0434\u044B \u0434\u043E\u0441\u0442\u0438\u0436\u0435\u043D\u0438\u0439</h4><div class="ptabs profileChoiceGrid">${frames}</div>
+        </section>
+      </div>
+      <section class="profilePanel profileTasksPanel"><h3 class="profilePanelTitle">\u0417\u0430\u0434\u0430\u043D\u0438\u044F \u0434\u043D\u044F</h3>${qs}</section>
+      <section class="profilePanel profileTasksPanel"><h3 class="profilePanelTitle">\u0417\u0430\u0434\u0430\u043D\u0438\u044F \u043D\u0435\u0434\u0435\u043B\u0438</h3>${wqs}</section>
+      <section class="profilePanel profileTasksPanel"><h3 class="profilePanelTitle">\u0414\u043E\u0441\u0442\u0438\u0436\u0435\u043D\u0438\u044F</h3>${achs}</section>`;
     }
     if (profTab === "ranked") {
       const days = seasonDaysLeft();
@@ -27367,17 +28867,17 @@
       const best2 = rankOf(meta.bestMmr ?? meta.mmr);
       const rewards = [
         { name: "\u041D\u0430\u0433\u0440\u0430\u0434\u0430 \u0411\u0440\u043E\u043D\u0437\u044B", sub: "1 \u0431\u0443\u0441\u0442\u0435\u0440", packs: 1, gold: 0 },
-        { name: "\u041D\u0430\u0433\u0440\u0430\u0434\u0430 \u0421\u0435\u0440\u0435\u0431\u0440\u0430", sub: "1 \u0431\u0443\u0441\u0442\u0435\u0440 \xB7 \u25C8500", packs: 1, gold: 500 },
-        { name: "\u041D\u0430\u0433\u0440\u0430\u0434\u0430 \u0417\u043E\u043B\u043E\u0442\u0430", sub: "2 \u0431\u0443\u0441\u0442\u0435\u0440\u0430 \xB7 \u25C81000", packs: 2, gold: 1e3 },
-        { name: "\u041D\u0430\u0433\u0440\u0430\u0434\u0430 \u041F\u043B\u0430\u0442\u0438\u043D\u044B", sub: "3 \u0431\u0443\u0441\u0442\u0435\u0440\u0430 \xB7 \u25C81000", packs: 3, gold: 1e3 },
-        { name: "\u041D\u0430\u0433\u0440\u0430\u0434\u0430 \u0410\u043B\u043C\u0430\u0437\u0430", sub: "4 \u0431\u0443\u0441\u0442\u0435\u0440\u0430 \xB7 \u25C81000", packs: 4, gold: 1e3 },
-        { name: "\u041D\u0430\u0433\u0440\u0430\u0434\u0430 \u041C\u0438\u0444\u0438\u043A\u0430", sub: "5 \u0431\u0443\u0441\u0442\u0435\u0440\u043E\u0432 \xB7 \u25C81000", packs: 5, gold: 1e3 }
+        { name: "\u041D\u0430\u0433\u0440\u0430\u0434\u0430 \u0421\u0435\u0440\u0435\u0431\u0440\u0430", sub: "1 \u0431\u0443\u0441\u0442\u0435\u0440 \xB7 \u{1FA99}500", packs: 1, gold: 500 },
+        { name: "\u041D\u0430\u0433\u0440\u0430\u0434\u0430 \u0417\u043E\u043B\u043E\u0442\u0430", sub: "2 \u0431\u0443\u0441\u0442\u0435\u0440\u0430 \xB7 \u{1FA99}1000", packs: 2, gold: 1e3 },
+        { name: "\u041D\u0430\u0433\u0440\u0430\u0434\u0430 \u041F\u043B\u0430\u0442\u0438\u043D\u044B", sub: "3 \u0431\u0443\u0441\u0442\u0435\u0440\u0430 \xB7 \u{1FA99}1000", packs: 3, gold: 1e3 },
+        { name: "\u041D\u0430\u0433\u0440\u0430\u0434\u0430 \u0410\u043B\u043C\u0430\u0437\u0430", sub: "4 \u0431\u0443\u0441\u0442\u0435\u0440\u0430 \xB7 \u{1FA99}1000", packs: 4, gold: 1e3 },
+        { name: "\u041D\u0430\u0433\u0440\u0430\u0434\u0430 \u041C\u0438\u0444\u0438\u043A\u0430", sub: "5 \u0431\u0443\u0441\u0442\u0435\u0440\u043E\u0432 \xB7 \u{1FA99}1000", packs: 5, gold: 1e3 }
       ];
       const rows = rewards.map((rw) => `
       <div class="rewardRow">
         <div class="rewardName">${rw.name}<span>${rw.sub.replace("\n", " \xB7 ")}</span></div>
         <div class="rewardPacks">${Array.from({ length: rw.packs }, (_, i) => `<div class="rewardPack">\u25C8</div>`).join("")}</div>
-        <div class="rewardGold">${rw.gold ? `<i>\u25C8</i> ${rw.gold}` : ""}</div>
+        <div class="rewardGold">${rw.gold ? `<i>\u{1FA99}</i> ${rw.gold}` : ""}</div>
       </div>
     `).join("");
       bodyHtml = `
@@ -27429,7 +28929,17 @@
         <div class="sleeveName">${s.name}</div>
       </div>
     `).join("");
-      bodyHtml = `
+      const borderlessProgress = Math.min(BORDERLESS_EVENT_WINS, meta.borderlessEventWins ?? 0);
+      const borderlessPanel = `<section class="borderlessProfilePanel">
+      <div class="borderlessProfileHead"><div><span class="profileEyebrow">\u0422\u0415 \u0416\u0415 \u041A\u0410\u0420\u0422\u042B \xB7 \u0422\u041E\u041B\u042C\u041A\u041E \u0411\u0415\u0417 \u0420\u0410\u041C\u041E\u041A</span>
+        <h3>Borderless <b>${ownedBorderless}<i> / ${ALL_CARDS.length}</i></b></h3></div>
+        <span class="borderlessGem" aria-hidden="true">\u25C7</span></div>
+      <div class="profileMeter borderlessMeter"><i style="width:${ownedBorderless / ALL_CARDS.length * 100}%"></i></div>
+      <p>\u0415\u0449\u0451 ${ALL_CARDS.length} \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u043E\u043D\u043D\u044B\u0445 \u0432\u0430\u0440\u0438\u0430\u043D\u0442\u043E\u0432: \u0442\u0435 \u0436\u0435 \u043D\u0430\u0437\u0432\u0430\u043D\u0438\u044F \u0438 \u0430\u0440\u0442, \u043D\u043E \u0431\u0435\u0437 \u0441\u0442\u0430\u043D\u0434\u0430\u0440\u0442\u043D\u043E\u0439 \u0440\u0430\u043C\u043A\u0438. \u041F\u0440\u0430\u0432\u0438\u043B\u0430 \u0438 \u0445\u0430\u0440\u0430\u043A\u0442\u0435\u0440\u0438\u0441\u0442\u0438\u043A\u0438 \u043D\u0435 \u043C\u0435\u043D\u044F\u044E\u0442\u0441\u044F. \u041F\u043E\u043B\u0443\u0447\u0435\u043D\u0438\u0435: \u0441\u043E\u0431\u044B\u0442\u0438\u0435 \u0438\u043B\u0438 \u0448\u0430\u043D\u0441 <b>0,1% \u043D\u0430 \u0431\u0443\u0441\u0442\u0435\u0440</b>.</p>
+      <div class="borderlessEventMini">\u0421\u043E\u0431\u044B\u0442\u0438\u0435 \xAB\u0413\u0430\u043B\u0435\u0440\u0435\u044F \u0431\u0435\u0437 \u0433\u0440\u0430\u043D\u0438\u0446\xBB \xB7 \u0440\u0435\u0439\u0442\u0438\u043D\u0433\u043E\u0432\u044B\u0435 \u043F\u043E\u0431\u0435\u0434\u044B: <b>${borderlessProgress}/${BORDERLESS_EVENT_WINS}</b></div>
+      <button type="button" class="btn borderlessBrowse" id="btnProfileBorderlessCollection">\u041E\u0442\u043A\u0440\u044B\u0442\u044C Borderless \u0432 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u0438 \u2192</button>
+    </section>`;
+      bodyHtml = borderlessPanel + `
       <div style="display:flex;gap:1rem;align-items:flex-start;flex-wrap:wrap">
         <div class="sleeveGrid">${grid}</div>
         <div class="sleevePreview">
@@ -27497,11 +29007,22 @@
       <div class="jl" style="opacity:.7">\u041F\u0440\u0438\u0433\u043B\u0430\u0448\u0435\u043D\u0438\u0435 \u0437\u0430\u043F\u0443\u0441\u043A\u0430\u0435\u0442 \u0442\u043E\u0432\u0430\u0440\u0438\u0449\u0435\u0441\u043A\u0438\u0439 \u043C\u0430\u0442\u0447 \u0431\u0435\u0437 \u0432\u043B\u0438\u044F\u043D\u0438\u044F \u043D\u0430 \u0440\u0435\u0439\u0442\u0438\u043D\u0433 (\u043B\u043E\u0431\u0431\u0438-\u0441\u0435\u0440\u0432\u0435\u0440 \u2014 roadmap match-server).</div>`;
     }
     $("profBody").innerHTML = head + bodyHtml;
+    updateQuestCountdowns();
     syncProfile();
     $("profileModal").classList.remove("hidden");
   }
   document.addEventListener("click", (ev) => {
-    const sc = ev.target?.closest?.(".sleeveCard");
+    const target = ev.target;
+    if (target?.closest?.("#btnProfileBorderlessCollection")) {
+      openCollectionScreen();
+      const style = document.getElementById("colStyle");
+      if (style) {
+        style.value = "borderless";
+        style.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+      return;
+    }
+    const sc = target?.closest?.(".sleeveCard");
     if (sc?.dataset.sleeve && !sc.querySelector(".lock")) {
       Audio_.uiClick();
       meta.backEq = sc.dataset.sleeve;
@@ -27557,17 +29078,8 @@
   }
   document.addEventListener("click", (ev) => {
     const t = ev.target?.closest?.(".qClaim");
-    if (!t || t.hasAttribute("disabled")) return;
-    const q = meta.quests.find((x) => x.id === t.dataset.q);
-    if (!q || q.claimed || q.prog < q.goal) return;
-    q.claimed = true;
-    shardsAdd(DAILY_REWARD[q.id] ?? 0);
-    meta.bpXp = (meta.bpXp ?? 0) + 150;
-    metaSave();
-    renderShards();
-    openProfile();
-    apiSend("/api/quests/claim", { id: q.id, kind: "daily", prog: q.prog, goal: q.goal });
-    showToast(`\u0417\u0430\u0434\u0430\u043D\u0438\u0435 \u0432\u044B\u043F\u043E\u043B\u043D\u0435\u043D\u043E: \u25C8${DAILY_REWARD[q.id] ?? 0} \u0438 +150 \u043E\u043F\u044B\u0442\u0430 \u043F\u0440\u043E\u043F\u0443\u0441\u043A\u0430`);
+    if (!t || t.hasAttribute("disabled") || !t.dataset.q) return;
+    claimQuestReward("daily", t.dataset.q);
   });
   var SHOP_BACKS = {
     classic: { ru: "\u041A\u043B\u0430\u0441\u0441\u0438\u043A\u0430 (\u0437\u043E\u043B\u043E\u0442\u043E)", price: 0 },
@@ -27642,9 +29154,13 @@
     <div class="ofName">${name}</div><div class="ofSub">${sub}</div><div class="ofBuy">${btnHtml}</div></div>`;
   }
   function openShop() {
+    setAppRoute("store");
+    $("menu").classList.add("hidden");
+    for (const id of ["homeScreen", "eventsScreen", "decksScreen", "collection", "profileModal", "bpModal", "boosterModal", "campaignModal"])
+      document.getElementById(id)?.classList.add("hidden");
     void applyCosmArt();
     const wallet = `
-    <span class="shardPill" title="\u041F\u044B\u043B\u044C \u25C8 (\u0437\u043E\u043B\u043E\u0442\u043E): \u0431\u0443\u0441\u0442\u0435\u0440\u044B, \u043A\u0440\u0430\u0444\u0442 (5/20/100/400) \u0438 \u0440\u0430\u0437\u0431\u043E\u0440 (1/5/20/100)"><img class="curIco" src="img/ico_cur_0.png" alt="\u25C8" onerror="this.outerHTML='\u25C8 '"> <b>${shardsGet()}</b></span>
+    <span class="shardPill" title="\u041C\u043E\u043D\u0435\u0442\u044B: \u0431\u0443\u0441\u0442\u0435\u0440\u044B, \u0441\u043E\u0437\u0434\u0430\u043D\u0438\u0435 \u0438 \u0440\u0430\u0437\u0431\u043E\u0440 \u043A\u0430\u0440\u0442; \u0434\u0443\u0431\u043B\u0438\u043A\u0430\u0442\u044B \u0441\u0432\u0435\u0440\u0445 4 \u043A\u043E\u043F\u0438\u0439 \u0434\u0430\u044E\u0442 \u043C\u043E\u043D\u0435\u0442\u044B"><img class="curIco" src="img/ico_cur_0.png" alt="\u{1FA99}" onerror="this.outerHTML='\u{1FA99} '"> <b>${shardsGet()}</b></span>
     <span class="shardPill" title="\u0413\u0435\u043C\u044B: \u043F\u0440\u0435\u043C\u0438\u0443\u043C-\u0432\u0430\u043B\u044E\u0442\u0430 (\u0434\u043E\u0441\u0442\u0438\u0436\u0435\u043D\u0438\u044F, \u043F\u0440\u043E\u043F\u0443\u0441\u043A, \u043A\u0430\u043C\u043F\u0430\u043D\u0438\u044F)"><img class="curIco" src="img/ico_cur_1.png" alt="\u{1F48E}" onerror="this.outerHTML='\u{1F48E} '"> <b>${gemsGet()}</b></span>
     ${(meta.freeOpens ?? 0) > 0 ? `<span class="shardPill" title="\u0411\u0435\u0441\u043F\u043B\u0430\u0442\u043D\u044B\u0435 \u0431\u0443\u0441\u0442\u0435\u0440\u044B \u0438\u0437 \u043D\u0430\u0431\u043E\u0440\u043E\u0432 \u0438 \u043F\u0440\u043E\u043F\u0443\u0441\u043A\u0430">\u{1F381} <b>${meta.freeOpens}</b></span>` : ""}`;
     const TABS = [["boosters", "\u041F\u0440\u0435\u0434\u043B\u043E\u0436\u0435\u043D\u0438\u044F"], ["bundles", "\u041D\u0430\u0431\u043E\u0440\u044B"], ["cosm", "\u041A\u043E\u0441\u043C\u0435\u0442\u0438\u043A\u0430"], ["craft", "\u041A\u0440\u0430\u0444\u0442"]];
@@ -27659,13 +29175,14 @@
         { id: "p1b", ru: "1 \u0411\u0443\u0441\u0442\u0435\u0440", gem: 200, gold: 300, qty: 1, kind: "pack" }
       ];
       const packVisHtml = (kind, qty) => {
-        const artMyth = cosmImg("offers", "mythic", "packOfferArtImg");
+        const artMyth = cosmImg("offers", "booster_premium", "packOfferArtImg");
         const artBooster = cosmImg("offers", "booster", "packOfferArtImg");
+        const packTile = (packArt, theme, layer2, label) => `<div class="packVis ${theme === "mythic" ? "mythic " : ""}${layer2}">${packArt}<span class="pvSig">\u2726</span><span class="pvLbl">${label}</span></div>`;
         if (kind === "mythic") {
-          if (qty >= 10) return `<div class="packVisWrap"><div class="packVis mythic v1"><span class="pvSig">\u25C8</span></div><div class="packVis mythic v2">${artMyth}<span class="pvSig">\u2726</span><span class="pvLbl">Mythic</span></div><div class="packVis mythic v3"><span class="pvSig">\u25C8</span></div></div>`;
+          if (qty >= 10) return `<div class="packVisWrap">${packTile(cosmImg("offers", "booster_premium", "packOfferArtImg"), "mythic", "v1", "Mythic")}${packTile(artMyth, "mythic", "v2", "Mythic")}${packTile(cosmImg("offers", "booster_premium", "packOfferArtImg"), "mythic", "v3", "Mythic")}</div>`;
           return `<div class="packVisWrap"><div class="packVis mythic v2" style="position:relative;left:auto;transform:none">${artMyth}<span class="pvSig" style="font-size:28px">\u2726</span><span class="pvLbl">Mythic</span></div></div>`;
         }
-        if (qty >= 15) return `<div class="packVisWrap"><div class="packVis v1"><span class="pvSig">\u25C8</span></div><div class="packVis v2">${artBooster}<span class="pvSig">\u2726</span><span class="pvLbl">ECH I</span></div><div class="packVis v3"><span class="pvSig">\u25C8</span></div></div>`;
+        if (qty >= 15) return `<div class="packVisWrap">${packTile(cosmImg("offers", "booster", "packOfferArtImg"), "standard", "v1", "ECH I")}${packTile(artBooster, "standard", "v2", "ECH I")}${packTile(cosmImg("offers", "booster", "packOfferArtImg"), "standard", "v3", "ECH I")}</div>`;
         return `<div class="packVisWrap"><div class="packVis v2" style="position:relative;left:auto;transform:none">${artBooster}<span class="pvSig" style="font-size:26px">\u2726</span><span class="pvLbl">ECH I</span></div></div>`;
       };
       const freeInfo = (meta.freeOpens ?? 0) > 0 ? `<span style="color:#ffd87a;font-weight:700"> \xB7 \u0431\u0435\u0441\u043F\u043B\u0430\u0442\u043D\u044B\u0445: ${meta.freeOpens}</span>` : "";
@@ -27676,18 +29193,18 @@
         <div class="packOfferTitle">${o.ru}${o.qty > 1 ? ` \xB7 ${o.qty}\xD7` : ""}${freeInfo && o.id === "p1" ? freeInfo : ""}</div>
         <div class="packOfferPrices">
           <button class="priceBtn gem buyPackOffer" data-offer="${o.id}" data-cur="gem"><span class="ico">\u{1F48E}</span> ${o.gem.toLocaleString("ru-RU")}</button>
-          <button class="priceBtn gold buyPackOffer" data-offer="${o.id}" data-cur="gold"><span class="ico">\u25C8</span> ${o.gold.toLocaleString("ru-RU")}</button>
+          <button class="priceBtn gold buyPackOffer" data-offer="${o.id}" data-cur="gold"><span class="ico">\u{1FA99}</span> ${o.gold.toLocaleString("ru-RU")}</button>
         </div>
       </div>`).join("") + `</div>`;
-      h += `<details style="margin:.4rem 0 0"><summary style="cursor:pointer;font-size:.68rem;color:#a99a7a;letter-spacing:.04em">\u0424\u0440\u0430\u043A\u0446\u0438\u043E\u043D\u043D\u044B\u0435 \u043D\u0430\u0431\u043E\u0440\u044B \xB7 \u25C8350</summary><div class="ofRow" style="padding-top:.5rem">` + FACTION_IDS.map((f) => ofCard(
+      h += `<details style="margin:.4rem 0 0"><summary style="cursor:pointer;font-size:.68rem;color:#a99a7a;letter-spacing:.04em">\u0424\u0440\u0430\u043A\u0446\u0438\u043E\u043D\u043D\u044B\u0435 \u043D\u0430\u0431\u043E\u0440\u044B \xB7 \u{1FA99}350</summary><div class="ofRow" style="padding-top:.5rem">` + FACTION_IDS.map((f) => ofCard(
         `a-fac f-${f}`,
         cosmImg("offers", "pack_" + f, "ofArtImg") + `<span class="ofSig">${FACTION_SIGIL[f]}</span>`,
         `\u041D\u0430\u0431\u043E\u0440 ${FACTION_RU[f]}`,
         "5 \u043A\u0430\u0440\u0442 \u043E\u0434\u043D\u043E\u0439 \u0444\u0440\u0430\u043A\u0446\u0438\u0438",
-        `<button class="btn price gold buyFacPack" data-f="${f}">\u25C8350</button>`
+        `<button class="btn price gold buyFacPack" data-f="${f}">\u{1FA99}350</button>`
       )).join("") + `</div></details>`;
       h += `<div class="shopNavBottom"><span class="navItem">Featured</span><span class="navItem">Gems</span><span class="navItem sel">Packs</span><span class="navItem">Daily Deals</span><span class="navItem" data-goto="bundles">Bundles</span><span class="navItem">Avatars</span><span class="navItem">Sleeves</span><span class="navItem">Pets</span></div>`;
-      h += `<div class="packStoreFoot">\u0414\u0443\u0431\u043B\u0438\u043A\u0430\u0442\u044B \u0441\u0432\u0435\u0440\u0445 4 \u043A\u043E\u043F\u0438\u0439 \u2192 \u25C8 (1/5/20/100). \u041E\u043F\u043B\u0430\u0442\u0430 \u{1F48E} \u2014 \u0433\u0435\u043C\u044B, \u25C8 \u2014 \u043F\u044B\u043B\u044C. \u041F\u0430\u043A\u0438 \u043A\u043E\u043F\u044F\u0442\u0441\u044F \u0438 \u043E\u0442\u043A\u0440\u044B\u0432\u0430\u044E\u0442\u0441\u044F \u0432 \u043C\u0435\u043D\u044E \xAB\u25C8 \u0411\u0443\u0441\u0442\u0435\u0440\u044B\xBB.</div>`;
+      h += `<div class="packStoreFoot">\u0414\u0443\u0431\u043B\u0438\u043A\u0430\u0442\u044B \u0441\u0432\u0435\u0440\u0445 4 \u043A\u043E\u043F\u0438\u0439 \u043F\u0440\u0435\u0432\u0440\u0430\u0449\u0430\u044E\u0442\u0441\u044F \u0432 \u043C\u043E\u043D\u0435\u0442\u044B (1/2/5/20/100). \u041E\u043F\u043B\u0430\u0442\u0430 \u{1F48E} \u2014 \u0433\u0435\u043C\u044B, \u{1FA99} \u2014 \u043C\u043E\u043D\u0435\u0442\u044B. \u0411\u0443\u0441\u0442\u0435\u0440\u044B \u043A\u043E\u043F\u044F\u0442\u0441\u044F \u0438 \u043E\u0442\u043A\u0440\u044B\u0432\u0430\u044E\u0442\u0441\u044F \u0432 \u0440\u0430\u0437\u0434\u0435\u043B\u0435 \xAB\u0411\u0443\u0441\u0442\u0435\u0440\u044B\xBB.</div>`;
     }
     if (shopTab === "bundles") {
       h += `<div class="ofRow">` + ofCard(
@@ -27695,14 +29212,14 @@
         cosmImg("bundles", "starter", "ofArtImg") + '<span class="ofBig">\u{1F0CF}</span>',
         "\u041D\u0430\u0431\u043E\u0440 \u043D\u043E\u0432\u0438\u0447\u043A\u0430",
         "10 \u043A\u0430\u0440\u0442 \u0431\u0430\u0437\u044B (\u043A\u0440\u0438\u0432\u0430\u044F 1\u20133, \u043F\u043E 2 \u043D\u0430 \u0444\u0440\u0430\u043A\u0446\u0438\u044E) \xB7 \u043E\u0434\u043D\u0430 \u043F\u043E\u043A\u0443\u043F\u043A\u0430 \u043D\u0430 \u0430\u043A\u043A\u0430\u0443\u043D\u0442",
-        `<button class="btn price gold" id="btnStarter" ${meta.starter ? "disabled" : ""}>${meta.starter ? "\u041A\u0443\u043F\u043B\u0435\u043D" : "\u25C8800"}</button>`
+        `<button class="btn price gold" id="btnStarter" ${meta.starter ? "disabled" : ""}>${meta.starter ? "\u041A\u0443\u043F\u043B\u0435\u043D" : "\u{1FA99}800"}</button>`
       ) + BUNDLES.map((b) => {
         const bought = (meta.bundles ?? []).includes(b.fac);
         return ofCard(
           `a-fac f-${b.fac}`,
           cosmImg("bundles", b.fac, "ofArtImg") + `<span class="ofSig">${FACTION_SIGIL[b.fac]}</span>`,
           `\u041D\u0430\u0431\u043E\u0440 \xAB${FACTION_RU[b.fac]}\xBB`,
-          "10 \u0431\u0443\u0441\u0442\u0435\u0440\u043E\u0432 + \u25C8500 + \u044D\u043A\u0441\u043A\u043B\u044E\u0437\u0438\u0432\u043D\u044B\u0439 \u0430\u0432\u0430\u0442\u0430\u0440 \xAB\u0410\u0440\u0445\u043E\u043D\u0442\xBB \u2727 \xB7 \u0440\u0430\u0437\u043E\u0432\u0430\u044F \u043F\u043E\u043A\u0443\u043F\u043A\u0430",
+          "10 \u0431\u0443\u0441\u0442\u0435\u0440\u043E\u0432 + \u{1FA99}500 + \u044D\u043A\u0441\u043A\u043B\u044E\u0437\u0438\u0432\u043D\u044B\u0439 \u0430\u0432\u0430\u0442\u0430\u0440 \xAB\u0410\u0440\u0445\u043E\u043D\u0442\xBB \u2727 \xB7 \u0440\u0430\u0437\u043E\u0432\u0430\u044F \u043F\u043E\u043A\u0443\u043F\u043A\u0430",
           `<button class="btn price gem buyBundle" data-f="${b.fac}" ${bought ? "disabled" : ""}>${bought ? "\u041A\u0443\u043F\u043B\u0435\u043D" : `\u{1F48E}${b.price}`}</button>`
         );
       }).join("") + `</div><div class="jl" style="opacity:.75">\u0412 \u0440\u0435\u043B\u0438\u0437\u0435 \u0441\u0442\u0430\u0440\u0442\u043E\u0432\u044B\u0435 \u043D\u0430\u0431\u043E\u0440\u044B \u043F\u043E\u043A\u0443\u043F\u0430\u044E\u0442\u0441\u044F \u0437\u0430 \u0440\u0435\u0430\u043B\u044C\u043D\u044B\u0435 \u0434\u0435\u043D\u044C\u0433\u0438; \u0432 \u043F\u0440\u043E\u0442\u043E\u0442\u0438\u043F\u0435 \u2014 \u0437\u0430 \u0433\u0435\u043C\u044B \u{1F48E}.</div>`;
@@ -27718,9 +29235,9 @@
         return tile(
           `<i class="cardback mini back-${id}">${cosmImg("backs", id, "cbArt")}</i>`,
           `\u0420\u0443\u0431\u0430\u0448\u043A\u0430 \xAB${b.ru}\xBB`,
-          locked ? "\u043D\u0430\u0433\u0440\u0430\u0434\u0430 \u0431\u043E\u0435\u0432\u043E\u0433\u043E \u043F\u0440\u043E\u043F\u0443\u0441\u043A\u0430" : ownedB ? eq ? "\u043D\u0430\u0434\u0435\u0442\u0430" : "\u0432 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u0438" : `\u25C8${b.price}`,
+          locked ? "\u043D\u0430\u0433\u0440\u0430\u0434\u0430 \u0431\u043E\u0435\u0432\u043E\u0433\u043E \u043F\u0440\u043E\u043F\u0443\u0441\u043A\u0430" : ownedB ? eq ? "\u043D\u0430\u0434\u0435\u0442\u0430" : "\u0432 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u0438" : `\u{1FA99}${b.price}`,
           prevBtn("back", id, "\u041F\u0440\u0435\u0434\u043F\u0440\u043E\u0441\u043C\u043E\u0442\u0440: \u043A\u0430\u043A \u0440\u0443\u0431\u0430\u0448\u043A\u0430 \u0432\u044B\u0433\u043B\u044F\u0434\u0438\u0442 \u043D\u0430 \u043A\u0430\u0440\u0442\u0435"),
-          `<button class="btn price gold smBtn backBtn" data-b="${id}" ${ownedB ? eq ? "disabled" : "" : locked ? "disabled" : `data-price="${b.price}"`}>${ownedB ? eq ? "\u041D\u0430\u0434\u0435\u0442\u0430" : "\u041D\u0430\u0434\u0435\u0442\u044C" : locked ? "\u{1F512}" : `\u25C8${b.price}`}</button>`
+          `<button class="btn price gold smBtn backBtn" data-b="${id}" ${ownedB ? eq ? "disabled" : "" : locked ? "disabled" : `data-price="${b.price}"`}>${ownedB ? eq ? "\u041D\u0430\u0434\u0435\u0442\u0430" : "\u041D\u0430\u0434\u0435\u0442\u044C" : locked ? "\u{1F512}" : `\u{1FA99}${b.price}`}</button>`
         );
       }).join("");
       const tables = Object.entries(TABLE_SKINS).map(([id, k]) => {
@@ -27729,9 +29246,9 @@
         return tile(
           `<i class="ofSw t-${id}">${cosmImg("tables", id, "ofSwImg")}</i>`,
           `\u0421\u0442\u043E\u043B \xAB${k.ru}\xBB`,
-          ownedT ? eq ? "\u043D\u0430\u0434\u0435\u0442" : "\u0432 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u0438" : k.cur === "gem" ? `\u{1F48E}${k.price}` : `\u25C8${k.price}`,
+          ownedT ? eq ? "\u043D\u0430\u0434\u0435\u0442" : "\u0432 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u0438" : k.cur === "gem" ? `\u{1F48E}${k.price}` : `\u{1FA99}${k.price}`,
           prevBtn("table", id, "\u041F\u0440\u0435\u0434\u043F\u0440\u043E\u0441\u043C\u043E\u0442\u0440: \u0444\u0440\u0430\u0433\u043C\u0435\u043D\u0442 \u0438\u0433\u0440\u043E\u0432\u043E\u0433\u043E \u0441\u0442\u043E\u043B\u0430"),
-          `<button class="btn price ${k.cur === "gem" ? "gem" : "gold"} smBtn tableBtn" data-id="${id}" ${ownedT && eq ? "disabled" : ""}>${ownedT ? eq ? "\u041D\u0430\u0434\u0435\u0442" : "\u041D\u0430\u0434\u0435\u0442\u044C" : k.cur === "gem" ? `\u{1F48E}${k.price}` : `\u25C8${k.price}`}</button>`
+          `<button class="btn price ${k.cur === "gem" ? "gem" : "gold"} smBtn tableBtn" data-id="${id}" ${ownedT && eq ? "disabled" : ""}>${ownedT ? eq ? "\u041D\u0430\u0434\u0435\u0442" : "\u041D\u0430\u0434\u0435\u0442\u044C" : k.cur === "gem" ? `\u{1F48E}${k.price}` : `\u{1FA99}${k.price}`}</button>`
         );
       }).join("");
       const runes = Object.entries(RUNE_SKINS).map(([id, k]) => {
@@ -27740,9 +29257,9 @@
         return tile(
           `<i class="ofSw r-${id}">${cosmImg("runes", id, "rcImg")}\u2726</i>`,
           `\u0420\u0443\u043D\u044B \xAB${k.ru}\xBB`,
-          ownedR ? eq ? "\u043D\u0430\u0434\u0435\u0442\u044B" : "\u0432 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u0438" : k.cur === "gem" ? `\u{1F48E}${k.price}` : `\u25C8${k.price}`,
+          ownedR ? eq ? "\u043D\u0430\u0434\u0435\u0442\u044B" : "\u0432 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u0438" : k.cur === "gem" ? `\u{1F48E}${k.price}` : `\u{1FA99}${k.price}`,
           prevBtn("rune", id, "\u041F\u0440\u0435\u0434\u043F\u0440\u043E\u0441\u043C\u043E\u0442\u0440: \u0430\u043D\u0438\u043C\u0430\u0446\u0438\u044F \u0440\u0443\u043D"),
-          `<button class="btn price ${k.cur === "gem" ? "gem" : "gold"} smBtn runeBtn" data-id="${id}" ${ownedR && eq ? "disabled" : ""}>${ownedR ? eq ? "\u041D\u0430\u0434\u0435\u0442\u0430" : "\u041D\u0430\u0434\u0435\u0442\u044C" : k.cur === "gem" ? `\u{1F48E}${k.price}` : `\u25C8${k.price}`}</button>`
+          `<button class="btn price ${k.cur === "gem" ? "gem" : "gold"} smBtn runeBtn" data-id="${id}" ${ownedR && eq ? "disabled" : ""}>${ownedR ? eq ? "\u041D\u0430\u0434\u0435\u0442\u0430" : "\u041D\u0430\u0434\u0435\u0442\u044C" : k.cur === "gem" ? `\u{1F48E}${k.price}` : `\u{1FA99}${k.price}`}</button>`
         );
       }).join("");
       h += `<div class="ofGrid"><div class="ofGroup">\u0420\u0443\u0431\u0430\u0448\u043A\u0438 \u043A\u0430\u0440\u0442</div>${backs}
@@ -27752,16 +29269,25 @@
       \u043F\u0440\u0435\u043C\u0438\u0443\u043C-\u0430\u0432\u0430\u0442\u0430\u0440\u044B \u0437\u0430 \u0434\u043E\u0441\u0442\u0438\u0436\u0435\u043D\u0438\u044F \u0438 \u0441\u0442\u0430\u0440\u0442\u043E\u0432\u044B\u0435 \u043D\u0430\u0431\u043E\u0440\u044B, \u0440\u0430\u043C\u043A\u0438 \u2014 \u0437\u0430 \u0434\u043E\u0441\u0442\u0438\u0436\u0435\u043D\u0438\u044F \u0438 \u043F\u0440\u043E\u043F\u0443\u0441\u043A.</div>`;
     }
     if (shopTab === "craft") {
-      const craftable = [...db.values()].filter((c) => isExpansionId(c.id) && ownedCount(c.id) < PLAYSET).sort((a, b) => (CRAFT_COST[a.rarity] ?? 0) - (CRAFT_COST[b.rarity] ?? 0)).slice(0, 14);
-      h += `<div class="jl">\u041F\u044B\u043B\u044C \u25C8 = \u0437\u043E\u043B\u043E\u0442\u043E: \u0440\u0430\u0437\u0431\u043E\u0440 \u0434\u0443\u0431\u043B\u0438\u043A\u0430\u0442\u043E\u0432 \u0434\u0430\u0451\u0442 \u25C8 (1/5/20/100 \u043F\u043E \u0440\u0435\u0434\u043A\u043E\u0441\u0442\u0438),
-      \u043A\u0440\u0430\u0444\u0442 \u0441\u0442\u043E\u0438\u0442 \u25C8 (5/20/100/400). \u0422\u043E\u0447\u0435\u0447\u043D\u044B\u0439 \u043A\u0440\u0430\u0444\u0442 \u043B\u044E\u0431\u043E\u0439 \u043A\u0430\u0440\u0442\u044B \u2014 \u0432 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u0438 (\u043A\u043B\u0438\u043A \u043F\u043E \u043A\u0430\u0440\u0442\u0435).</div>
-      <div class="ofGroup">\u0411\u044B\u0441\u0442\u0440\u044B\u0439 \u043A\u0440\u0430\u0444\u0442: \u043D\u0435\u0434\u043E\u0441\u0442\u0430\u044E\u0449\u0438\u0435 \u043A\u0430\u0440\u0442\u044B ECH1</div>` + (craftable.map((c) => `<div class="cfRow"><div class="cfName">${esc(c.name)} \xB7 ${RARITY_RU[c.rarity]} \xB7 ${c.cost} \u043C\u0430\u043D\u044B
+      const craftable = [...db.values()].filter((c) => !STARTER_CARD_IDS.has(c.id) && ownedCount(c.id) < PLAYSET).sort((a, b) => (CRAFT_COST[a.rarity] ?? 0) - (CRAFT_COST[b.rarity] ?? 0)).slice(0, 14);
+      h += `<div class="jl">\u041C\u043E\u043D\u0435\u0442\u044B: \u0440\u0430\u0437\u0431\u043E\u0440 \u0434\u0443\u0431\u043B\u0438\u043A\u0430\u0442\u043E\u0432 \u0432\u044B\u0434\u0430\u0451\u0442 1/2/5/20/100 \u043C\u043E\u043D\u0435\u0442 \u043F\u043E \u0440\u0435\u0434\u043A\u043E\u0441\u0442\u0438;
+      \u0441\u043E\u0437\u0434\u0430\u043D\u0438\u0435 \u043A\u0430\u0440\u0442\u044B \u0441\u0442\u043E\u0438\u0442 5/10/20/100/400 \u043C\u043E\u043D\u0435\u0442. \u0422\u043E\u0447\u0435\u0447\u043D\u043E\u0435 \u0441\u043E\u0437\u0434\u0430\u043D\u0438\u0435 \u043B\u044E\u0431\u043E\u0439 \u043A\u0430\u0440\u0442\u044B \u2014 \u0432 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u0438 (\u043A\u043B\u0438\u043A \u043F\u043E \u043A\u0430\u0440\u0442\u0435).</div>
+      <div class="ofGroup">\u0411\u044B\u0441\u0442\u0440\u043E\u0435 \u0441\u043E\u0437\u0434\u0430\u043D\u0438\u0435: \u043A\u0430\u0440\u0442\u044B \u0432\u043D\u0435 \u0441\u0442\u0430\u0440\u0442\u043E\u0432\u044B\u0445 \u043A\u043E\u043B\u043E\u0434</div>` + (craftable.map((c) => `<div class="cfRow"><div class="cfName">${esc(c.name)} \xB7 ${RARITY_RU[c.rarity]} \xB7 ${c.cost} \u043C\u0430\u043D\u044B
         <span class="setHint">${ownedCount(c.id)}/4 \u043A\u043E\u043F\u0438\u0438</span></div>
-        <button class="btn price gold craftBtn2" data-id="${c.id}">\u25C8${CRAFT_COST[c.rarity] ?? 100}</button></div>`).join("") || '<div class="jl">\u0412\u0441\u0435 \u043A\u0430\u0440\u0442\u044B \u0440\u0430\u0441\u0448\u0438\u0440\u0435\u043D\u0438\u044F \u0441\u043E\u0431\u0440\u0430\u043D\u044B \u{1F3C6}</div>');
+        <button class="btn price gold craftBtn2" data-id="${c.id}">\u{1FA99}${CRAFT_COST[c.rarity] ?? 100}</button></div>`).join("") || '<div class="jl">\u0412\u0441\u0435 \u043A\u0430\u0440\u0442\u044B \u0432\u043D\u0435 \u0441\u0442\u0430\u0440\u0442\u043E\u0432\u044B\u0445 \u043A\u043E\u043B\u043E\u0434 \u0441\u043E\u0431\u0440\u0430\u043D\u044B \u{1F3C6}</div>');
     }
     h += `<div class="shTabs">${TABS.map(([id, ru]) => `<button class="btn shTab stab${shopTab === id ? " sel" : ""}" data-stab="${id}">${ru}</button>`).join("")}</div>`;
     $("shopBody").innerHTML = h;
     $("shopModal").classList.remove("hidden");
+    document.querySelectorAll("#shopBody .packOfferArtImg").forEach((img) => {
+      const markArt = () => {
+        const pack = img.closest(".packVis");
+        pack?.classList.add("hasArt");
+        pack?.closest(".packOfferArt")?.classList.add("hasPackArt");
+      };
+      img.addEventListener("load", markArt, { once: true });
+      if (img.complete && img.naturalWidth > 0) markArt();
+    });
     try {
       attachVolumetric(document.getElementById("shopBody"));
     } catch {
@@ -27787,32 +29313,29 @@
       return;
     }
     if (t?.id === "buyPack") {
-      if (shardsGet() < PACK_PRICE && (meta.freeOpens ?? 0) <= 0) {
-        showToast("\u041D\u0435\u0434\u043E\u0441\u0442\u0430\u0442\u043E\u0447\u043D\u043E \u25C8");
+      if (shardsGet() < PACK_PRICE) {
+        showToast("\u041D\u0435\u0434\u043E\u0441\u0442\u0430\u0442\u043E\u0447\u043D\u043E \u043C\u043E\u043D\u0435\u0442");
         return;
       }
-      $("shopModal").classList.add("hidden");
-      hideSealedInstant();
-      $("boosterModal").classList.remove("hidden");
-      const _pr = $("packRow");
-      if (_pr) _pr.innerHTML = "";
-      const _st = document.getElementById("packStage");
-      if (_st) _st.classList.remove("hasSealed");
-      newPack();
+      shardsAdd(-PACK_PRICE);
+      meta.freeOpens = (meta.freeOpens ?? 0) + 1;
+      metaSave();
+      openBoosterPanel();
+      showToast("\u0411\u0443\u0441\u0442\u0435\u0440 \u0434\u043E\u0431\u0430\u0432\u043B\u0435\u043D \u0432 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u044E \u043F\u0430\u043A\u043E\u0432 \u2014 \u0432\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u0435\u0433\u043E, \u0447\u0442\u043E\u0431\u044B \u0432\u0441\u043A\u0440\u044B\u0442\u044C");
       return;
     }
     const fp = t?.closest?.(".buyFacPack");
     if (fp?.dataset.f) {
+      if (pendingPack) {
+        showToast("\u0421\u043D\u0430\u0447\u0430\u043B\u0430 \u0432\u0441\u043A\u0440\u043E\u0439\u0442\u0435 \u0432\u044B\u0431\u0440\u0430\u043D\u043D\u044B\u0439 \u0431\u0443\u0441\u0442\u0435\u0440");
+        return;
+      }
       if (shardsGet() < 350) {
-        showToast("\u041D\u0443\u0436\u043D\u043E \u25C8350");
+        showToast("\u041D\u0443\u0436\u043D\u043E 350 \u043C\u043E\u043D\u0435\u0442");
         return;
       }
       shardsAdd(-350);
-      hideSealedInstant();
-      $("shopModal").classList.add("hidden");
-      $("boosterModal").classList.remove("hidden");
-      const _st2 = document.getElementById("packStage");
-      if (_st2) _st2.classList.remove("hasSealed");
+      openBoosterPanel();
       const slots = drawFactionPack(fp.dataset.f);
       renderShards();
       showSealedPack(slots, "pack_" + fp.dataset.f);
@@ -27839,7 +29362,7 @@
         gemsAdd(-o.gem);
       } else {
         if (shardsGet() < o.gold) {
-          showToast(`\u041D\u0443\u0436\u043D\u043E \u25C8${o.gold}`);
+          showToast(`\u041D\u0443\u0436\u043D\u043E ${o.gold} \u043C\u043E\u043D\u0435\u0442`);
           return;
         }
         shardsAdd(-o.gold);
@@ -27847,15 +29370,13 @@
       if (o.kind === "mythic") {
         meta.premOpens = (meta.premOpens ?? 0) + o.qty;
         metaSave();
-        renderShards();
-        openShop();
-        showToast(`\u2726 ${o.qty} \u043C\u0438\u0444\u0438\u0447\u0435\u0441\u043A\u0438\u0445 \u043F\u0430\u043A\u043E\u0432 \u2014 \u043E\u0442\u043A\u0440\u044B\u0432\u0430\u0439 \u0432 \xAB\u25C8 \u0411\u0443\u0441\u0442\u0435\u0440\u044B\xBB (\u043F\u0440\u0435\u043C\u0438\u0443\u043C)`);
+        openBoosterPanel();
+        showToast(`\u2726 ${o.qty} \u043F\u0440\u0435\u043C\u0438\u0443\u043C-\u0431\u0443\u0441\u0442\u0435\u0440\u043E\u0432 \u0434\u043E\u0431\u0430\u0432\u043B\u0435\u043D\u043E \u0432 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u044E \u043F\u0430\u043A\u043E\u0432`);
       } else {
         meta.freeOpens = (meta.freeOpens ?? 0) + o.qty;
         metaSave();
-        renderShards();
-        openShop();
-        showToast(`\u{1F381} ${o.qty} \u0431\u0443\u0441\u0442\u0435\u0440\u043E\u0432 \u2014 \u043E\u0442\u043A\u0440\u044B\u0432\u0430\u0439 \u0432 \xAB\u25C8 \u0411\u0443\u0441\u0442\u0435\u0440\u044B\xBB \xB7 \u043F\u0430\u043A\u043E\u0432 \u0432 \u0437\u0430\u043F\u0430\u0441\u0435 ${meta.freeOpens}`);
+        openBoosterPanel();
+        showToast(`\u{1F381} ${o.qty} \u0431\u0443\u0441\u0442\u0435\u0440\u043E\u0432 \u0434\u043E\u0431\u0430\u0432\u043B\u0435\u043D\u043E \u0432 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u044E \u043F\u0430\u043A\u043E\u0432`);
       }
       return;
     }
@@ -27867,15 +29388,14 @@
     }
     if (t?.id === "buyBundle11") {
       if (shardsGet() < 2700) {
-        showToast("\u041D\u0443\u0436\u043D\u043E \u25C82700");
+        showToast("\u041D\u0443\u0436\u043D\u043E 2700 \u043C\u043E\u043D\u0435\u0442");
         return;
       }
       shardsAdd(-2700);
       meta.freeOpens = (meta.freeOpens ?? 0) + 11;
       metaSave();
-      renderShards();
-      openShop();
-      showToast("\u{1F381} \u041D\u0430\u0431\u043E\u0440 \xAB10+1\xBB: 11 \u0431\u0443\u0441\u0442\u0435\u0440\u043E\u0432 \u0436\u0434\u0443\u0442 \u0432 \u043C\u0435\u043D\u044E \xAB\u25C8 \u0411\u0443\u0441\u0442\u0435\u0440\u044B\xBB");
+      openBoosterPanel();
+      showToast("\u{1F381} \u041D\u0430\u0431\u043E\u0440 \xAB10+1\xBB: 11 \u0431\u0443\u0441\u0442\u0435\u0440\u043E\u0432 \u0434\u043E\u0431\u0430\u0432\u043B\u0435\u043D\u044B \u0432 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u044E \u043F\u0430\u043A\u043E\u0432");
       return;
     }
     const bb = t?.closest?.(".backBtn");
@@ -27884,7 +29404,7 @@
       if (!meta.backsOwned.includes(id)) {
         const price = Number(bb.dataset.price ?? 0);
         if (shardsGet() < price) {
-          showToast("\u041D\u0435\u0434\u043E\u0441\u0442\u0430\u0442\u043E\u0447\u043D\u043E \u25C8");
+          showToast("\u041D\u0435\u0434\u043E\u0441\u0442\u0430\u0442\u043E\u0447\u043D\u043E \u043C\u043E\u043D\u0435\u0442");
           return;
         }
         shardsAdd(-price);
@@ -27913,7 +29433,7 @@
           gemsAdd(-k.price);
         } else {
           if (shardsGet() < k.price) {
-            showToast(`\u041D\u0443\u0436\u043D\u043E \u25C8${k.price}`);
+            showToast(`\u041D\u0443\u0436\u043D\u043E ${k.price} \u043C\u043E\u043D\u0435\u0442`);
             return;
           }
           shardsAdd(-k.price);
@@ -27923,6 +29443,8 @@
       meta.tableSkin = id;
       metaSave();
       applySettings();
+      if (!$("battle").classList.contains("hidden")) applyBattleBg(battle.playerFaction);
+      void applyCosmArt();
       openShop();
       return;
     }
@@ -27941,7 +29463,7 @@
           gemsAdd(-k.price);
         } else {
           if (shardsGet() < k.price) {
-            showToast(`\u041D\u0443\u0436\u043D\u043E \u25C8${k.price}`);
+            showToast(`\u041D\u0443\u0436\u043D\u043E ${k.price} \u043C\u043E\u043D\u0435\u0442`);
             return;
           }
           shardsAdd(-k.price);
@@ -27994,9 +29516,8 @@
       if (!meta.avatarsOwned.includes("arch")) meta.avatarsOwned.push("arch");
       shardsAdd(500);
       metaSave();
-      renderShards();
-      openShop();
-      showToast(`\u{1F381} \u041D\u0430\u0431\u043E\u0440 \xAB${FACTION_RU[fac]}\xBB: 10 \u0431\u0443\u0441\u0442\u0435\u0440\u043E\u0432, \u25C8500 \u0438 \u0430\u0432\u0430\u0442\u0430\u0440 \xAB\u0410\u0440\u0445\u043E\u043D\u0442\xBB \u2727`);
+      openBoosterPanel();
+      showToast(`\u{1F381} \u041D\u0430\u0431\u043E\u0440 \xAB${FACTION_RU[fac]}\xBB: 10 \u0431\u0443\u0441\u0442\u0435\u0440\u043E\u0432 \u0434\u043E\u0431\u0430\u0432\u043B\u0435\u043D\u044B \u0432 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u044E \u043F\u0430\u043A\u043E\u0432`);
     }
   });
   document.body.dataset.back = meta.backEq || "classic";
@@ -28071,18 +29592,8 @@
       return;
     }
     const wq = t0?.closest?.(".wqClaim");
-    if (wq && !wq.hasAttribute("disabled")) {
-      const q = (meta.wquests ?? []).find((x) => x.id === wq.dataset.q);
-      if (q && !q.claimed && q.prog >= q.goal) {
-        q.claimed = true;
-        shardsAdd(WEEK_REWARD[q.id] ?? 0);
-        meta.bpXp = (meta.bpXp ?? 0) + 250;
-        metaSave();
-        renderShards();
-        openProfile();
-        apiSend("/api/quests/claim", { id: q.id, kind: "weekly", prog: q.prog, goal: q.goal });
-        showToast(`\u041D\u0435\u0434\u0435\u043B\u044C\u043D\u043E\u0435 \u0437\u0430\u0434\u0430\u043D\u0438\u0435: \u25C8${WEEK_REWARD[q.id] ?? 0} \u0438 +250 \u043E\u043F\u044B\u0442\u0430 \u043F\u0440\u043E\u043F\u0443\u0441\u043A\u0430`);
-      }
+    if (wq) {
+      if (!wq.hasAttribute("disabled") && wq.dataset.q) claimQuestReward("weekly", wq.dataset.q);
       return;
     }
     if (t0?.id === "btnReplayPlay") {
@@ -28103,7 +29614,7 @@
   var BP_LEVELS = 50;
   var BP_STEP = 400;
   function bpReward(lvl) {
-    const free = { ru: `\u25C8${50 + lvl * 3}`, shards: 50 + lvl * 3 };
+    const free = { ru: `\u{1FA99}${50 + lvl * 3}`, shards: 50 + lvl * 3 };
     if (lvl % 10 === 0) {
       free.ru = "\u0411\u0443\u0441\u0442\u0435\u0440 ECH1";
       free.pack = 1;
@@ -28114,7 +29625,7 @@
       free.pack = 2;
       free.shards = 0;
     }
-    const prem = { ru: `\u25C8${90 + lvl * 5} \u043F\u044B\u043B\u0438`, shards: 90 + lvl * 5 };
+    const prem = { ru: `\u{1FA99}${90 + lvl * 5} \u043C\u043E\u043D\u0435\u0442`, shards: 90 + lvl * 5 };
     if (lvl === 5) {
       prem.ru = "\u{1F31F} \u0424\u043E\u0439\u043B-\u0436\u0435\u0442\u043E\u043D";
       prem.foil = 1;
@@ -28204,9 +29715,21 @@
     }
     return s;
   }
-  var BP_PER_PAGE = 8;
+  function bpPerPageForViewport() {
+    return window.innerWidth <= 600 ? 2 : window.innerWidth <= 920 ? 4 : 8;
+  }
+  var BP_PER_PAGE = bpPerPageForViewport();
   var BP_PAGES = Math.ceil(BP_LEVELS / BP_PER_PAGE);
   var bpPage = 0;
+  window.addEventListener("resize", () => {
+    const currentLevel = bpLevel();
+    const next = bpPerPageForViewport();
+    if (next === BP_PER_PAGE) return;
+    BP_PER_PAGE = next;
+    BP_PAGES = Math.ceil(BP_LEVELS / BP_PER_PAGE);
+    bpPage = Math.min(BP_PAGES - 1, Math.floor((currentLevel - 1) / BP_PER_PAGE));
+    if (!document.getElementById("bpModal")?.classList.contains("hidden")) openBP();
+  });
   function bpGlyph(rw) {
     if (rw.back) return "\u{1F0A0}";
     if (rw.ava) return "\u263E";
@@ -28216,10 +29739,24 @@
     if (rw.gems) return "\u{1F48E}";
     return "\u25C8";
   }
+  function bpAssetId(rw) {
+    if (rw.premPack) return "premium_booster";
+    if (rw.pack) return "booster";
+    if (rw.back) return "cardback";
+    if (rw.gems) return "gems";
+    if (rw.foil) return "foil_token";
+    if (rw.ava) return "avatar";
+    return "coins";
+  }
   function bpTileInner(rw) {
-    return `<span class="bpIco">${bpGlyph(rw)}</span><span class="bpLbl">${rw.ru}</span>`;
+    const art = bpAssetId(rw);
+    return `<span class="bpRewardVisual" aria-hidden="true"><img class="bpRewardArt" src="/cosm/bp/${art}" alt="" loading="lazy" onload="this.closest('.bpRewardVisual')?.classList.add('hasArt')" onerror="this.remove()"><span class="bpIco">${bpGlyph(rw)}</span></span><span class="bpLbl">${rw.ru}</span>`;
   }
   function openBP() {
+    setAppRoute("mastery");
+    $("menu").classList.add("hidden");
+    for (const id of ["homeScreen", "eventsScreen", "decksScreen", "collection", "shopModal", "profileModal", "boosterModal", "campaignModal"])
+      document.getElementById(id)?.classList.add("hidden");
     const days = seasonDaysLeft();
     const lvlNow = bpLevel();
     if (bpPage < 0 || bpPage >= BP_PAGES) bpPage = Math.min(BP_PAGES - 1, Math.floor((lvlNow - 1) / BP_PER_PAGE));
@@ -28231,8 +29768,8 @@
       const page = Math.floor((lv - 1) / BP_PER_PAGE);
       return `<div class="bpCol${lv === lvlNow ? " curCol" : ""}" data-page="${page}">
       <div class="bpColHead">${lv === lvlNow ? '<span class="bpArrow" title="\u0422\u0435\u043A\u0443\u0449\u0438\u0439 \u0443\u0440\u043E\u0432\u0435\u043D\u044C">\u25BC</span>' : ""}<div class="bpLvl${reached ? " on" : ""}${lv === lvlNow ? " cur" : ""}" title="${lv === lvlNow ? "\u0422\u0435\u043A\u0443\u0449\u0438\u0439 \u0443\u0440\u043E\u0432\u0435\u043D\u044C" : reached ? "\u0414\u043E\u0441\u0442\u0438\u0433\u043D\u0443\u0442" : "\u0417\u0430\u0431\u043B\u043E\u043A\u0438\u0440\u043E\u0432\u0430\u043D"}">${lv}</div></div>
-      <button class="bpTile free bpClaim${cF ? " got" : ""}" data-l="${lv}" data-t="free" ${reached && !cF ? "" : "disabled"}>${cF ? "\u2714" : bpTileInner(r.free)}</button>
-      <button class="bpTile prem bpClaim${cP ? " got" : ""}" data-l="${lv}" data-t="prem" ${meta.bpPremium && reached && !cP ? "" : "disabled"}>${cP ? "\u2714" : (meta.bpPremium ? "" : '<span class="bpLock">\u{1F512}</span>') + bpTileInner(r.prem)}</button>
+      <button class="bpTile free bpClaim${cF ? " got" : ""}" data-l="${lv}" data-t="free" aria-label="${esc(r.free.ru)} \xB7 \u0443\u0440\u043E\u0432\u0435\u043D\u044C ${lv} \xB7 \u0431\u0435\u0441\u043F\u043B\u0430\u0442\u043D\u0430\u044F \u043D\u0430\u0433\u0440\u0430\u0434\u0430" ${reached && !cF ? "" : "disabled"}>${cF ? "\u2714" : bpTileInner(r.free)}</button>
+      <button class="bpTile prem bpClaim${cP ? " got" : ""}" data-l="${lv}" data-t="prem" aria-label="${esc(r.prem.ru)} \xB7 \u0443\u0440\u043E\u0432\u0435\u043D\u044C ${lv} \xB7 \u043F\u0440\u0435\u043C\u0438\u0443\u043C-\u043D\u0430\u0433\u0440\u0430\u0434\u0430" ${meta.bpPremium && reached && !cP ? "" : "disabled"}>${cP ? "\u2714" : (meta.bpPremium ? "" : '<span class="bpLock">\u{1F512}</span>') + bpTileInner(r.prem)}</button>
     </div>`;
     });
     const pages = Array.from({ length: BP_PAGES }, (_, p) => `<div class="bpPage${p === bpPage ? " on" : ""}">${cols.filter((_2, i) => Math.floor(i / BP_PER_PAGE) === p).join("")}</div>`).join("");
@@ -28333,7 +29870,7 @@
         return;
       }
       const parts = [];
-      if (tot.shards) parts.push(`\u25C8${tot.shards}`);
+      if (tot.shards) parts.push(`\u{1FA99}${tot.shards}`);
       if (tot.gems) parts.push(`\u{1F48E}${tot.gems}`);
       if (tot.packs) parts.push(`\u0431\u0443\u0441\u0442\u0435\u0440\u044B \xD7${tot.packs}`);
       if (tot.premPacks) parts.push(`\u{1F31F} \u043F\u0440\u0435\u043C\u0438\u0443\u043C-\u0431\u0443\u0441\u0442\u0435\u0440\u044B \xD7${tot.premPacks}`);
@@ -28497,9 +30034,9 @@
     }
   });
   var LESSONS = [
-    { ru: "\u0423\u0440\u043E\u043A 1 \xB7 \u041E\u0441\u043D\u043E\u0432\u044B", hint: "\u041F\u043E \u0448\u0430\u0433\u0430\u043C: \u0440\u0443\u043D\u0430 \u2192 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E (\xAB\u0412\u0435\u0442\u0435\u0440\u0430\u043D \u041E\u0441\u0430\u0434\u044B\xBB) \u2192 \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0435 (\xAB\u041B\u0443\u0447 \u0420\u0430\u0441\u0441\u0432\u0435\u0442\u0430\xBB). \u0418\u0433\u0440\u0430 \u043F\u043E\u0434\u0441\u0432\u0435\u0447\u0438\u0432\u0430\u0435\u0442 \u043D\u0443\u0436\u043D\u0443\u044E \u043A\u0430\u0440\u0442\u0443 \u0438 \u0431\u043B\u043E\u043A\u0438\u0440\u0443\u0435\u0442 \u043E\u0441\u0442\u0430\u043B\u044C\u043D\u044B\u0435 \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u044F.", need: "\u0420\u0430\u0437\u044B\u0433\u0440\u0430\u0439\u0442\u0435 \u0440\u0443\u043D\u0443, \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u0438 \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0435", reward: "\u25C8100" },
-    { ru: "\u0423\u0440\u043E\u043A 2 \xB7 \u0411\u043E\u0439", hint: "\u0410\u0442\u0430\u043A\u0443\u0439\u0442\u0435 \u0446\u0435\u043B\u044C \u0441\u0432\u043E\u0438\u043C \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E\u043C, \u0437\u0430\u0442\u0435\u043C \u0432\u0441\u0442\u0430\u043D\u044C\u0442\u0435 \u041F\u0440\u043E\u0432\u043E\u043A\u0430\u0446\u0438\u0435\u0439 \u26E8: \u0430\u0442\u0430\u043A\u0438 \u0432\u0440\u0430\u0433\u0430 \u043E\u0431\u044F\u0437\u0430\u043D\u044B \u0431\u0438\u0442\u044C \u043F\u0440\u043E\u0432\u043E\u043A\u0430\u0442\u043E\u0440\u0430 \u2014 \u0442\u0430\u043A \u0440\u0430\u0431\u043E\u0442\u0430\u0435\u0442 \u0431\u043B\u043E\u043A.", need: "\u041D\u0430\u043D\u0435\u0441\u0438\u0442\u0435 \u0443\u0440\u043E\u043D \u0432 \u0431\u043E\u044E", reward: "\u25C8100" },
-    { ru: "\u0423\u0440\u043E\u043A 3 \xB7 \u041A\u043B\u044E\u0447\u0435\u0432\u044B\u0435 \u043C\u0435\u0445\u0430\u043D\u0438\u043A\u0438", hint: "\u0412\u0430\u043C\u043F\u0438\u0440\u0438\u0437\u043C \u{1FA78} (\u0443\u0440\u043E\u043D \u043B\u0435\u0447\u0438\u0442 \u0433\u0435\u0440\u043E\u044F), \u041D\u0435\u0443\u043B\u043E\u0432\u0438\u043C\u043E\u0441\u0442\u044C \u{1F441} (\u043D\u0435\u043B\u044C\u0437\u044F \u0432\u044B\u0431\u0440\u0430\u0442\u044C \u0446\u0435\u043B\u044C\u044E \u2014 \u043D\u0430\u0448\u0430 \xAB\u043D\u0435\u0443\u044F\u0437\u0432\u0438\u043C\u043E\u0441\u0442\u044C\xBB) \u0438 \u0411\u043E\u0435\u0432\u043E\u0439 \u043A\u043B\u0438\u0447 \u2726. \u041A\u0430\u0440\u0442\u044B \u0443\u0436\u0435 \u0432 \u0440\u0443\u043A\u0435 \u2014 \u0440\u0430\u0437\u044B\u0433\u0440\u0430\u0439\u0442\u0435 \u0432\u0441\u0435 \u0442\u0440\u0438.", need: "\u0420\u0430\u0437\u044B\u0433\u0440\u0430\u0439\u0442\u0435 \u0432\u0441\u0435 \u0442\u0440\u0438 \u043C\u0435\u0445\u0430\u043D\u0438\u043A\u0438", reward: "\u25C8150" },
+    { ru: "\u0423\u0440\u043E\u043A 1 \xB7 \u041E\u0441\u043D\u043E\u0432\u044B", hint: "\u041F\u043E \u0448\u0430\u0433\u0430\u043C: \u0440\u0443\u043D\u0430 \u2192 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E (\xAB\u0412\u0435\u0442\u0435\u0440\u0430\u043D \u041E\u0441\u0430\u0434\u044B\xBB) \u2192 \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0435 (\xAB\u041B\u0443\u0447 \u0420\u0430\u0441\u0441\u0432\u0435\u0442\u0430\xBB). \u0418\u0433\u0440\u0430 \u043F\u043E\u0434\u0441\u0432\u0435\u0447\u0438\u0432\u0430\u0435\u0442 \u043D\u0443\u0436\u043D\u0443\u044E \u043A\u0430\u0440\u0442\u0443 \u0438 \u0431\u043B\u043E\u043A\u0438\u0440\u0443\u0435\u0442 \u043E\u0441\u0442\u0430\u043B\u044C\u043D\u044B\u0435 \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u044F.", need: "\u0420\u0430\u0437\u044B\u0433\u0440\u0430\u0439\u0442\u0435 \u0440\u0443\u043D\u0443, \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u0438 \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0435", reward: "\u{1FA99}100" },
+    { ru: "\u0423\u0440\u043E\u043A 2 \xB7 \u0411\u043E\u0439", hint: "\u0410\u0442\u0430\u043A\u0443\u0439\u0442\u0435 \u0446\u0435\u043B\u044C \u0441\u0432\u043E\u0438\u043C \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E\u043C, \u0437\u0430\u0442\u0435\u043C \u0432\u0441\u0442\u0430\u043D\u044C\u0442\u0435 \u041F\u0440\u043E\u0432\u043E\u043A\u0430\u0446\u0438\u0435\u0439 \u26E8: \u0430\u0442\u0430\u043A\u0438 \u0432\u0440\u0430\u0433\u0430 \u043E\u0431\u044F\u0437\u0430\u043D\u044B \u0431\u0438\u0442\u044C \u043F\u0440\u043E\u0432\u043E\u043A\u0430\u0442\u043E\u0440\u0430 \u2014 \u0442\u0430\u043A \u0440\u0430\u0431\u043E\u0442\u0430\u0435\u0442 \u0431\u043B\u043E\u043A.", need: "\u041D\u0430\u043D\u0435\u0441\u0438\u0442\u0435 \u0443\u0440\u043E\u043D \u0432 \u0431\u043E\u044E", reward: "\u{1FA99}100" },
+    { ru: "\u0423\u0440\u043E\u043A 3 \xB7 \u041A\u043B\u044E\u0447\u0435\u0432\u044B\u0435 \u043C\u0435\u0445\u0430\u043D\u0438\u043A\u0438", hint: "\u0412\u0430\u043C\u043F\u0438\u0440\u0438\u0437\u043C \u{1FA78} (\u0443\u0440\u043E\u043D \u043B\u0435\u0447\u0438\u0442 \u0433\u0435\u0440\u043E\u044F), \u041D\u0435\u0443\u043B\u043E\u0432\u0438\u043C\u043E\u0441\u0442\u044C \u{1F441} (\u043D\u0435\u043B\u044C\u0437\u044F \u0432\u044B\u0431\u0440\u0430\u0442\u044C \u0446\u0435\u043B\u044C\u044E \u2014 \u043D\u0430\u0448\u0430 \xAB\u043D\u0435\u0443\u044F\u0437\u0432\u0438\u043C\u043E\u0441\u0442\u044C\xBB) \u0438 \u0411\u043E\u0435\u0432\u043E\u0439 \u043A\u043B\u0438\u0447 \u2726. \u041A\u0430\u0440\u0442\u044B \u0443\u0436\u0435 \u0432 \u0440\u0443\u043A\u0435 \u2014 \u0440\u0430\u0437\u044B\u0433\u0440\u0430\u0439\u0442\u0435 \u0432\u0441\u0435 \u0442\u0440\u0438.", need: "\u0420\u0430\u0437\u044B\u0433\u0440\u0430\u0439\u0442\u0435 \u0432\u0441\u0435 \u0442\u0440\u0438 \u043C\u0435\u0445\u0430\u043D\u0438\u043A\u0438", reward: "\u{1FA99}150" },
     { ru: "\u0423\u0440\u043E\u043A 4 \xB7 \u0420\u0435\u0441\u0443\u0440\u0441\u044B", hint: "\u041A\u0440\u0438\u0432\u0430\u044F \u043C\u0430\u043D\u044B: \u043F\u043E\u0447\u0435\u043C\u0443 \u043D\u0435\u043B\u044C\u0437\u044F \u0441\u044B\u0433\u0440\u0430\u0442\u044C \u043A\u0430\u0440\u0442\u0443 \u0437\u0430 5\u2726 \u043D\u0430 2-\u0439 \u0445\u043E\u0434. \u041C\u0430\u043D\u0430 +1 \u0437\u0430 \u0445\u043E\u0434; \u0441\u044B\u0433\u0440\u0430\u0439\u0442\u0435 3+ \u043A\u0430\u0440\u0442\u044B \u043A 3-\u043C\u0443 \u0445\u043E\u0434\u0443 \u2014 \u043D\u0435 \u043A\u043E\u043F\u0438\u0442\u0435 \u0434\u043E\u0440\u043E\u0433\u043E\u0435.", need: "3+ \u043A\u0430\u0440\u0442\u044B \u043A 3-\u043C\u0443 \u0445\u043E\u0434\u0443", reward: "\u{1F48E}100 + 5 \u0431\u0443\u0441\u0442\u0435\u0440\u043E\u0432" }
   ];
   var tutHandSel = (id) => `#hand [data-card-id="${id}"]`;
@@ -28873,66 +30410,169 @@
       applySettings();
     });
   });
-  btn("btnMenu").addEventListener("click", () => {
-    battle.tutCleanup();
-    battle.stop();
-    $("battle").classList.add("hidden");
-    $("menu").classList.remove("hidden");
-  });
+  btn("btnMenu").addEventListener("click", () => openHomeScreen());
   btn("btnAgain").addEventListener("click", () => {
     $("gameover").classList.add("hidden");
     battle.start().catch((err) => reportFatal("restart", err));
   });
-  btn("btnGoMenu").addEventListener("click", () => {
-    $("gameover").classList.add("hidden");
-    $("battle").classList.add("hidden");
-    $("menu").classList.remove("hidden");
-  });
+  btn("btnGoMenu").addEventListener("click", () => openHomeScreen());
+  var COLLECTION_PAGE_SIZE = 40;
   var colList = [];
+  var colStyles = [];
+  var colEntries = [];
+  var colRendered = 0;
+  var colBaseCount = 0;
+  var colActiveStyle = "";
+  var colObserver = null;
+  var colRenderGeneration = 0;
+  function openCollectionScreen() {
+    setAppRoute("collection");
+    $("menu").classList.add("hidden");
+    for (const id of ["homeScreen", "eventsScreen", "decksScreen", "shopModal", "bpModal", "profileModal", "boosterModal", "campaignModal", "journalModal", "replayModal"])
+      document.getElementById(id)?.classList.add("hidden");
+    $("collection").classList.remove("hidden");
+    document.getElementById("tabCollection")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  }
+  function collectionCountText(baseCount, styleFilter) {
+    if (styleFilter === "") return `${baseCount} \u043A\u0430\u0440\u0442 \xD7 2 \u043E\u0444\u043E\u0440\u043C\u043B\u0435\u043D\u0438\u044F`;
+    return styleFilter === "borderless" ? `${baseCount} Borderless-\u0432\u0430\u0440\u0438\u0430\u043D\u0442\u043E\u0432` : `${baseCount} \u043A\u043B\u0430\u0441\u0441\u0438\u0447\u0435\u0441\u043A\u0438\u0445 \u043A\u0430\u0440\u0442`;
+  }
+  function updateCollectionCount(baseCount, styleFilter) {
+    const node = document.getElementById("colCount");
+    if (!node) return;
+    const found = colEntries.length;
+    if (!found) {
+      node.textContent = "\u041D\u0438\u0447\u0435\u0433\u043E \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D\u043E";
+      return;
+    }
+    const count = Math.min(colRendered, found);
+    const tail = count < found ? ` \xB7 \u0435\u0449\u0451 ${found - count} \u0437\u0430\u0433\u0440\u0443\u0437\u044F\u0442\u0441\u044F \u043F\u0440\u0438 \u043F\u0440\u043E\u043A\u0440\u0443\u0442\u043A\u0435` : " \xB7 \u0432\u0441\u0451 \u0437\u0430\u0433\u0440\u0443\u0436\u0435\u043D\u043E";
+    node.textContent = `\u041F\u043E\u043A\u0430\u0437\u0430\u043D\u043E ${count} \u0438\u0437 ${found} \xB7 ${collectionCountText(baseCount, styleFilter)}${tail}`;
+    const load = document.querySelector("#colSentinel .collectionLoadMore");
+    if (load && !load.disabled) load.textContent = `\u0417\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u044C \u0435\u0449\u0451 \xB7 ${Math.min(COLLECTION_PAGE_SIZE, found - count)} \u0438\u0437 ${found - count}`;
+  }
+  function renderCollectionEntry(entry) {
+    const { card: c, style } = entry;
+    const node = renderCard(c, style);
+    node.style.transform = "none";
+    node.addEventListener("mouseenter", (ev) => {
+      showTooltip(c, ev.clientX, ev.clientY);
+      showZoom(c, ev.clientX, ev.clientY, "auto", style);
+    });
+    node.addEventListener("mouseleave", () => {
+      hideTooltip();
+      hideZoom();
+    });
+    node.addEventListener("click", () => openCardModal(c, colList, style, colStyles));
+    if (style === "borderless") {
+      if (!hasBorderless(c.id)) {
+        node.classList.add("locked", "borderlessLocked");
+        node.title = "Borderless \u2014 \u0442\u0430 \u0436\u0435 \u043A\u0430\u0440\u0442\u0430 \u0431\u0435\u0437 \u0440\u0430\u043C\u043A\u0438. \u041D\u0430\u0433\u0440\u0430\u0434\u0430 \u0441\u043E\u0431\u044B\u0442\u0438\u044F \u0438\u043B\u0438 \u0448\u0430\u043D\u0441 0,1% \u0438\u0437 \u0431\u0443\u0441\u0442\u0435\u0440\u0430.";
+      } else {
+        node.classList.add("borderlessOwned");
+        if (isBorderlessEquipped(c.id)) node.classList.add("borderlessEquipped");
+      }
+    } else {
+      const cnt = ownedCount(c.id);
+      if (cnt > 1) node.appendChild(el("div", "ownCnt", `\xD7${cnt}`));
+      if (cnt === 0) {
+        node.classList.add("locked");
+        node.appendChild(el("div", "lockBadge", "\u041D\u0435 \u043E\u0442\u043A\u0440\u044B\u0442\u0430"));
+        node.title = STARTER_CARD_IDS.has(c.id) ? "\u041A\u0430\u0440\u0442\u0430 \u0435\u0441\u0442\u044C \u0432 \u0433\u043E\u0442\u043E\u0432\u043E\u0439 \u0441\u0442\u0430\u0440\u0442\u043E\u0432\u043E\u0439 \u043A\u043E\u043B\u043E\u0434\u0435; \u043E\u0442\u0434\u0435\u043B\u044C\u043D\u0430\u044F \u043A\u043E\u043F\u0438\u044F \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u0438 \u043D\u0435 \u043E\u0442\u043A\u0440\u044B\u0442\u0430." : "\u041A\u0430\u0440\u0442\u0430 \u0432\u043D\u0435 \u0441\u0442\u0430\u0440\u0442\u043E\u0432\u044B\u0445 \u043A\u043E\u043B\u043E\u0434: \u043E\u0442\u043A\u0440\u044B\u0432\u0430\u0435\u0442\u0441\u044F \u0438\u0437 \u0431\u0443\u0441\u0442\u0435\u0440\u043E\u0432, \u0431\u043E\u0435\u0432\u043E\u0433\u043E \u043F\u0440\u043E\u043F\u0443\u0441\u043A\u0430 \u0438 \u0441\u043E\u0431\u044B\u0442\u0438\u0439.";
+      }
+      if (isBorderlessEquipped(c.id)) node.title = "Borderless-\u0432\u0430\u0440\u0438\u0430\u043D\u0442 \u044D\u0442\u043E\u0439 \u043A\u0430\u0440\u0442\u044B \u043D\u0430\u0434\u0435\u0442; \u043E\u0442\u043A\u0440\u043E\u0439\u0442\u0435 \u043A\u0430\u0440\u0442\u043E\u0447\u043A\u0443, \u0447\u0442\u043E\u0431\u044B \u0438\u0437\u043C\u0435\u043D\u0438\u0442\u044C \u043E\u0444\u043E\u0440\u043C\u043B\u0435\u043D\u0438\u0435.";
+    }
+    return node;
+  }
+  function appendCollectionPage() {
+    const grid = document.getElementById("colGrid");
+    const sentinel = document.getElementById("colSentinel");
+    if (!grid || !sentinel || colRendered >= colEntries.length) return 0;
+    const start = colRendered;
+    const end = Math.min(colEntries.length, start + COLLECTION_PAGE_SIZE);
+    const added = end - start;
+    const fragment = document.createDocumentFragment();
+    for (; colRendered < end; colRendered++) fragment.appendChild(renderCollectionEntry(colEntries[colRendered]));
+    grid.insertBefore(fragment, sentinel);
+    updateCollectionCount(colBaseCount, colActiveStyle);
+    if (colRendered >= colEntries.length) {
+      colObserver?.disconnect();
+      colObserver = null;
+      sentinel.classList.add("allLoaded");
+      const button = sentinel.querySelector(".collectionLoadMore");
+      if (button) {
+        button.disabled = true;
+        button.textContent = "\u2713 \u0412\u0441\u0435 \u043A\u0430\u0440\u0442\u044B \u0437\u0430\u0433\u0440\u0443\u0436\u0435\u043D\u044B";
+      }
+      const note = sentinel.querySelector(".collectionLoadNote");
+      if (note) note.textContent = "\u0424\u0438\u043B\u044C\u0442\u0440\u044B \u043C\u043E\u0436\u043D\u043E \u0438\u0437\u043C\u0435\u043D\u0438\u0442\u044C \u0432 \u043B\u044E\u0431\u043E\u0435 \u0432\u0440\u0435\u043C\u044F.";
+    }
+    return added;
+  }
+  function loadAllCollectionPagesForTest() {
+    while (colRendered < colEntries.length) {
+      const before = colRendered;
+      appendCollectionPage();
+      if (colRendered === before) break;
+    }
+    return colRendered;
+  }
+  window.ecTestLoadCollectionAll = loadAllCollectionPagesForTest;
+  window.ecTestCollectionState = () => ({ rendered: colRendered, total: colEntries.length, pageSize: COLLECTION_PAGE_SIZE });
   function renderCollection() {
+    colObserver?.disconnect();
+    colObserver = null;
+    colRenderGeneration++;
+    const generation = colRenderGeneration;
     const fac = sel("colFaction").value;
     const typ = sel("colType").value;
     const rar = sel("colRarity").value;
     const q = $("colSearch").value.trim().toLowerCase();
     const grid = $("colGrid");
     grid.innerHTML = "";
+    grid.scrollTop = 0;
+    colRendered = 0;
     const onlyOwned = $("colOwned")?.checked ?? false;
     const costF = sel("colCost").value;
     const kwF = sel("colKw").value;
-    const list = ALL_CARDS.filter((c) => (!fac || c.faction === fac) && (!typ || c.type === typ) && (!rar || c.rarity === rar) && (!costF || (costF === "low" ? c.cost <= 3 : costF === "mid" ? c.cost >= 4 && c.cost <= 5 : c.cost >= 6)) && (!kwF || (c.keywords ?? []).includes(kwF)) && (!onlyOwned || ownedCount(c.id) > 0) && (!q || c.name.toLowerCase().includes(q) || (c.abilityText ?? "").toLowerCase().includes(q) || cardName(c).toLowerCase().includes(q) || cardText(c).toLowerCase().includes(q)));
+    const styleFilter = sel("colStyle").value;
+    colActiveStyle = styleFilter;
+    const baseList = ALL_CARDS.filter((c) => (!fac || c.faction === fac) && (!typ || c.type === typ) && (!rar || c.rarity === rar) && (!costF || (costF === "low" ? c.cost <= 3 : costF === "mid" ? c.cost >= 4 && c.cost <= 5 : c.cost >= 6)) && (!kwF || (c.keywords ?? []).includes(kwF)) && (!q || c.name.toLowerCase().includes(q) || (c.abilityText ?? "").toLowerCase().includes(q) || cardName(c).toLowerCase().includes(q) || cardText(c).toLowerCase().includes(q)));
     const order = { Creature: 0, Spell: 1, Rune: 2 };
-    list.sort((a, b) => (order[a.type] ?? 9) - (order[b.type] ?? 9) || a.cost - b.cost || a.name.localeCompare(b.name, "ru"));
-    colList = list;
-    for (const c of list) {
-      const node = renderCard(c);
-      node.style.transform = "none";
-      node.addEventListener("mouseenter", (ev) => {
-        showTooltip(c, ev.clientX, ev.clientY);
-        showZoom(c, ev.clientX, ev.clientY);
-      });
-      node.addEventListener("mouseleave", () => {
-        hideTooltip();
-        hideZoom();
-      });
-      node.addEventListener("click", () => openCardModal(c, colList));
-      {
-        const cnt = ownedCount(c.id);
-        if (cnt > 1) node.appendChild(el("div", "ownCnt", `\xD7${cnt}`));
-        if (cnt === 0) {
-          node.classList.add("locked");
-          node.appendChild(el("div", "lockBadge", "\u25C8 \u0438\u0437 \u0431\u0443\u0441\u0442\u0435\u0440\u0430"));
-          node.title = "\u041A\u0430\u0440\u0442\u0430 \u0440\u0430\u0441\u0448\u0438\u0440\u0435\u043D\u0438\u044F \xABECH1\xBB: \u0432\u044B\u043F\u0430\u0434\u0430\u0435\u0442 \u0438\u0437 \u0431\u0443\u0441\u0442\u0435\u0440\u043E\u0432";
-        }
-      }
-      grid.appendChild(node);
+    baseList.sort((a, b) => (order[a.type] ?? 9) - (order[b.type] ?? 9) || a.cost - b.cost || a.name.localeCompare(b.name, "ru"));
+    const styles = styleFilter === "" ? ["classic", "borderless"] : [styleFilter];
+    colBaseCount = baseList.length;
+    colEntries = [];
+    for (const card of baseList) for (const style of styles) {
+      if (onlyOwned && (style === "borderless" ? !hasBorderless(card.id) : ownedCount(card.id) <= 0)) continue;
+      colEntries.push({ card, style });
     }
-    $("colCount").textContent = `\u041F\u043E\u043A\u0430\u0437\u0430\u043D\u043E ${list.length} \u0438\u0437 ${ALL_CARDS.length}`;
+    colList = colEntries.map((entry) => entry.card);
+    colStyles = colEntries.map((entry) => entry.style);
+    if (!colEntries.length) {
+      grid.innerHTML = '<div class="collectionEmpty">\u041D\u0435\u0442 \u043A\u0430\u0440\u0442 \u043F\u043E \u0432\u044B\u0431\u0440\u0430\u043D\u043D\u044B\u043C \u0444\u0438\u043B\u044C\u0442\u0440\u0430\u043C. \u0418\u0437\u043C\u0435\u043D\u0438\u0442\u0435 \u043F\u043E\u0438\u0441\u043A \u0438\u043B\u0438 \u043F\u0430\u0440\u0430\u043C\u0435\u0442\u0440\u044B \u0444\u0438\u043B\u044C\u0442\u0440\u0430.</div>';
+      updateCollectionCount(baseList.length, styleFilter);
+      return;
+    }
+    grid.innerHTML = `<div class="collectionSentinel" id="colSentinel">
+    <button type="button" class="btn collectionLoadMore" aria-label="\u0417\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u044C \u0441\u043B\u0435\u0434\u0443\u044E\u0449\u0443\u044E \u0441\u0442\u0440\u0430\u043D\u0438\u0446\u0443 \u043A\u0430\u0440\u0442">\u0417\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u044C \u0435\u0449\u0451 \xB7 ${Math.min(COLLECTION_PAGE_SIZE, colEntries.length)} \u0438\u0437 ${colEntries.length}</button>
+    <span class="collectionLoadNote">\u0418\u043B\u0438 \u043F\u0440\u043E\u043A\u0440\u0443\u0442\u0438\u0442\u0435 \u0432\u043D\u0438\u0437 \u2014 \u0441\u043B\u0435\u0434\u0443\u044E\u0449\u0438\u0435 \u043A\u0430\u0440\u0442\u044B \u043F\u043E\u044F\u0432\u044F\u0442\u0441\u044F \u0430\u0432\u0442\u043E\u043C\u0430\u0442\u0438\u0447\u0435\u0441\u043A\u0438.</span>
+  </div>`;
+    const button = grid.querySelector(".collectionLoadMore");
+    button?.addEventListener("click", () => appendCollectionPage());
+    appendCollectionPage();
+    updateCollectionCount(baseList.length, styleFilter);
+    const sentinel = document.getElementById("colSentinel");
+    if (sentinel && "IntersectionObserver" in window) {
+      colObserver = new IntersectionObserver((entries) => {
+        if (generation !== colRenderGeneration) return;
+        if (entries.some((entry) => entry.isIntersecting)) appendCollectionPage();
+      }, { root: grid, rootMargin: "480px 0px", threshold: 0.01 });
+      colObserver.observe(sentinel);
+    }
   }
-  btn("btnCollection").addEventListener("click", () => {
-    $("collection").classList.remove("hidden");
-    renderCollection();
-  });
-  btn("btnColClose").addEventListener("click", () => $("collection").classList.add("hidden"));
+  btn("btnCollection").addEventListener("click", () => openCollectionScreen());
+  btn("btnColClose").addEventListener("click", () => navigateApp("back"));
   sel("colFaction").innerHTML = '<option value="">\u0412\u0441\u0435 \u0444\u0440\u0430\u043A\u0446\u0438\u0438</option>' + FACTION_IDS.map((f) => `<option value="${f}">${FACTION_RU[f]}</option>`).join("") + '<option value="Neutral">\u25C8 \u041D\u0435\u0439\u0442\u0440\u0430\u043B\u044C\u043D\u044B\u0435</option>';
   var spSel = document.getElementById("setSpeed");
   if (spSel) spSel.addEventListener("change", () => {
@@ -29043,8 +30683,11 @@
       meta.frame = String(gp.frame ?? meta.frame);
       if (gp.ach) meta.ach = gp.ach;
       const q = gp.quests;
-      if (q?.daily) meta.quests = q.daily.map((x) => ({ ...x }));
-      if (q?.weekly) meta.wquests = q.weekly.map((x) => ({ ...x }));
+      if (typeof gp.questDate === "string") meta.questDate = gp.questDate;
+      if (typeof gp.wquestWeek === "string") meta.wquestWeek = gp.wquestWeek;
+      if (q?.daily) meta.quests = normalizeQuestSet(q.daily.map((x) => ({ ...x })), freshQuests());
+      if (q?.weekly) meta.wquests = normalizeQuestSet(q.weekly.map((x) => ({ ...x })), freshWQuests());
+      syncQuestPeriods();
       if (Array.isArray(gp.history)) meta.history = gp.history;
       if (typeof gp.shards === "number") shardsSet(gp.shards);
       if (typeof gp.gems === "number") meta.gems = gp.gems;
@@ -29159,14 +30802,17 @@
     syncAccountRow();
     showToast("\u{1F44B} \u0412\u044B \u0432\u044B\u0448\u043B\u0438 \u0438\u0437 \u0430\u043A\u043A\u0430\u0443\u043D\u0442\u0430");
   });
-  ["colFaction", "colType", "colRarity", "colCost", "colKw"].forEach((id) => sel(id).addEventListener("change", renderCollection));
+  ["colFaction", "colType", "colRarity", "colCost", "colKw", "colStyle"].forEach((id) => sel(id).addEventListener("change", renderCollection));
   $("colOwned").addEventListener("change", renderCollection);
   $("colSearch").addEventListener("input", renderCollection);
   var modalList = [];
+  var modalStyles = [];
   var modalIdx = 0;
-  function openCardModal(card, list) {
+  function openCardModal(card, list, appearance = "auto", styles) {
     modalList = list.length ? list : [card];
-    modalIdx = Math.max(0, modalList.indexOf(card));
+    modalStyles = modalList.map((_, i) => styles?.[i] ?? appearance);
+    modalIdx = modalList.findIndex((item, i) => item === card && modalStyles[i] === appearance);
+    if (modalIdx < 0) modalIdx = Math.max(0, modalList.indexOf(card));
     renderCardModal();
     $("cardModal").classList.remove("hidden");
     hideZoom();
@@ -29177,30 +30823,61 @@
   function renderCardModal() {
     const c = modalList[modalIdx];
     if (!c) return;
+    const appearance = modalStyles[modalIdx] ?? "auto";
+    const cardStyle = resolvedAppearance(c, appearance);
+    const borderlessOwned = hasBorderless(c.id);
+    const borderlessOn = isBorderlessEquipped(c.id);
     const col = colorOf(c.faction);
     const host = $("cmCard");
     host.innerHTML = "";
-    host.appendChild(renderCardLarge(c, "xxl"));
+    host.appendChild(renderCardLarge(c, "xxl", appearance));
     const kws = (c.keywords ?? []).map((k) => kwName(k));
     $("cmInfo").innerHTML = `
     <div class="cmName" style="color:${col.primary}">${esc(cardName(c))}</div>
     <div class="cmType">${typeName(c.type)} \xB7 ${factionName(c.faction)} \xB7 ${rarityName(c.rarity)}${c.element !== "None" /* None */ ? " \xB7 " + elemName(c.element) : ""}${c.type === "Spell" /* Spell */ && c.subtype === "Ritual" /* Ritual */ ? bi(" \xB7 \u0440\u0438\u0442\u0443\u0430\u043B", " \xB7 ritual") : ""}</div>
+    <div class="cmVariantNote ${cardStyle === "borderless" ? "isBorderless" : ""}">${cardStyle === "borderless" ? "\u25C7 Borderless \xB7 \u0442\u043E\u0442 \u0436\u0435 \u0430\u0440\u0442 \u0438 \u043D\u0430\u0437\u0432\u0430\u043D\u0438\u0435, \u0441\u043D\u044F\u0442\u0430 \u0442\u043E\u043B\u044C\u043A\u043E \u0440\u0430\u043C\u043A\u0430; \u043F\u0440\u0430\u0432\u0438\u043B\u0430 \u0438 \u0445\u0430\u0440\u0430\u043A\u0442\u0435\u0440\u0438\u0441\u0442\u0438\u043A\u0438 \u0442\u0435 \u0436\u0435" : "\u041A\u043B\u0430\u0441\u0441\u0438\u0447\u0435\u0441\u043A\u0430\u044F \u0432\u0435\u0440\u0441\u0438\u044F \xB7 Borderless-\u0432\u0430\u0440\u0438\u0430\u043D\u0442 \u0441\u043E\u0445\u0440\u0430\u043D\u044F\u0435\u0442 \u0430\u0440\u0442, \u043D\u0430\u0437\u0432\u0430\u043D\u0438\u0435 \u0438 \u0441\u0432\u043E\u0439\u0441\u0442\u0432\u0430 \u043A\u0430\u0440\u0442\u044B"}</div>
+    <section class="cmStylePicker" id="cmStylePicker" aria-label="\u0421\u0442\u0438\u043B\u0438 \u043A\u0430\u0440\u0442\u044B">
+      <div class="cmStylePickerHead"><b>\u0421\u0422\u0418\u041B\u042C \u041A\u0410\u0420\u0422\u042B</b><span>\u0418\u0441\u043F\u043E\u043B\u044C\u0437\u0443\u0435\u0442\u0441\u044F \u0432 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u0438, \u043A\u043E\u043B\u043E\u0434\u0430\u0445 \u0438 \u043C\u0430\u0442\u0447\u0435</span></div>
+      <div class="cmStyleOptions">
+        <button type="button" class="cmStyleChoice ${borderlessOn ? "" : "isActive"}" data-cm-style="classic" aria-pressed="${!borderlessOn}">
+          <span class="cmStyleSwatch classic" aria-hidden="true"></span><span class="cmStyleLabel"><b>\u041A\u043B\u0430\u0441\u0441\u0438\u043A\u0430</b><small>\u0421\u0442\u0430\u043D\u0434\u0430\u0440\u0442\u043D\u0430\u044F \u0440\u0430\u043C\u043A\u0430</small></span><span class="cmStyleCheck">${borderlessOn ? "" : "\u2713"}</span>
+        </button>
+        <button type="button" class="cmStyleChoice ${borderlessOn ? "isActive" : ""}" data-cm-style="borderless" aria-pressed="${borderlessOn}" ${borderlessOwned ? "" : "disabled"} title="${borderlessOwned ? "\u041F\u0440\u0438\u043C\u0435\u043D\u0438\u0442\u044C \u0441\u0442\u0438\u043B\u044C Borderless" : "\u041F\u043E\u043B\u0443\u0447\u0438\u0442\u0435 \u0432\u0430\u0440\u0438\u0430\u043D\u0442 \u0432 \u0441\u043E\u0431\u044B\u0442\u0438\u0438 \u0438\u043B\u0438 \u0431\u0443\u0441\u0442\u0435\u0440\u0435"}">
+          <span class="cmStyleSwatch borderless" aria-hidden="true"></span><span class="cmStyleLabel"><b>Borderless</b><small>${borderlessOwned ? "\u041F\u043E\u043B\u0443\u0447\u0435\u043D \xB7 \u0431\u0435\u0437 \u0440\u0430\u043C\u043A\u0438" : "\u041D\u0435 \u043F\u043E\u043B\u0443\u0447\u0435\u043D \xB7 \u0441\u043E\u0431\u044B\u0442\u0438\u0435 \u0438\u043B\u0438 \u0431\u0443\u0441\u0442\u0435\u0440"}</small></span><span class="cmStyleCheck">${borderlessOn ? "\u2713" : ""}</span>
+        </button>
+      </div>
+    </section>
+    <div class="cmStyleStatus">\u0421\u0435\u0439\u0447\u0430\u0441 \u0432 \u0438\u0433\u0440\u0435: <b>${borderlessOn ? "Borderless" : "\u041A\u043B\u0430\u0441\u0441\u0438\u043A\u0430"}</b> \xB7 \u0442\u043E\u0442 \u0436\u0435 \u0438\u0433\u0440\u043E\u0432\u043E\u0439 ID \u0438 \u043B\u0438\u043C\u0438\u0442 \u043A\u043E\u043F\u0438\u0439</div>
     <div class="cmStats">
       <span title="\u0421\u0442\u043E\u0438\u043C\u043E\u0441\u0442\u044C \u043C\u0430\u043D\u044B">\u2726 ${c.cost}</span>
       ${c.type === "Creature" /* Creature */ ? `<span title="\u0410\u0442\u0430\u043A\u0430">\u2694 ${c.attack ?? 0}</span><span title="\u0417\u0434\u043E\u0440\u043E\u0432\u044C\u0435">\u2764 ${c.health ?? 0}</span>` : ""}
     </div>
-    <div class="cmText">${kws.length ? `<span class="cmKw">${esc(kws.join(" \xB7 "))}.</span> ` : ""}${esc(cardText(c) || bi("\u0411\u0435\u0437 \u0442\u0435\u043A\u0441\u0442\u0430 \u0441\u043F\u043E\u0441\u043E\u0431\u043D\u043E\u0441\u0442\u0438.", "No ability text."))}</div>
+    <div class="cmText">${kws.length ? `<span class="cmKw">${kws.map((k) => `<strong class="cardKeyword">${esc(k)}</strong>`).join(" \xB7 ")}.</span> ` : ""}${highlightCardKeywords(cardText(c) || bi("\u0411\u0435\u0437 \u0442\u0435\u043A\u0441\u0442\u0430 \u0441\u043F\u043E\u0441\u043E\u0431\u043D\u043E\u0441\u0442\u0438.", "No ability text."))}</div>
     ${cardFlavor(c) ? `<div class="cmFlavor">${esc(cardFlavor(c))}</div>` : ""}`;
+    $("cmStylePicker").querySelectorAll("[data-cm-style]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const wantsBorderless = button.dataset.cmStyle === "borderless";
+        if (wantsBorderless && !hasBorderless(c.id)) return;
+        setBorderlessEquipped(c.id, wantsBorderless);
+        modalStyles[modalIdx] = "auto";
+        renderCardModal();
+        if (!$("collection").classList.contains("hidden")) {
+          if (!$("dbMain").classList.contains("hidden")) renderEditor();
+          else renderCollection();
+        }
+        showToast(wantsBorderless ? `\u25C7 Borderless \u043D\u0430\u0434\u0435\u0442: \xAB${cardName(c)}\xBB` : `\u041A\u043B\u0430\u0441\u0441\u0438\u0447\u0435\u0441\u043A\u0438\u0439 \u0441\u0442\u0438\u043B\u044C \u0432\u043A\u043B\u044E\u0447\u0451\u043D: \xAB${cardName(c)}\xBB`);
+      });
+    });
     $("cmPos").textContent = `${modalIdx + 1} / ${modalList.length}`;
     const have = ownedCount(c.id);
     const bc = $("cmCraft");
     const bd = $("cmDust");
     if (bc) {
-      bc.textContent = `\u0421\u043E\u0437\u0434\u0430\u0442\u044C \u25C8${CRAFT_COST[c.rarity] ?? 100}`;
+      bc.textContent = `\u0421\u043E\u0437\u0434\u0430\u0442\u044C \u{1FA99}${CRAFT_COST[c.rarity] ?? 100}`;
       bc.disabled = have >= PLAYSET;
     }
     if (bd) {
-      bd.textContent = `\u0420\u0430\u0437\u043E\u0431\u0440\u0430\u0442\u044C +\u25C8${DUST_GAIN[c.rarity] ?? 20}`;
+      bd.textContent = `\u0420\u0430\u0437\u043E\u0431\u0440\u0430\u0442\u044C +\u{1FA99}${DISENCHANT_COINS[c.rarity] ?? 20}`;
       bd.disabled = have <= (isExpansionId(c.id) ? 0 : 1);
     }
     const bf = $("cmFoil");
@@ -29209,8 +30886,15 @@
       bf.disabled = (meta.foilTokens ?? 0) <= 0 || have <= 0 || (foils.get(c.id) ?? 0) >= PLAYSET;
       bf.title = (meta.foilTokens ?? 0) <= 0 ? "\u0424\u043E\u0439\u043B-\u0436\u0435\u0442\u043E\u043D\u044B \u2014 \u043D\u0430\u0433\u0440\u0430\u0434\u0430 \u043F\u0440\u0435\u043C\u0438\u0443\u043C-\u0432\u0435\u0442\u043A\u0438 \u043F\u0440\u043E\u043F\u0443\u0441\u043A\u0430 (5 \u0443\u0440\u043E\u0432\u0435\u043D\u044C)" : have <= 0 ? "\u0421\u043D\u0430\u0447\u0430\u043B\u0430 \u043F\u043E\u043B\u0443\u0447\u0438\u0442\u0435 \u043A\u0430\u0440\u0442\u0443" : "\u0421\u0434\u0435\u043B\u0430\u0442\u044C \u0444\u043E\u0439\u043B-\u0432\u0435\u0440\u0441\u0438\u044E \u043A\u0430\u0440\u0442\u044B (\u043D\u0430\u0432\u0435\u0447\u043D\u043E)";
     }
+    const bbl = $("cmBorderless");
+    if (bbl) {
+      bbl.textContent = borderlessOwned ? borderlessOn ? "\u25C7 Borderless \xB7 \u043D\u0430\u0434\u0435\u0442\u043E \u2713" : "\u25C7 \u041D\u0430\u0434\u0435\u0442\u044C Borderless" : "\u25C7 Borderless \xB7 \u043D\u0435 \u043F\u043E\u043B\u0443\u0447\u0435\u043D\u043E";
+      bbl.disabled = !borderlessOwned;
+      bbl.setAttribute("aria-pressed", borderlessOn ? "true" : "false");
+      bbl.title = borderlessOwned ? "\u0410\u043B\u044C\u0442\u0435\u0440\u043D\u0430\u0442\u0438\u0432\u043D\u044B\u0439 \u0432\u043D\u0435\u0448\u043D\u0438\u0439 \u0432\u0438\u0434; \u043F\u0440\u0430\u0432\u0438\u043B\u0430 \u0438 \u0445\u0430\u0440\u0430\u043A\u0442\u0435\u0440\u0438\u0441\u0442\u0438\u043A\u0438 \u043A\u0430\u0440\u0442\u044B \u043D\u0435 \u043C\u0435\u043D\u044F\u044E\u0442\u0441\u044F" : "\u041F\u043E\u043B\u0443\u0447\u0438\u0442\u0435 \u0438\u0437 \u0441\u043E\u0431\u044B\u0442\u0438\u044F \u0438\u043B\u0438 \u0441 \u0448\u0430\u043D\u0441\u043E\u043C 0,1% \u0438\u0437 \u0431\u0443\u0441\u0442\u0435\u0440\u0430";
+    }
     const own = $("cmOwned");
-    if (own) own.textContent = `\u0412 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u0438: \xD7${have}`;
+    if (own) own.textContent = `\u041E\u0431\u044B\u0447\u043D\u0430\u044F \xD7${have} \xB7 Borderless ${borderlessOwned ? "\u2713" : "\u2014"}`;
   }
   function modalStep(d) {
     if (!modalList.length) return;
@@ -29257,10 +30941,9 @@
     }
     const n = editing.counts.get(id) ?? 0;
     const have = ownedCount(id);
-    if (n >= have) return `\xAB${c.name}\xBB: \u0432 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u0438 ${have} \u0438\u0437 4 \u2014 \u043E\u0442\u043A\u0440\u043E\u0439\u0442\u0435 \u0431\u0443\u0441\u0442\u0435\u0440\u044B \u0438\u043B\u0438 \u0441\u043A\u0440\u0430\u0444\u0442\u0438\u0442\u0435`;
     const cap = c.rarity === "Legendary" /* Legendary */ ? MAX_LEGENDARY_COPIES : MAX_COPIES;
     if (n >= cap) return `\xAB${c.name}\xBB: \u043D\u0435 \u0431\u043E\u043B\u0435\u0435 ${cap} \u043A\u043E\u043F\u0438\u0439`;
-    if (editingCards().length >= DECK_SIZE) return `\u041A\u043E\u043B\u043E\u0434\u0430 \u0443\u0436\u0435 \u043F\u043E\u043B\u043D\u0430\u044F (${DECK_SIZE} \u043A\u0430\u0440\u0442)`;
+    if (n >= have) return `\xAB${c.name}\xBB: \u0432 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u0438 ${have} \u0438\u0437 ${cap} \u2014 \u043E\u0442\u043A\u0440\u043E\u0439\u0442\u0435 \u0431\u0443\u0441\u0442\u0435\u0440\u044B \u0438\u043B\u0438 \u0441\u043A\u0440\u0430\u0444\u0442\u0438\u0442\u0435`;
     return null;
   }
   function dbAdd(id) {
@@ -29282,13 +30965,48 @@
     dbStatus("");
     renderEditor();
   }
+  function renderDeckAvatarPreview() {
+    const host = document.getElementById("dbAvatarPreview");
+    if (!host || !editing) return;
+    const card = editing.avatarCardId ? dbLookup(editing.avatarCardId) : void 0;
+    host.replaceChildren();
+    const fallback = el("span", "dbAvatarPlaceholder", FACTION_SIGIL[editing.faction] ?? "\u25C7");
+    host.appendChild(fallback);
+    if (card) {
+      const image = document.createElement("img");
+      image.src = `/art/${encodeURIComponent(card.faction)}/${encodeURIComponent(card.id)}.png`;
+      image.alt = "";
+      image.loading = "lazy";
+      image.onerror = () => image.remove();
+      host.appendChild(image);
+      host.title = `\u041E\u0431\u043B\u043E\u0436\u043A\u0430 \u043A\u043E\u043B\u043E\u0434\u044B: ${cardName(card)}`;
+    } else {
+      host.title = "\u0414\u043E\u0431\u0430\u0432\u044C\u0442\u0435 \u043A\u0430\u0440\u0442\u0443, \u0447\u0442\u043E\u0431\u044B \u0432\u044B\u0431\u0440\u0430\u0442\u044C \u043E\u0431\u043B\u043E\u0436\u043A\u0443 \u043A\u043E\u043B\u043E\u0434\u044B";
+    }
+  }
   function renderEditor() {
     if (!editing) return;
     const cards = editingCards();
     $("dbDeckFaction").textContent = `\xB7 ${FACTION_RU[editing.faction]}`;
-    $("dbCount").textContent = `${cards.length} / ${DECK_SIZE}`;
+    $("dbCount").textContent = `${cards.length} \xB7 \u043C\u0438\u043D. ${MIN_DECK_SIZE}`;
+    $("dbCount").title = `\u041C\u0438\u043D\u0438\u043C\u0443\u043C ${MIN_DECK_SIZE} \u043A\u0430\u0440\u0442; \u0432\u0435\u0440\u0445\u043D\u0435\u0433\u043E \u043B\u0438\u043C\u0438\u0442\u0430 \u043D\u0435\u0442`;
+    $("dbCount").setAttribute("aria-label", `${cards.length} \u043A\u0430\u0440\u0442; \u043C\u0438\u043D\u0438\u043C\u0443\u043C ${MIN_DECK_SIZE}, \u0432\u0435\u0440\u0445\u043D\u0435\u0433\u043E \u043B\u0438\u043C\u0438\u0442\u0430 \u043D\u0435\u0442`);
     sel("dbFaction").value = editing.faction;
     $("dbName").value = editing.name;
+    const avatarCards = [...editing.counts.entries()].map(([id, count]) => ({ card: dbLookup(id), count })).filter((row) => !!row.card).sort((a, b) => a.card.cost - b.card.cost || a.card.name.localeCompare(b.card.name, "ru"));
+    if (!editing.avatarCardId || !editing.counts.has(editing.avatarCardId)) {
+      editing.avatarCardId = suggestedDeckArt(avatarCards.map((row) => row.card.id))?.id ?? null;
+    }
+    const avatarSelect = sel("dbAvatarCard");
+    avatarSelect.innerHTML = avatarCards.length ? avatarCards.map(({ card, count }) => `<option value="${esc(card.id)}">${esc(cardName(card))} \xB7 \xD7${count}</option>`).join("") : '<option value="">\u0414\u043E\u0431\u0430\u0432\u044C\u0442\u0435 \u043A\u0430\u0440\u0442\u044B \u0432 \u043A\u043E\u043B\u043E\u0434\u0443</option>';
+    avatarSelect.disabled = avatarCards.length === 0;
+    avatarSelect.value = editing.avatarCardId ?? "";
+    const avatarGallery = document.getElementById("btnDbAvatarGallery");
+    if (avatarGallery) {
+      avatarGallery.disabled = avatarCards.length === 0;
+      avatarGallery.title = avatarCards.length ? "\u041E\u0442\u043A\u0440\u044B\u0442\u044C \u0433\u0430\u043B\u0435\u0440\u0435\u044E \u0430\u0440\u0442\u043E\u0432 \u043A\u0430\u0440\u0442 \u044D\u0442\u043E\u0439 \u043A\u043E\u043B\u043E\u0434\u044B" : "\u0421\u043D\u0430\u0447\u0430\u043B\u0430 \u0434\u043E\u0431\u0430\u0432\u044C\u0442\u0435 \u043A\u0430\u0440\u0442\u044B";
+    }
+    renderDeckAvatarPreview();
     const listHost = $("dbDeckList");
     listHost.innerHTML = "";
     if (!cards.length) {
@@ -29301,7 +31019,8 @@
       const rows = [...editing.counts.entries()].map(([id, n]) => ({ c: dbLookup(id), n })).filter((r) => r.c).sort((a, b) => a.c.cost - b.c.cost || a.c.name.localeCompare(b.c.name, "ru"));
       for (const r of rows) {
         const row = el("div", "dbRow");
-        row.innerHTML = `<span class="c">${r.c.cost}</span><span class="n" title="${esc(r.c.name)}">${esc(r.c.name)}</span>
+        const styleBadge = isBorderlessEquipped(r.c.id) ? '<span class="dbRowStyle isBorderless" title="Borderless-\u043E\u0444\u043E\u0440\u043C\u043B\u0435\u043D\u0438\u0435 \u043D\u0430\u0434\u0435\u0442\u043E \u0434\u043B\u044F \u044D\u0442\u043E\u0439 \u043A\u0430\u0440\u0442\u044B">\u25C7</span>' : "";
+        row.innerHTML = `<span class="c">${r.c.cost}</span><span class="n" title="${esc(r.c.name)}">${esc(r.c.name)}${styleBadge}</span>
         <span class="q">\xD7${r.n}</span>`;
         const minus = el("button", "", "\u2212");
         minus.title = "\u0423\u0431\u0440\u0430\u0442\u044C \u043E\u0434\u043D\u0443 \u043A\u043E\u043F\u0438\u044E";
@@ -29329,6 +31048,7 @@
       curve.appendChild(bar);
     });
     renderPool();
+    updateDeckStyleAllButton();
   }
   function renderPool() {
     if (!editing) return;
@@ -29347,11 +31067,28 @@
       if (canAdd(c.id) !== null && n > 0) node.classList.add("maxed");
       const info = el("button", "dbI", "i");
       info.title = "\u041E\u0442\u043A\u0440\u044B\u0442\u044C \u043E\u043F\u0438\u0441\u0430\u043D\u0438\u0435 \u043A\u0430\u0440\u0442\u044B";
+      info.setAttribute("aria-label", `\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435: ${cardName(c)}`);
       info.addEventListener("click", (ev) => {
         ev.stopPropagation();
         openCardModal(c, list);
       });
       node.appendChild(info);
+      const stylePicker = el("button", "dbStylePicker", "\u25C7");
+      const equipped = isBorderlessEquipped(c.id);
+      stylePicker.dataset.cardId = c.id;
+      stylePicker.setAttribute("aria-pressed", equipped ? "true" : "false");
+      stylePicker.setAttribute("aria-label", `\u0412\u044B\u0431\u0440\u0430\u0442\u044C \u043E\u0444\u043E\u0440\u043C\u043B\u0435\u043D\u0438\u0435: ${cardName(c)}`);
+      stylePicker.title = `\u0421\u0442\u0438\u043B\u0438 \u043A\u0430\u0440\u0442\u044B \xB7 \u0441\u0435\u0439\u0447\u0430\u0441 ${equipped ? "Borderless" : "\u041A\u043B\u0430\u0441\u0441\u0438\u043A\u0430"} \xB7 \u0432\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u0432\u043D\u0435\u0448\u043D\u0438\u0439 \u0432\u0438\u0434 \u0434\u043B\u044F \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u0438, \u043A\u043E\u043B\u043E\u0434 \u0438 \u043C\u0430\u0442\u0447\u0430`;
+      stylePicker.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        openCardModal(c, list, "auto");
+      });
+      stylePicker.addEventListener("contextmenu", (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+      });
+      node.appendChild(stylePicker);
+      node.classList.toggle("borderlessEquipped", equipped);
       node.addEventListener("mouseenter", (ev) => showZoom(c, ev.clientX, ev.clientY));
       node.addEventListener("mouseleave", hideZoom);
       node.addEventListener("click", () => dbAdd(c.id));
@@ -29361,20 +31098,36 @@
       });
       grid.appendChild(node);
     }
-    $("colCount").textContent = `\u041F\u0443\u043B: ${list.length} \u043A\u0430\u0440\u0442 (\u0441\u0432\u043E\u0438 + \u043D\u0435\u0439\u0442\u0440\u0430\u043B\u044C\u043D\u044B\u0435)`;
+    const borderlessInPool = list.filter((card) => hasBorderless(card.id)).length;
+    $("colCount").textContent = `\u041F\u0443\u043B: ${list.length} \u0438\u0433\u0440\u043E\u0432\u044B\u0445 \u043A\u0430\u0440\u0442 \xB7 Borderless \u0434\u043E\u0441\u0442\u0443\u043F\u043D\u043E: ${borderlessInPool}`;
+  }
+  function updateDeckStyleAllButton() {
+    const button = document.getElementById("btnDbStyleAll");
+    if (!button) return;
+    const unlockedIds = ALL_CARDS.filter((card) => hasBorderless(card.id)).map((card) => card.id);
+    const allOn = unlockedIds.length > 0 && unlockedIds.every((id) => isBorderlessEquipped(id));
+    button.disabled = unlockedIds.length === 0;
+    button.textContent = unlockedIds.length === 0 ? "\u25C7 \u041D\u0435\u0442 \u0441\u0442\u0438\u043B\u0435\u0439" : allOn ? "\u25C7 \u0421\u043D\u044F\u0442\u044C \u0432\u0441\u0435" : `\u25C7 \u0412\u0441\u0435 \u0441\u0442\u0438\u043B\u0438 \xB7 ${unlockedIds.length}`;
+    button.title = unlockedIds.length === 0 ? "\u0421\u043D\u0430\u0447\u0430\u043B\u0430 \u043F\u043E\u043B\u0443\u0447\u0438\u0442\u0435 Borderless-\u0432\u0430\u0440\u0438\u0430\u043D\u0442" : allOn ? "\u0421\u043D\u044F\u0442\u044C Borderless-\u043E\u0444\u043E\u0440\u043C\u043B\u0435\u043D\u0438\u0435 \u0441\u043E \u0432\u0441\u0435\u0445 \u043F\u043E\u043B\u0443\u0447\u0435\u043D\u043D\u044B\u0445 \u043A\u0430\u0440\u0442" : `\u041F\u0440\u0438\u043C\u0435\u043D\u0438\u0442\u044C Borderless-\u043E\u0444\u043E\u0440\u043C\u043B\u0435\u043D\u0438\u0435 \u043A\u043E \u0432\u0441\u0435\u043C ${unlockedIds.length} \u043F\u043E\u043B\u0443\u0447\u0435\u043D\u043D\u044B\u043C \u043A\u0430\u0440\u0442\u0430\u043C`;
   }
   function renderMyDecksSel() {
     const list = loadCustomDecks();
     sel("dbMyDecks").innerHTML = list.length ? list.map((d) => `<option value="${d.id}">${esc(d.name)} (${d.cards.length})</option>`).join("") : '<option value="">\u2014 \u043C\u043E\u0438\u0445 \u043A\u043E\u043B\u043E\u0434 \u043D\u0435\u0442 \u2014</option>';
   }
   function newEditing(faction) {
-    return { id: null, name: "", faction, counts: /* @__PURE__ */ new Map() };
+    return { id: null, name: "", faction, counts: /* @__PURE__ */ new Map(), avatarCardId: null };
   }
   function loadIntoEditor(deck) {
     if (!deck) return;
     const counts = /* @__PURE__ */ new Map();
     for (const id of deck.cards) counts.set(id, (counts.get(id) ?? 0) + 1);
-    editing = { id: deck.id.startsWith("custom-") ? deck.id : null, name: deck.name, faction: deck.faction, counts };
+    editing = {
+      id: deck.id.startsWith("custom-") ? deck.id : null,
+      name: deck.name,
+      faction: deck.faction,
+      counts,
+      avatarCardId: deck.avatarCardId ?? null
+    };
     dbStatus("");
     renderEditor();
   }
@@ -29403,6 +31156,18 @@
   btn("tabBuilder").addEventListener("click", () => {
     Audio_.uiClick();
     setTab(true);
+  });
+  btn("btnDbStyleAll").addEventListener("click", () => {
+    const styleIds = ALL_CARDS.filter((card) => hasBorderless(card.id)).map((card) => card.id);
+    if (!styleIds.length) {
+      showToast("Borderless-\u0441\u0442\u0438\u043B\u0438 \u0435\u0449\u0451 \u043D\u0435 \u043F\u043E\u043B\u0443\u0447\u0435\u043D\u044B");
+      return;
+    }
+    const allOn = styleIds.every((id) => isBorderlessEquipped(id));
+    meta.borderlessEquipped = allOn ? [] : Array.from(/* @__PURE__ */ new Set([...meta.borderlessEquipped ?? [], ...styleIds]));
+    metaSave();
+    renderEditor();
+    showToast(allOn ? "\u041A\u043B\u0430\u0441\u0441\u0438\u0447\u0435\u0441\u043A\u0438\u0435 \u0441\u0442\u0438\u043B\u0438 \u0432\u043A\u043B\u044E\u0447\u0435\u043D\u044B \u0434\u043B\u044F \u0432\u0441\u0435\u0445 \u043A\u0430\u0440\u0442" : `\u041F\u0440\u0438\u043C\u0435\u043D\u0435\u043D\u043E Borderless-\u0441\u0442\u0438\u043B\u0435\u0439: ${styleIds.length}`);
   });
   btn("btnDbNew").addEventListener("click", () => {
     editing = newEditing(sel("dbFaction").value || picked);
@@ -29447,14 +31212,21 @@
       return;
     }
     const id = editing.id ?? `custom-${Date.now().toString(36)}`;
-    const deck = { id, name, faction: editing.faction, cards: editingCards(), updated: Date.now() };
+    const deck = {
+      id,
+      name,
+      faction: editing.faction,
+      cards: editingCards(),
+      avatarCardId: editing.avatarCardId ?? void 0,
+      updated: Date.now()
+    };
     upsertCustomDeck(deck);
     editing.id = id;
     editing.name = name;
     buildMenu();
     renderMyDecksSel();
     sel("dbMyDecks").value = id;
-    dbStatus(`\u0421\u043E\u0445\u0440\u0430\u043D\u0435\u043D\u043E: \xAB${name}\xBB \u2014 \u0434\u043E\u0441\u0442\u0443\u043F\u043D\u0430 \u0432 \u043C\u0435\u043D\u044E \u0432 \u0441\u043F\u0438\u0441\u043A\u0435 \xAB\u041A\u043E\u043B\u043E\u0434\u0430\xBB \u0438 \u043A\u043D\u043E\u043F\u043A\u043E\u0439 \xAB\u0412 \u0431\u043E\u0439\xBB.`, true);
+    dbStatus(`\u0421\u043E\u0445\u0440\u0430\u043D\u0435\u043D\u043E: \xAB${name}\xBB \u2014 \u0432\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u043E\u0431\u043B\u043E\u0436\u043A\u0443 \u0438 \u0437\u0430\u043F\u0443\u0441\u043A\u0430\u0439\u0442\u0435 \u0431\u043E\u0439 \u043A\u043D\u043E\u043F\u043A\u043E\u0439 \xAB\u0412 \u0431\u043E\u0439\xBB \u0438\u043B\u0438 \u0447\u0435\u0440\u0435\u0437 \u041A\u043E\u043B\u043E\u0434\u044B \u2192 \xAB\u0418\u0433\u0440\u0430\u0442\u044C\xBB.`, true);
     Audio_.uiClick();
   });
   btn("btnDbExport").addEventListener("click", () => {
@@ -29511,14 +31283,30 @@
     renderMyDecksSel();
     Audio_.uiClick();
   });
+  function editorMatchesSavedDeck(deck) {
+    if (!editing) return false;
+    const ids = editingCards().slice().sort().join("|");
+    const savedIds = deck.cards.slice().sort().join("|");
+    const name = editing.name.trim() || `${FACTION_RU[editing.faction]}: \u043C\u043E\u044F \u043A\u043E\u043B\u043E\u0434\u0430`;
+    const editorAvatar = editing.avatarCardId ?? suggestedDeckArt(editingCards())?.id ?? null;
+    const savedAvatar = deck.avatarCardId ?? suggestedDeckArt(deck.cards)?.id ?? null;
+    return ids === savedIds && editing.faction === deck.faction && name === deck.name && editorAvatar === savedAvatar;
+  }
   btn("btnDbUse").addEventListener("click", () => {
     if (!editing?.id) {
       dbStatus("\u0421\u043D\u0430\u0447\u0430\u043B\u0430 \u0441\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u0435 \u043A\u043E\u043B\u043E\u0434\u0443");
       return;
     }
-    sel("deckPick").value = editing.id;
-    battle.playerDeckId = editing.id;
-    dbStatus(`\u041A\u043E\u043B\u043E\u0434\u0430 \xAB${editing.name}\xBB \u0432\u044B\u0431\u0440\u0430\u043D\u0430 \u0434\u043B\u044F \u0431\u043E\u044F.`, true);
+    const saved = loadCustomDecks().find((deck) => deck.id === editing?.id);
+    if (!saved) {
+      dbStatus("\u0421\u043E\u0445\u0440\u0430\u043D\u0451\u043D\u043D\u0430\u044F \u043A\u043E\u043B\u043E\u0434\u0430 \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D\u0430 \u2014 \u0441\u043D\u0430\u0447\u0430\u043B\u0430 \u043D\u0430\u0436\u043C\u0438\u0442\u0435 \xAB\u0421\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C\xBB");
+      return;
+    }
+    if (!editorMatchesSavedDeck(saved)) {
+      dbStatus("\u0415\u0441\u0442\u044C \u043D\u0435\u0441\u043E\u0445\u0440\u0430\u043D\u0451\u043D\u043D\u044B\u0435 \u0438\u0437\u043C\u0435\u043D\u0435\u043D\u0438\u044F. \u041D\u0430\u0436\u043C\u0438\u0442\u0435 \xAB\u0421\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C\xBB, \u0437\u0430\u0442\u0435\u043C \u0437\u0430\u043F\u0443\u0441\u043A\u0430\u0439\u0442\u0435 \u0431\u043E\u0439.");
+      return;
+    }
+    if (launchDeckForBattle(saved.id)) showToast(`\u0417\u0430\u043F\u0443\u0441\u043A\u0430\u0435\u043C \u043A\u043E\u043B\u043E\u0434\u0443 \xAB${saved.name}\xBB`);
   });
   sel("dbMyDecks").addEventListener("change", () => {
     const d = loadCustomDecks().find((x) => x.id === sel("dbMyDecks").value);
@@ -29540,6 +31328,12 @@
   $("dbName").addEventListener("input", () => {
     if (editing) editing.name = $("dbName").value;
   });
+  sel("dbAvatarCard").addEventListener("change", () => {
+    if (!editing) return;
+    editing.avatarCardId = sel("dbAvatarCard").value || null;
+    renderDeckAvatarPreview();
+  });
+  btn("btnDbAvatarGallery").addEventListener("click", openEditorDeckArtPicker);
   sel("dbFaction").innerHTML = FACTION_IDS.map((f) => `<option value="${f}">${FACTION_RU[f]}</option>`).join("");
   ["dbSearch", "dbType"].forEach((id) => $(id).addEventListener(id === "dbSearch" ? "input" : "change", renderPool));
   window.__decks = {
@@ -29552,7 +31346,7 @@
   };
   var RULES_HTML = `
 <h3 style="color:var(--gold-hi);letter-spacing:.1em;margin:.6rem 0">\u0426\u0435\u043B\u044C \u0438 \u0440\u0435\u0441\u0443\u0440\u0441\u044B</h3>
-<p>\u0421\u043D\u0438\u0437\u044C\u0442\u0435 \u0437\u0434\u043E\u0440\u043E\u0432\u044C\u0435 \u0433\u0435\u0440\u043E\u044F \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430 \u0441 <b>30</b> \u0434\u043E <b>0</b>. \u041A\u043E\u043B\u043E\u0434\u0430 \u2014 <b>40</b> \u043A\u0430\u0440\u0442, \u0441\u0442\u0430\u0440\u0442\u043E\u0432\u0430\u044F \u0440\u0443\u043A\u0430 \u2014 <b>5</b>,
+<p>\u0421\u043D\u0438\u0437\u044C\u0442\u0435 \u0437\u0434\u043E\u0440\u043E\u0432\u044C\u0435 \u0433\u0435\u0440\u043E\u044F \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430 \u0441 <b>30</b> \u0434\u043E <b>0</b>. \u041A\u043E\u043B\u043E\u0434\u0430 \u2014 \u043C\u0438\u043D\u0438\u043C\u0443\u043C <b>60</b> \u043A\u0430\u0440\u0442, \u043D\u0435 \u0431\u043E\u043B\u0435\u0435 <b>4</b> \u043A\u043E\u043F\u0438\u0439 \u043B\u044E\u0431\u043E\u0439 \u043A\u0430\u0440\u0442\u044B (\u0432\u043A\u043B\u044E\u0447\u0430\u044F \u043B\u0435\u0433\u0435\u043D\u0434\u0430\u0440\u043D\u044B\u0435); \u0432\u0435\u0440\u0445\u043D\u0435\u0433\u043E \u043B\u0438\u043C\u0438\u0442\u0430 \u0438 \u0441\u0430\u0439\u0434\u0431\u043E\u0440\u0434\u0430 \u043D\u0435\u0442. \u0421\u0442\u0430\u0440\u0442\u043E\u0432\u0430\u044F \u0440\u0443\u043A\u0430 \u2014 <b>5</b>,
 \u043C\u0443\u043B\u043B\u0438\u0433\u0430\u043D \u0434\u043E\u0441\u0442\u0443\u043F\u0435\u043D <b>\u043E\u0434\u0438\u043D \u0440\u0430\u0437</b> \u0437\u0430 \u0438\u0433\u0440\u0443. \u041C\u0430\u043A\u0441\u0438\u043C\u0443\u043C \u043C\u0430\u043D\u044B \u0440\u0430\u0441\u0442\u0451\u0442 \u043D\u0430 1 \u043A\u0430\u0436\u0434\u044B\u0439 \u0445\u043E\u0434 (\u0434\u043E 10) \u0438 \u043F\u043E\u043B\u043D\u043E\u0441\u0442\u044C\u044E \u0432\u043E\u0441\u043F\u043E\u043B\u043D\u044F\u0435\u0442\u0441\u044F
 \u0432 \u0444\u0430\u0437\u0435 \xAB\u0420\u0435\u0441\u0443\u0440\u0441\u044B\xBB. <b>\u041D\u0435\u0438\u0441\u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u043D\u043D\u0430\u044F \u043C\u0430\u043D\u0430 \u0441\u043E\u0445\u0440\u0430\u043D\u044F\u0435\u0442\u0441\u044F \u0434\u043E \u0432\u0430\u0448\u0435\u0433\u043E \u0441\u043B\u0435\u0434\u0443\u044E\u0449\u0435\u0433\u043E \u0445\u043E\u0434\u0430</b> \u2014 \u043E\u0441\u0442\u0430\u0432\u043B\u044F\u0439\u0442\u0435 \u043C\u0430\u043D\u0443 \u0434\u043B\u044F <b>\u043C\u0433\u043D\u043E\u0432\u0435\u043D\u043D\u044B\u0445 \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0439 \u0432 \u0445\u043E\u0434 \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430</b> (\u043A\u0430\u043A \u0432 MTG). \u041F\u0443\u0441\u0442\u0430\u044F \u043A\u043E\u043B\u043E\u0434\u0430 \u2192 <b>\u0443\u0441\u0442\u0430\u043B\u043E\u0441\u0442\u044C</b>: \u043A\u0430\u0436\u0434\u044B\u0439 \u0434\u043E\u0431\u043E\u0440 \u043D\u0430\u043D\u043E\u0441\u0438\u0442 \u0440\u0430\u0441\u0442\u0443\u0449\u0438\u0439 \u0443\u0440\u043E\u043D.
 \u041D\u0430 \u0434\u043E\u0441\u043A\u0435 \u043D\u0435 \u0431\u043E\u043B\u0435\u0435 <b>7</b> \u0441\u0443\u0449\u0435\u0441\u0442\u0432 \u0438 <b>3</b> \u0440\u0443\u043D \u0443 \u043A\u0430\u0436\u0434\u043E\u0433\u043E \u0438\u0433\u0440\u043E\u043A\u0430.</p>
@@ -29647,27 +31441,38 @@ ${FACTION_IDS.map((f) => `<p style="margin:.45rem 0"><b style="color:${colorOf(f
     if (t && (t.tagName === "INPUT" || t.tagName === "SELECT" || t.tagName === "TEXTAREA")) return;
     const inBattle = !$("battle").classList.contains("hidden");
     if (ev.key === "Escape") {
+      if (!$("deckArtPickerModal").classList.contains("hidden")) {
+        closeDeckArtPicker();
+        return;
+      }
       if (!$("cardModal").classList.contains("hidden")) {
         closeCardModal();
         return;
       }
-      if (!$("journalModal").classList.contains("hidden")) {
-        $("journalModal").classList.add("hidden");
-        return;
-      }
-      if (!$("boosterModal").classList.contains("hidden")) {
-        hideSealedInstant();
-        $("boosterModal").classList.add("hidden");
-        return;
+      for (const id of ["cosmPreview", "journalModal", "replayModal", "factionModal", "graveModal"]) {
+        const modal = document.getElementById(id);
+        if (modal && !modal.classList.contains("hidden")) {
+          modal.classList.add("hidden");
+          return;
+        }
       }
       if (!$("authModal").classList.contains("hidden")) {
         closeAuth();
         return;
       }
-      $("collection").classList.add("hidden");
-      $("rules").classList.add("hidden");
-      $("settingsPanel").classList.add("hidden");
-      $("settingsScrim")?.classList.add("hidden");
+      if (!$("rules").classList.contains("hidden")) {
+        $("rules").classList.add("hidden");
+        return;
+      }
+      if (!$("settingsPanel").classList.contains("hidden")) {
+        $("settingsPanel").classList.add("hidden");
+        $("settingsScrim")?.classList.add("hidden");
+        return;
+      }
+      if (["boosterModal", "profileModal", "shopModal", "bpModal", "campaignModal", "tutModal"].some((id) => !$(id).classList.contains("hidden")) || ["collection", "decksScreen", "eventsScreen"].some((id) => !$(id).classList.contains("hidden"))) {
+        navigateApp("back");
+        return;
+      }
       return;
     }
     if (!$("cardModal").classList.contains("hidden")) {

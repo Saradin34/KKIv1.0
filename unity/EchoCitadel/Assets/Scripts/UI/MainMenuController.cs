@@ -2,7 +2,7 @@
 // Реализует: 1.1 карусель фракций (выбор, подсветка, кроссфейд фона 0.5с, whoosh, PlayerPrefs),
 // 1.2 панель «Ваша фракция» + модалка подробностей (данные из factions.json),
 // 1.3 настройки матча (противник + «Случайно», 4 сложности, колоды, «Тренировка»),
-// 1.4 «В БОЙ» (гейт валидности 40 карт/лимиты копий + POST /api/match/start → match_id),
+// 1.4 «В БОЙ» (гейт: минимум 60 карт / playset ×4 + POST /api/match/start → match_id),
 // 1.5 нижняя навигация (overlay-панели с «пружиной», без смены сцены).
 //
 // Соглашения по префабам (все — простые контейнеры, поля ищутся по имени ребёнка):
@@ -153,11 +153,15 @@ namespace EchoCitadel.UI
             if (FactionCatalog.ById(id) == null || id == _picked) return;
             _picked = id;
             PlayerPrefs.SetString(K_Faction, id);
+            var starter = _decks?.Decks.FirstOrDefault(d => d.Format == "starter" && d.Faction.ToString() == id);
+            if (starter != null) PlayerPrefs.SetString(K_Deck, starter.Id);
             PlayerPrefs.Save();
             if (sfxSource != null && whooshClip != null) sfxSource.PlayOneShot(whooshClip);
             ApplyPalette();
             RefreshSelection();
             BuildEnemyDropdown();          // список противников исключает свою фракцию
+            BuildDeckDropdown();           // быстрый выбор фракции подставляет её 30-карточную колоду
+            UpdatePlayGate();
             StartCoroutine(CrossfadeBackground());
         }
 
@@ -294,16 +298,39 @@ namespace EchoCitadel.UI
         private void BuildDeckDropdown()
         {
             if (deckDropdown == null || _decks == null) return;
-            var ids = _decks.Decks.Select(d => d.Id).ToList();
-            var names = _decks.Decks.Select(d => $"{d.Name} · база ({d.Cards.Count})").ToList();
-            // TODO(BLOCK 2): пользовательские колоды из DeckStorage (PlayerPrefs/JSON) — как deckstore.ts.
-            var saved = PlayerPrefs.GetString(K_Deck, ids.Count > 0 ? ids[0] : "");
-            int idx = ids.IndexOf(saved);
+            // `Starter` — служебная смешанная тестовая колода, не игровой выбор новичка.
+            var available = _decks.Decks.Where(d => d.Id != "Starter").ToList();
+            if (available.Count == 0) return;
+            var ids = available.Select(d => d.Id).ToList();
+            var names = available.Select(d =>
+                $"{d.Name} · {(d.Format == "starter" ? "стартовая" : "Constructed")} ({d.Cards.Count})").ToList();
+            // Новый профиль сразу получает стартовую колоду выбранной фракции; сохранённый
+            // пользовательский выбор остаётся, пока игрок не переключит фракцию/колоду.
+            var saved = PlayerPrefs.GetString(K_Deck, "");
+            var selected = available.FirstOrDefault(d => d.Id == saved)
+                ?? available.FirstOrDefault(d => d.Format == "starter" && d.Faction.ToString() == _picked)
+                ?? available[0];
+            int idx = ids.IndexOf(selected.Id);
             deckDropdown.ClearOptions();
             deckDropdown.AddOptions(names);
             deckDropdown.value = idx >= 0 ? idx : 0;
+            PlayerPrefs.SetString(K_Deck, selected.Id);
             deckDropdown.onValueChanged.RemoveAllListeners();
-            deckDropdown.onValueChanged.AddListener(v => { PlayerPrefs.SetString(K_Deck, ids[v]); UpdatePlayGate(); });
+            deckDropdown.onValueChanged.AddListener(v =>
+            {
+                var chosen = available[Mathf.Clamp(v, 0, available.Count - 1)];
+                PlayerPrefs.SetString(K_Deck, chosen.Id);
+                if (FactionCatalog.ById(chosen.Faction.ToString()) != null && _picked != chosen.Faction.ToString())
+                {
+                    _picked = chosen.Faction.ToString();
+                    PlayerPrefs.SetString(K_Faction, _picked);
+                    ApplyPalette();
+                    RefreshSelection();
+                    BuildEnemyDropdown();
+                }
+                PlayerPrefs.Save();
+                UpdatePlayGate();
+            });
         }
 
         private void OnMakeDeck()
@@ -319,7 +346,8 @@ namespace EchoCitadel.UI
 
         /* ---------------- 1.4 «В БОЙ»: гейт + POST /api/match/start ---------------- */
 
-        /// Гейт валидности (решение пользователя: 40 карт, лимиты 4/1 — как deckstore.validateDeckSize).
+        /// Гейт: Constructed — минимум 60 карт; только формат starter — минимум 30;
+        /// верхнего лимита нет, максимум 4 копии, карты своей фракции или Neutral.
         private void UpdatePlayGate()
         {
             if (btnPlay == null) return;
@@ -332,16 +360,9 @@ namespace EchoCitadel.UI
         {
             var problems = new List<string>();
             var deck = SelectedDeck();
-            if (deck == null || _db == null) { problems.Add("колода не найдена"); return problems; }
-            if (deck.Cards.Count != 40) problems.Add($"нужно ровно 40 карт, сейчас {deck.Cards.Count}");
-            foreach (var g in deck.Cards.GroupBy(x => x, StringComparer.Ordinal))
-            {
-                var card = _db.GetCard(g.Key);
-                if (card == null) { problems.Add($"неизвестная карта {g.Key}"); continue; }
-                int cap = card.Rarity == Rarity.Legendary ? 1 : 4;
-                if (g.Count() > cap) problems.Add($"«{card.Name}»: копий {g.Count()}, максимум {cap}");
-            }
-            return problems;
+            if (deck == null || _db == null || _decks == null) { problems.Add("колода не найдена"); return problems; }
+            int minimum = deck.Format == "starter" ? _decks.Meta.StarterDeckSize : _decks.Meta.DeckSize;
+            return _db.ValidateDeck(deck.Cards, minimum, deck.Faction);
         }
 
         private DeckEntry? SelectedDeck()

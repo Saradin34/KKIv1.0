@@ -220,13 +220,15 @@ namespace EchoCitadel.Core
         [JsonPropertyName("name")] public string Name { get; set; } = "";
         [JsonPropertyName("faction")] public Faction Faction { get; set; }
         [JsonPropertyName("cards")] public List<string> Cards { get; set; } = new();
+        [JsonPropertyName("format")] public string? Format { get; set; }
     }
 
     public sealed class DeckFileMeta
     {
-        [JsonPropertyName("deckSize")] public int DeckSize { get; set; } = 40;
-        [JsonPropertyName("copyLimit")] public int CopyLimit { get; set; } = 2;
-        [JsonPropertyName("legendaryCopyLimit")] public int LegendaryCopyLimit { get; set; } = 1;
+        [JsonPropertyName("deckSize")] public int DeckSize { get; set; } = 60;
+        [JsonPropertyName("starterDeckSize")] public int StarterDeckSize { get; set; } = 30;
+        [JsonPropertyName("copyLimit")] public int CopyLimit { get; set; } = 4;
+        [JsonPropertyName("legendaryCopyLimit")] public int LegendaryCopyLimit { get; set; } = 4;
     }
 
     public sealed class DeckFile
@@ -393,7 +395,7 @@ namespace EchoCitadel.Core
         public int CardsPlayedThisTurn;
         public int FatigueCounter;
 
-        /// <summary>«Защита героя»: постоянное снижение входящего урона.</summary>
+        /// <summary>Временное снижение входящего урона героя.</summary>
         public int DamageReduction;
 
         /// <summary>Бонус к урону заклинаний от существ и рун с SpellDamage.</summary>
@@ -425,7 +427,7 @@ namespace EchoCitadel.Core
     /// <summary>Параметры партии. Значения по умолчанию — ТЗ п.2.1–2.3.</summary>
     public sealed class GameConfig
     {
-        public int DeckSize = 40;
+        public int DeckSize = 60;
         public int StartingHand = 5;
         public int MaxHand = 10;             // излишек сгорает
         public int HeroHealth = 30;
@@ -532,6 +534,8 @@ namespace EchoCitadel.Core
         public int HeroDamage;
         public int DefenderDamage;
         public int AttackerDamage;
+        public bool Lifesteal;
+        public int LifestealAmount;
 
         public int AttackerHpAfter;
         public int DefenderHpAfter;

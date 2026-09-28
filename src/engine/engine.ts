@@ -220,7 +220,7 @@ export class GameEngine {
 
   /* ----------------------------- УРОН / ЛЕЧЕНИЕ ---------------------------- */
 
-  damageHero(side: Side, amount: number, opts: { source?: string; ignoreReduction?: boolean; lifestealFor?: Side; sourceCardId?: string } = {}): number {
+  damageHero(side: Side, amount: number, opts: { source?: string; ignoreReduction?: boolean; lifestealFor?: Side; sourceCardId?: string; fromSpell?: boolean } = {}): number {
     if (amount <= 0 || this.result !== GameResult.Ongoing) return 0;
     const pl = this.p(side);
     let dmg = amount;
@@ -235,7 +235,7 @@ export class GameEngine {
     pl.health -= dmg;
     this.emit({
       type: GameEventType.PlayerDamage, side, value: dmg, sourceCardId: opts.sourceCardId,
-      sourceElement: this.elementOfCard(opts.sourceCardId), fromSpell: !!this.spellSourceCard,
+      sourceElement: this.elementOfCard(opts.sourceCardId), fromSpell: opts.fromSpell ?? !!this.spellSourceCard,
       text: `${pl.name} получает ${dmg} урона${opts.source ? ` (${opts.source})` : ''}`,
     });
     if (opts.lifestealFor !== undefined) {
@@ -351,7 +351,7 @@ export class GameEngine {
 
   allCreatures(): EntityCreature[] { return [...this.players[0].creatures, ...this.players[1].creatures]; }
 
-  summon(side: Side, card: CardData, opts: { fromHand?: boolean } = {}): EntityCreature | null {
+  summon(side: Side, card: CardData, opts: { fromHand?: boolean; targetUid?: number; targetSide?: Side } = {}): EntityCreature | null {
     const pl = this.p(side);
     if (pl.creatures.length >= this.config.maxCreaturesPerSide) {
       this.say(`${pl.name}: поле заполнено (7 существ) — призыв отменён`, side);
@@ -411,27 +411,42 @@ export class GameEngine {
 
     // Боевой клич / эффекты при входе
     if (!c.silenced && card.effects && card.effects.length > 0 && opts.fromHand !== false) {
-      this.runEffects(card.effects, side, { sourceUid: c.uid, sourceCard: card, isBattlecry: true });
+      this.runEffects(card.effects, side, {
+        sourceUid: c.uid, sourceCard: card, isBattlecry: true,
+        targetUid: opts.targetUid, targetSide: opts.targetSide,
+      });
     }
     this.checkDeaths();
     return c;
   }
 
-  /** Постоянные ауры уже стоящих рун применяются к новичку. */
+  /** Постоянные ауры обеих сторон применяются и к новичку на доске. */
   private applyAuraToNewCreature(side: Side, c: EntityCreature): void {
     const pl = this.p(side);
+    const enemy = this.p(side === Side.Player ? Side.Opponent : Side.Player);
+    const matches = (aura: any): boolean => !Array.isArray(aura.matches)
+      || aura.matches.length === 0 || aura.matches.includes(c.element);
+
+    // Дружественные руны усиливают новое существо.
     for (const r of pl.runes) {
       if (r.silenced) continue;
       const aura = (r.data as any).aura as any;
-      if (aura && (aura.op === 'buffAttackHealth' || aura.op === 'buffAttack' || aura.op === 'buffHealth')) {
-        if (!aura.matches?.includes(c.element) || aura.matches.length === 0) {
-          if (aura.op === 'buffAttackHealth') { c.attack += aura.atk ?? 0; c.health += aura.hp ?? 0; c.maxHealth += aura.hp ?? 0; }
-          if (aura.op === 'buffAttack') { c.attack += aura.value ?? 0; }
-          if (aura.op === 'buffHealth') { c.health += aura.value ?? 0; c.maxHealth += aura.value ?? 0; }
-        }
+      if (!aura || !matches(aura)) continue;
+      if (aura.op === 'buffAttackHealth') { c.attack += aura.atk ?? 0; c.health += aura.hp ?? 0; c.maxHealth += aura.hp ?? 0; }
+      if (aura.op === 'buffAttack') c.attack += aura.value ?? 0;
+      if (aura.op === 'buffHealth') { c.health += aura.value ?? 0; c.maxHealth += aura.value ?? 0; }
+    }
+
+    // Руны противника с постоянным ослаблением тоже должны захватывать
+    // существ, которые вышли на поле уже после установки руны.
+    for (const r of enemy.runes) {
+      if (r.silenced) continue;
+      const aura = (r.data as any).aura as any;
+      if (aura?.op === 'debuffAttackEnemy' && matches(aura)) {
+        c.attack = Math.max(0, c.attack - (aura.value ?? 0));
       }
     }
-    // Пассивная аура существ с SpellDamage уже учтена в spellDamageOf()
+    // Пассивная аура существ с SpellDamage уже учтена в spellDamageOf().
   }
 
   damageCreature(c: EntityCreature, amount: number, opts: { source?: string; pierceShield?: boolean; fromSpell?: boolean; sourceCardId?: string } = {}): number {
@@ -540,10 +555,17 @@ export class GameEngine {
     if (s.type === StatusType.Silence) {
       c.silenced = true;
       c.statuses = c.statuses.filter(x => x.type === StatusType.Silence);
+      c.frozen = false;
       c.keywords = [];
       this.emit({ type: GameEventType.CreatureSilenced, uid: c.uid, side: c.owner, cardName: c.name, text: `«${c.name}» под немотой` });
     }
-    this.emit({ type: GameEventType.StatusApplied, uid: c.uid, side: c.owner, cardName: c.name, value: s.value, text: `«${c.name}»: ${statusRu(s.type)}${s.value > 1 ? ` (${s.value})` : ''}` });
+    const activeStatus = c.statuses.find(x => x.type === s.type);
+    this.emit({
+      type: GameEventType.StatusApplied, uid: c.uid, side: c.owner, cardName: c.name,
+      value: activeStatus?.value ?? s.value,
+      data: { status: s.type, turnsLeft: activeStatus?.turnsLeft ?? s.turnsLeft },
+      text: `«${c.name}»: ${statusRu(s.type)}${(activeStatus?.value ?? s.value) > 1 ? ` (${activeStatus?.value ?? s.value})` : ''}`,
+    });
   }
 
   removeStatus(c: EntityCreature, s: StatusInstance): void {
@@ -671,7 +693,7 @@ export class GameEngine {
       if (pl.runes.length >= limit) return { ok: false, reason: `Максимум рун: ${limit}`, card };
       if (pl.runes.some(r => r.cardId === card.id)) return { ok: false, reason: 'Эта руна уже установлена (уникальна)', card };
     }
-    const needsTarget = this.needsTarget(side, card);
+    const needsTarget = this.targetRequiresChoice(card.target);
     if (needsTarget && !this.hasValidTarget(side, card)) return { ok: false, reason: 'Нет допустимой цели', card };
     return { ok: true, card, needsTarget };
   }
@@ -690,9 +712,14 @@ export class GameEngine {
     return true;
   }
 
+  private targetRequiresChoice(target: TargetKind): boolean {
+    return target === TargetKind.EnemyCreature || target === TargetKind.FriendlyCreature
+      || target === TargetKind.AnyCreature || target === TargetKind.EnemyHero
+      || target === TargetKind.FriendlyHero || target === TargetKind.AnyHero;
+  }
+
   needsTarget(side: Side, card: CardData): boolean {
-    if (card.target === TargetKind.None) return false;
-    return this.hasValidTarget(side, card);
+    return this.targetRequiresChoice(card.target) && this.hasValidTarget(side, card);
   }
 
   hasValidTarget(side: Side, card: CardData): boolean {
@@ -725,13 +752,20 @@ export class GameEngine {
     const card = check.card;
     const pl = this.p(side);
 
-    // Ритуалы и заклинания с обязательной целью: фиксируем цель
+    // Цель всегда должна быть выбрана из актуального списка. Не подменяем
+    // ошибочный/устаревший выбор «первой попавшейся» целью.
     if (check.needsTarget) {
       const valid = this.validTargets(side, card);
-      let chosen = valid.find(v => v.uid === targetUid && v.side === targetSide);
-      if (!chosen) chosen = valid.find(v => v.uid === targetUid);
-      if (!chosen) chosen = valid[0];
-      targetUid = chosen.uid; targetSide = chosen.side as Side;
+      const chosen = valid.find(v => v.uid === targetUid
+        && (targetSide === undefined || v.side === targetSide))
+        ?? (targetUid === undefined && targetSide !== undefined
+          ? valid.find(v => v.uid === undefined && v.side === targetSide) : undefined);
+      if (!chosen) {
+        this.say('Нужно выбрать допустимую цель', side);
+        return false;
+      }
+      targetUid = chosen.uid;
+      targetSide = chosen.side as Side;
     }
 
     pl.hand.splice(handIndex, 1);
@@ -742,7 +776,7 @@ export class GameEngine {
 
     switch (card.type) {
       case CardType.Creature:
-        this.summon(side, card, { fromHand: true });
+        this.summon(side, card, { fromHand: true, targetUid, targetSide });
         break;
       case CardType.Rune:
         this.playRune(side, card);
@@ -1074,17 +1108,25 @@ export class GameEngine {
     this.setPhase(Phase.Combat);
   }
 
-  finishMainPhase(): void {
+  finishMainPhase(): void | Promise<void> {
     if (this.phase === Phase.Main) this.setPhase(Phase.Combat);
     if (this.phase !== Phase.Combat || this.result !== GameResult.Ongoing) return;
     this.doCombatPhase();
-    // Даем контроллеру/UI отрисовать бой по шагам (движок уже всё посчитал).
-    this.runCombatAnimations();
+    // Правила боя разрешаются синхронно, но фаза End/передача приоритета ждёт
+    // очередь VFX: иначе число HP/ход ИИ перескакивали анимацию удара.
+    const animation = this.runCombatAnimations();
+    if (animation) return animation.then(
+      () => this.completeMainPhase(),
+      err => { this.completeMainPhase(); throw err; },
+    );
+    this.completeMainPhase();
+  }
+
+  private completeMainPhase(): void {
     if (this.result !== GameResult.Ongoing) return;
     this.setPhase(Phase.End);
     this.doEndPhase();
     if (this.result !== GameResult.Ongoing) return;
-    // Передача хода
     this.emit({ type: GameEventType.TurnEnded, side: this.activeSide, turn: this.turn });
     this.activeSide = this.opponentSide;
     this.emit({ type: GameEventType.TurnStarted, side: this.activeSide, turn: this.turn + 1 });
@@ -1102,6 +1144,7 @@ export class GameEngine {
     defenderUid?: number; defenderName?: string; hitHero: boolean;
     attackerBefore: { hp: number }; defenderBefore?: { hp: number };
     heroDamage: number; defenderDamage: number; attackerDamage: number;
+    lifesteal: boolean; lifestealAmount: number;
     attackerAfter: { hp: number }; defenderAfter?: { hp: number };
   }[] = [];
   /**
@@ -1110,16 +1153,15 @@ export class GameEngine {
    * а UI лишь показывает queue последовательно. В headless-симуляциях хук не задан.
    */
   onBeforeCombatEnd: ((queue: GameEngine['attackQueue']) => Promise<void> | void) | null = null;
-  private runCombatAnimations(): void {
-    if (!this.onBeforeCombatEnd) return;
+  private runCombatAnimations(): Promise<void> | null {
+    if (!this.onBeforeCombatEnd) return null;
     const q = this.attackQueue;
     this.attackQueue = [];
-    let r: unknown;
-    try { r = this.onBeforeCombatEnd(q); } catch (err) { r = Promise.reject(err); }
-    if (r instanceof Promise) {
-      this.animating = true;
-      r.then(() => { this.animating = false; }, () => { this.animating = false; });
-    }
+    this.animating = true;
+    let result: Promise<void>;
+    try { result = Promise.resolve(this.onBeforeCombatEnd(q)); }
+    catch (err) { result = Promise.reject(err); }
+    return result.finally(() => { this.animating = false; });
   }
   /** True, пока UI проигрывает анимации боя (контроллеры могут ждать этого флага). */
   animating = false;
@@ -1189,6 +1231,7 @@ export class GameEngine {
       attackerBefore: { hp: attacker.health },
       defenderBefore: defender ? { hp: defender.health } : undefined,
       heroDamage: 0, defenderDamage: 0, attackerDamage: 0,
+      lifesteal: !attacker.silenced && attacker.keywords.includes(Keyword.Lifesteal), lifestealAmount: 0,
       attackerAfter: { hp: 0 }, defenderAfter: defender ? { hp: 0 } : undefined,
     };
     if (attacker.attack <= 0) return;
@@ -1207,7 +1250,12 @@ export class GameEngine {
       const counter = defender.attack;
       const defHpBefore = defender.health;
       const dealt = this.damageCreature(defender, attacker.attack, { source: attacker.name, sourceCardId: attacker.cardId });
-      if (dealt > 0 && lifesteal) this.healHero(ownerSide, dealt, { source: 'Вампиризм' });
+      const dealtToCreature = Math.min(dealt, Math.max(0, defHpBefore));
+      if (dealtToCreature > 0 && lifesteal) {
+        const hpBeforeHeal = this.p(ownerSide).health;
+        this.healHero(ownerSide, dealtToCreature, { source: 'Вампиризм' });
+        rec.lifestealAmount += Math.max(0, this.p(ownerSide).health - hpBeforeHeal);
+      }
       // v2.12.2: Ядовитый / Ледяное касание — доп. статусы при успешном уроне
       if (dealt > 0 && !attacker.silenced && defender.health > 0) {
         if (attacker.keywords.includes(Keyword.Poisonous)) {
@@ -1230,10 +1278,12 @@ export class GameEngine {
         const excess = attacker.attack - Math.min(dealt, defHpBefore);
         if (excess > 0) {
           const hero = this.p(defender.owner);
+          const hpBeforeHeal = this.p(ownerSide).health;
           const hd = this.damageHero(hero.side, excess, {
             source: `${attacker.name} (Прорыв)`, sourceCardId: attacker.cardId,
             lifestealFor: lifesteal ? ownerSide : undefined,
           });
+          if (lifesteal) rec.lifestealAmount += Math.max(0, this.p(ownerSide).health - hpBeforeHeal);
           rec.heroDamage = hd;
           rec.hitHero = hd > 0;
         }
@@ -1249,7 +1299,9 @@ export class GameEngine {
         type: GameEventType.CreatureAttacks, uid: attacker.uid, side: ownerSide, cardName: attacker.name,
         value: dmg, text: `«${attacker.name}» атакует героя ${enemyHero.name}`,
       });
+      const hpBeforeHeal = this.p(ownerSide).health;
       const dealt = this.damageHero(enemyHero.side, dmg, { source: attacker.name, sourceCardId: attacker.cardId, lifestealFor: lifesteal ? ownerSide : undefined });
+      if (lifesteal) rec.lifestealAmount = Math.max(0, this.p(ownerSide).health - hpBeforeHeal);
       // Прорыв не нужен при прямой атаке героя; урон уже нанесён
       rec.heroDamage = dealt;
       rec.attackerAfter = { hp: Math.max(0, attacker.health) };
@@ -1321,7 +1373,8 @@ export class GameEngine {
           s.turnsLeft--;
           if (s.turnsLeft <= 0) {
             this.removeStatus(c, s);
-            this.emit({ type: GameEventType.StatusExpired, uid: c.uid, side, cardName: c.name, text: `«${c.name}»: ${statusRu(s.type)} рассеивается` });
+            this.emit({ type: GameEventType.StatusExpired, uid: c.uid, side, cardName: c.name,
+              data: { status: s.type }, text: `«${c.name}»: ${statusRu(s.type)} рассеивается` });
           }
         }
       }
@@ -1345,8 +1398,13 @@ export class GameEngine {
       }
     }
 
-    // Сброс временных модификаторов героя
-    pl.incomingDamageReductionTurns = 0;
+    // Временная защита героя держится до конца следующего хода противника.
+    // Таймер уменьшается на конце чужого хода, а не сразу после розыгрыша.
+    const guarded = this.p(side === Side.Player ? Side.Opponent : Side.Player);
+    if (guarded.incomingDamageReductionTurns > 0) {
+      guarded.incomingDamageReductionTurns--;
+      if (guarded.incomingDamageReductionTurns === 0) guarded.damageReduction = 0;
+    }
 
     this.checkDeaths();
 
@@ -1410,19 +1468,20 @@ export class GameEngine {
         case 'damage': {
           const base = eff.value ?? 0;
           const amt = isSpellDamage ? base + this.spellDamageOf(side, ctx.sourceCard?.element ?? Element.None, srcCost) : base;
-          const t = this.resolveTarget(side, eff.to, eff.filter, ctx);
-          if (amt <= 0) break;
+          const t = this.resolveTarget(side, eff.to, eff.filter, { ...ctx, sourceCard: ctx.sourceCard });
+          if (amt <= 0 || t.invalid) break;
           if (t.creatures.length) for (const c of t.creatures) this.damageCreature(c, amt, { source: ctx.sourceCard?.name, fromSpell: isSpellDamage, sourceCardId: ctx.sourceCard?.id });
-          else if (t.heroSide !== undefined) this.damageHero(t.heroSide, amt, { source: ctx.sourceCard?.name, sourceCardId: ctx.sourceCard?.id });
-          else this.damageHero(en.side, amt, { source: ctx.sourceCard?.name, sourceCardId: ctx.sourceCard?.id });
+          else if (t.heroSide !== undefined) this.damageHero(t.heroSide, amt, { source: ctx.sourceCard?.name, sourceCardId: ctx.sourceCard?.id, fromSpell: isSpellDamage });
+          else if (t.allowHeroFallback) this.damageHero(en.side, amt, { source: ctx.sourceCard?.name, sourceCardId: ctx.sourceCard?.id, fromSpell: isSpellDamage });
           break;
         }
         case 'heal': {
-          const t = this.resolveTarget(side, eff.to, eff.filter, ctx);
+          const t = this.resolveTarget(side, eff.to, eff.filter, { ...ctx, sourceCard: ctx.sourceCard });
           const amt = eff.value ?? 0;
+          if (t.invalid) break;
           if (t.creatures.length) for (const c of t.creatures) this.healCreature(c, amt, ctx.sourceCard?.id);
           else if (t.heroSide !== undefined) this.healHero(t.heroSide, amt, { source: ctx.sourceCard?.name, sourceCardId: ctx.sourceCard?.id });
-          else this.healHero(side, amt, { source: ctx.sourceCard?.name, sourceCardId: ctx.sourceCard?.id });
+          else if (t.allowHeroFallback) this.healHero(side, amt, { source: ctx.sourceCard?.name, sourceCardId: ctx.sourceCard?.id });
           break;
         }
         case 'draw': for (let k = 0; k < (eff.value ?? 1); k++) this.draw(side, { source: ctx.sourceCard?.name }); break;
@@ -1516,7 +1575,15 @@ export class GameEngine {
           break;
         }
         case 'gainMana': me.mana = Math.min(this.config.maxMana, me.mana + (eff.value ?? 1)); this.emit({ type: GameEventType.ManaChanged, side, value: me.mana }); break;
-        case 'gainMaxMana': me.maxMana = Math.min(this.config.maxMana, me.maxMana + (eff.value ?? 1)); me.mana += (eff.value ?? 1); break;
+        case 'gainMaxMana': {
+          const beforeMax = me.maxMana;
+          me.maxMana = Math.min(this.config.maxMana, me.maxMana + (eff.value ?? 1));
+          const gained = me.maxMana - beforeMax;
+          me.mana = Math.min(this.config.maxMana, me.mana + gained);
+          this.emit({ type: GameEventType.ManaChanged, side, value: me.mana,
+            data: { max: Math.min(this.config.maxMana, me.maxMana + me.bonusMana) } });
+          break;
+        }
         case 'gainEcho': me.echoPoints = Math.min(this.config.echoPointsMax, me.echoPoints + (eff.value ?? 1)); this.emit({ type: GameEventType.EchoGained, side, text: `${me.name} получает Эхо-очко` }); break;
         case 'summonToken': {
           const token = (eff as any).token as CardData | undefined;
@@ -1544,20 +1611,30 @@ export class GameEngine {
         }
         case 'damageAllFriendlyCreatures': {
           const amt = (eff.value ?? 0) + (isSpellDamage ? this.spellDamageOf(side, ctx.sourceCard?.element ?? Element.None, srcCost) : 0);
-          for (const c of [...me.creatures]) this.damageCreature(c, amt, { source: ctx.sourceCard?.name, sourceCardId: ctx.sourceCard?.id });
+          for (const c of [...me.creatures]) this.damageCreature(c, amt, { source: ctx.sourceCard?.name, fromSpell: isSpellDamage, sourceCardId: ctx.sourceCard?.id });
           break;
         }
         case 'damageAllCreatures': {
           const amt = (eff.value ?? 0) + (isSpellDamage ? this.spellDamageOf(side, ctx.sourceCard?.element ?? Element.None, srcCost) : 0);
-          for (const c of [...this.allCreatures()]) this.damageCreature(c, amt, { source: ctx.sourceCard?.name, sourceCardId: ctx.sourceCard?.id });
+          for (const c of [...this.allCreatures()]) this.damageCreature(c, amt, { source: ctx.sourceCard?.name, fromSpell: isSpellDamage, sourceCardId: ctx.sourceCard?.id });
           break;
         }
         case 'healAllFriendlyCreatures': for (const c of me.creatures) this.healCreature(c, eff.value ?? 1, ctx.sourceCard?.id); break;
         case 'freezeAllEnemies': for (const c of en.creatures) this.addStatus(c, { type: StatusType.Freeze, value: 1, turnsLeft: eff.value ?? 1 }); break;
         case 'burnAllEnemies': for (const c of en.creatures) this.addStatus(c, { type: StatusType.Burn, value: eff.statusValue ?? 1, turnsLeft: eff.value ?? 2 }); break;
         case 'shieldAllFriendlies': for (const c of me.creatures) this.addStatus(c, { type: StatusType.Shield, value: 1, turnsLeft: -1 }); break;
-        case 'damageHeroes': this.damageHero(en.side, eff.value ?? 1, { source: ctx.sourceCard?.name }); this.damageHero(side, eff.value ?? 1, { source: ctx.sourceCard?.name }); break;
-        case 'reduceIncomingDamage': me.damageReduction += eff.value ?? 1; me.incomingDamageReductionTurns = eff.value ?? 1; break;
+        case 'damageHeroes': {
+          const base = eff.value ?? 1;
+          const amt = base + (isSpellDamage ? this.spellDamageOf(side, ctx.sourceCard?.element ?? Element.None, srcCost) : 0);
+          const opts = { source: ctx.sourceCard?.name, sourceCardId: ctx.sourceCard?.id, fromSpell: isSpellDamage };
+          this.damageHero(en.side, amt, opts); this.damageHero(side, amt, opts);
+          break;
+        }
+        case 'reduceIncomingDamage': {
+          me.damageReduction += eff.value ?? 1;
+          me.incomingDamageReductionTurns = Math.max(me.incomingDamageReductionTurns, 1);
+          break;
+        }
         case 'increaseSpellDamage': me.spellDamageBonus += eff.value ?? 1; break;
         case 'copyLastSpell': {
           if (me.lastSpellCast) {
@@ -1576,18 +1653,44 @@ export class GameEngine {
 
   /** Резолв цели эффекта с учётом фильтра (авто-выбор, если цель не задана игроком). */
   private resolveTarget(side: Side, to: TargetKind | undefined, filter: EffectFilter | undefined,
-    ctx: { targetUid?: number; targetSide?: Side }): { creatures: EntityCreature[]; heroSide?: Side } {
+    ctx: { targetUid?: number; targetSide?: Side; sourceCard?: CardData }): {
+      creatures: EntityCreature[]; heroSide?: Side; invalid?: boolean; allowHeroFallback?: boolean;
+    } {
     const me = this.p(side);
     const en = this.p(side === Side.Player ? Side.Opponent : Side.Player);
-    const kind = to ?? TargetKind.None;
+    // Если отдельный эффект не уточнил цель, наследуем цель карты. Это важно для
+    // AnyCreature/AnyHero и для составных заклинаний с несколькими разными целями.
+    const cardTarget = ctx.sourceCard?.target ?? TargetKind.None;
+    const kind = to && to !== TargetKind.None ? to : cardTarget;
+    const creatureKind = (k: TargetKind): boolean =>
+      k === TargetKind.EnemyCreature || k === TargetKind.FriendlyCreature || k === TargetKind.AnyCreature;
+    const basicFilterMatches = (c: EntityCreature): boolean => {
+      if (!filter) return true;
+      if (filter.attackAtLeast !== undefined && c.attack < filter.attackAtLeast) return false;
+      if (filter.attackAtMost !== undefined && c.attack > filter.attackAtMost) return false;
+      if (filter.costAtLeast !== undefined && c.cost < filter.costAtLeast) return false;
+      if (filter.isLegendary !== undefined && (c.data.rarity === Rarity.Legendary) !== filter.isLegendary) return false;
+      if (filter.notSilenced && c.silenced) return false;
+      return true;
+    };
 
-    // Явно указанная игроком цель имеет приоритет над фильтром
-    if (ctx.targetUid !== undefined) {
+    // Выбранная цель применяется только к совместимому одиночному эффекту.
+    // Массовые и случайные эффекты остаются массовыми/случайными; цели героя не
+    // перехватываются UID существа. Если выбранная цель исчезла в стеке/ритуале,
+    // эффект фizzle-ится вместо случайной переадресации или урона герою.
+    if (ctx.targetUid !== undefined && !filter?.random && creatureKind(kind)) {
       const c = this.uidMap.get(ctx.targetUid);
-      if (c) return { creatures: [c] };
+      const sideMatches = c && (kind === TargetKind.AnyCreature
+        || (kind === TargetKind.FriendlyCreature && c.owner === me.side)
+        || (kind === TargetKind.EnemyCreature && c.owner === en.side));
+      if (!c || !sideMatches || !basicFilterMatches(c)) return { creatures: [], invalid: true };
+      return { creatures: [c] };
     }
 
+    const allowHeroFallback = kind === TargetKind.None
+      && ctx.targetUid === undefined && ctx.targetSide === undefined;
     switch (kind) {
+      case TargetKind.None: return { creatures: [], allowHeroFallback };
       case TargetKind.EnemyCreature: return { creatures: this.filterCreatures(en.creatures, filter) };
       case TargetKind.FriendlyCreature: return { creatures: this.filterCreatures(me.creatures, filter) };
       case TargetKind.AnyCreature: return { creatures: this.filterCreatures([...me.creatures, ...en.creatures], filter) };
@@ -1596,8 +1699,8 @@ export class GameEngine {
       case TargetKind.AllCreatures: return { creatures: [...this.allCreatures()] };
       case TargetKind.EnemyHero: return { creatures: [], heroSide: en.side };
       case TargetKind.FriendlyHero: return { creatures: [], heroSide: me.side };
-      case TargetKind.AnyHero: return { creatures: [], heroSide: en.side };
-      default: return { creatures: [] };
+      case TargetKind.AnyHero: return { creatures: [], heroSide: ctx.targetSide === me.side ? me.side : en.side };
+      default: return { creatures: [], allowHeroFallback: false };
     }
   }
 

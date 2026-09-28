@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Эхо-Цитадель — прототип</title>
-<link rel="stylesheet" href="./prototype.css?v=2.28.0">
+<link rel="stylesheet" href="./prototype.css?v=2.48.0">
 <style>
 /* =====================================================================
    ЭХО-ЦИТАДЕЛЬ — стили прототипа (ТЗ раздел 4 и 6.1)
@@ -81,8 +81,10 @@ button{font-family:inherit;color:inherit;cursor:pointer}
 @media (max-width:520px){.menuCol{grid-template-columns:1fr}}
 .menuCol label{font-size:.68rem;letter-spacing:.16em;text-transform:uppercase;color:var(--muted)}
 select{
-  background:#14161f;color:var(--text);border:1px solid var(--line);padding:.5rem;border-radius:3px;font-family:inherit;font-size:.84rem;
+  color-scheme:dark;background:#14161f;color:#edf1fb;border:1px solid var(--line);padding:.5rem;border-radius:3px;font-family:inherit;font-size:.84rem;
 }
+select option,select optgroup{background-color:#111722;color:#edf1fb}
+select option:checked{background-color:#2c4059;color:#fff5d9}
 .hint{font-size:.72rem;color:var(--muted);max-width:620px;text-align:center;line-height:1.6}
 .hint b{color:var(--gold-hi)}
 
@@ -225,14 +227,14 @@ body.fxLite #backdrop .bgArt{animation:none}
 #hand .card{width:var(--hand-w);height:calc(var(--hand-w) * 1.40625)}
 #hand{position:relative;display:flex;justify-content:center;align-items:flex-end;height:100%;width:100%}
 .card{
-  position:relative;width:var(--card-w,190px);height:var(--card-h,266px);flex:0 0 auto;border-radius:7px;overflow:hidden;
-  background:linear-gradient(180deg,#2c3350,#171b2b);
-  border:1px solid #a8853e;
+  position:relative;width:var(--card-w,190px);height:var(--card-h,266px);flex:0 0 auto;border-radius:10px;overflow:hidden;
+  background:transparent;
+  border:0;
   box-shadow:0 4px 14px rgba(0,0,0,.65);
   transition:transform .18s cubic-bezier(.2,.8,.3,1), box-shadow .18s, margin .18s;
   transform-origin:50% 130%;cursor:pointer;
 }
-.card:hover{z-index:40 !important;box-shadow:0 0 26px rgba(216,180,90,.5),0 12px 26px rgba(0,0,0,.7)}
+.card:hover{z-index:40 !important;box-shadow:0 8px 18px rgba(0,0,0,.72)}
 .card.unplayable{filter:grayscale(.5) brightness(.86)}
 .card.unplayable:hover{box-shadow:0 4px 14px rgba(0,0,0,.65)}
 .card.dragging{opacity:.35;transition:none}
@@ -244,9 +246,13 @@ body.fxLite #backdrop .bgArt{animation:none}
 .card .chead{position:absolute;top:0;left:0;right:0;z-index:4;display:flex;align-items:flex-start;gap:.3rem;
   padding:.3rem .38rem .55rem;background:linear-gradient(180deg,rgba(4,5,9,.86),rgba(4,5,9,.40) 62%,transparent)}
 .card .cost{
-  width:1.55em;height:1.55em;flex:0 0 auto;border-radius:50%;display:flex;align-items:center;justify-content:center;
-  font-size:1.08rem;font-weight:700;color:#dcecff;background:radial-gradient(circle at 34% 30%,#5b9ae8,#1b3f74 70%,#0d1f3d);
-  border:1px solid #9ec9ff;box-shadow:0 0 9px rgba(80,150,240,.6);font-variant-numeric:tabular-nums}
+  position:relative;isolation:isolate;width:1.7em;height:1.8em;flex:0 0 auto;display:flex;align-items:center;justify-content:center;
+  clip-path:polygon(18% 0%,82% 0%,100% 26%,91% 70%,50% 100%,9% 70%,0% 26%);
+  font-size:1.08rem;font-weight:700;color:#f7fdff;text-align:center;font-variant-numeric:tabular-nums;
+  background:linear-gradient(145deg,rgba(255,255,255,.46),rgba(255,255,255,.12) 22%,transparent 42%),
+    conic-gradient(from 205deg at 50% 43%,#eafcff,#83d2ff 30deg,#318be0 67deg,#14509e 112deg,#0b2d70 155deg,#1e73c6 202deg,#9fe8ff 245deg,#3c91dc 286deg,#102f70 326deg,#eafcff);
+  border:1.5px solid #d8f6ff;border-radius:0;filter:drop-shadow(0 2px 4px rgba(0,0,0,.86)) drop-shadow(0 0 6px rgba(55,157,255,.44));
+  text-shadow:0 1px 2px #031331,0 0 7px rgba(2,24,72,.9)}
 .card .ctitle{font-size:.82rem;line-height:1.16;color:var(--gold-hi);text-align:center;flex:1;
   text-shadow:0 1px 2px #000;padding-top:.16em;overflow:hidden;letter-spacing:.01em}
 .card .ctype{position:absolute;left:0;right:0;top:70%;z-index:3;font-size:.6rem;color:#c8cddc;text-align:center;
@@ -261,11 +267,8 @@ body.fxLite #backdrop .bgArt{animation:none}
 .card .cart::after{content:'';position:absolute;inset:0;pointer-events:none;
   background:radial-gradient(115% 92% at 50% 42%,transparent 58%,rgba(4,5,9,.45) 100%),
              linear-gradient(180deg,rgba(4,5,9,.38),transparent 16%,transparent 80%,rgba(4,5,9,.52))}
-.card.r-rare{border-color:#4f9fe0;box-shadow:0 0 0 1px rgba(79,159,224,.35),0 4px 16px rgba(30,90,160,.28)}
-.card.r-epic{border-color:#b06cf0;box-shadow:0 0 0 1px rgba(176,108,240,.4),0 4px 18px rgba(120,60,190,.32)}
-.card.r-legendary{border-color:#f5a623;box-shadow:0 0 0 1px rgba(245,166,35,.45),0 4px 20px rgba(200,130,20,.36)}
-.card.r-legendary .holo{opacity:.3;background-size:200% 100%;animation:holoCycle 7s linear infinite}
-.card.r-legendary:hover .holo{opacity:1}
+.card.r-rare,.card.r-epic,.card.r-legendary{border-color:transparent;box-shadow:0 4px 14px rgba(0,0,0,.65)}
+.card.r-legendary .holo{opacity:0;background-size:200% 100%;animation:none}
 @keyframes holoCycle{0%{background-position:0% 0}100%{background-position:200% 0}}
 .card.t-spell .ctype{background:linear-gradient(180deg,rgba(79,159,224,.30),rgba(9,11,17,.94) 46%);border-top-color:rgba(120,190,255,.55)}
 .card.t-rune .ctype{background:linear-gradient(180deg,rgba(176,108,240,.30),rgba(9,11,17,.94) 46%);border-top-color:rgba(200,150,255,.55)}
@@ -633,10 +636,10 @@ body,button,select,input,textarea{font-family:'Alegreya',Georgia,'Times New Roma
 .sigFall{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
   font-family:'Philosopher',serif;font-size:2.3em;color:var(--gold-hi);
   background:radial-gradient(circle at 38% 30%,#4a3b22,#170f04 80%)}
-/* рамка карты: золотой кант с фаской, как в MTG, но в нашей палитре */
-.card{border:3px solid #b98f3e;border-radius:10px;
-  box-shadow:inset 0 0 0 2px rgba(12,8,2,.75), inset 0 0 0 4px rgba(255,222,150,.22), 0 8px 22px rgba(0,0,0,.62);
-  background:linear-gradient(180deg,#332614,#1b1206 60%,#241a0b)}
+/* Обычная карта: прозрачная внешняя кромка, внутреннюю рамку рисует .innerframe. */
+.card{border:0;border-radius:10px;
+  box-shadow:0 4px 14px rgba(0,0,0,.66);
+  background:transparent}
 .card .chead{background:linear-gradient(180deg,rgba(72,52,20,.92),rgba(36,26,10,.92));
   border-bottom:1px solid #8a6f2f;border-radius:6px 6px 0 0}
 .card .ctitle{font-family:'Philosopher',serif;color:#ffe9b0;letter-spacing:.02em}
@@ -716,14 +719,22 @@ body,button,select,input,textarea{font-family:'Alegreya',Georgia,'Times New Roma
   .medalWrap{width:112px}
 }
 /* =====================================================================
-   MTG-ДЕТАЛИ: стоимость-кристалл справа, P/T пластиной, бустер-панель
+   MTG-ДЕТАЛИ: стоимость-сапфир слева, P/T пластиной, бустер-панель
    ===================================================================== */
 .card .chead{display:flex;align-items:center;gap:.4rem}
 .card .ctitle{flex:1;min-width:0}
-.card .cost{flex:0 0 auto;width:27px;height:27px;border-radius:50%;display:flex;align-items:center;
-  justify-content:center;font-family:'Philosopher',serif;font-weight:800;font-size:1.02rem;color:#eaf4ff;
-  background:radial-gradient(circle at 34% 30%,#9cc4ff,#2a4a8a 68%,#16295a);border:2px solid #caa64e;
-  box-shadow:0 0 9px rgba(110,160,255,.6), inset 0 1px 2px rgba(255,255,255,.5);text-shadow:0 1px 2px #001}
+.card .cost{position:relative;isolation:isolate;flex:0 0 auto;width:27px;height:29px;border-radius:0;clip-path:polygon(18% 0%,82% 0%,100% 26%,91% 70%,50% 100%,9% 70%,0% 26%);display:flex;align-items:center;
+  justify-content:center;font-family:'Philosopher',serif;font-weight:800;font-size:1.02rem;color:#f7fdff;text-align:center;
+  background:linear-gradient(145deg,rgba(255,255,255,.46),rgba(255,255,255,.12) 22%,transparent 42%),
+    conic-gradient(from 205deg at 50% 43%,#eafcff,#83d2ff 30deg,#318be0 67deg,#14509e 112deg,#0b2d70 155deg,#1e73c6 202deg,#9fe8ff 245deg,#3c91dc 286deg,#102f70 326deg,#eafcff);
+  border:1.5px solid #d8f6ff;filter:drop-shadow(0 2px 4px rgba(0,0,0,.86)) drop-shadow(0 0 6px rgba(55,157,255,.44));
+  text-shadow:0 1px 2px #031331,0 0 7px rgba(2,24,72,.9)}
+.card .cost::before{content:"";position:absolute;inset:2px;z-index:-1;pointer-events:none;
+  clip-path:polygon(18% 0%,82% 0%,100% 26%,91% 70%,50% 100%,9% 70%,0% 26%);
+  background:linear-gradient(155deg,rgba(255,255,255,.38),rgba(255,255,255,.06) 38%,transparent 64%,rgba(2,18,58,.18))}
+.card .cost::after{content:"";position:absolute;inset:3px;pointer-events:none;
+  clip-path:polygon(18% 0%,82% 0%,100% 26%,91% 70%,50% 100%,9% 70%,0% 26%);
+  border:1px solid rgba(224,249,255,.46)}
 /* P/T единой пластиной внизу справа — читается, не срезается */
 .unit .stats{position:absolute;bottom:4px;right:4px;left:auto;gap:0;align-items:center;padding:1px 8px;
   background:linear-gradient(180deg,#4a3814,#241a08);border:1.5px solid #caa64e;border-radius:9px;
@@ -802,11 +813,11 @@ body,button,select,input,textarea{font-family:'Alegreya',Georgia,'Times New Roma
 .card .chead,.card .ctype{background:linear-gradient(180deg,var(--frD1,#3a2c12),var(--frD2,#241a08));color:var(--frS,#ffe9b0)}
 .card .ctitle{color:var(--frS,#ffe9b0)}
 .card .ctext{background:linear-gradient(180deg,var(--frP1,#e9dab6),var(--frP2,#d3bf92));color:#241a08}
-.card .cost{border-color:var(--frB,#caa64e)}
+.card .cost{border-color:#d8f6ff}
 .card .cstats,.unit .stats{border-color:var(--frB,#caa64e)}
 .unit .uname{background:linear-gradient(180deg,var(--frD1,#3a2c12),var(--frD2,#241a08));color:var(--frS,#ffe9b0)}
 .card .artBox{box-shadow:inset 0 0 0 1.5px var(--frB,#b98f3e)}
-.card:hover,.unit:hover{box-shadow:0 0 18px var(--frG,rgba(216,180,90,.35)), 0 8px 24px rgba(0,0,0,.5)}
+.unit:hover{box-shadow:0 0 18px var(--frG,rgba(216,180,90,.35)), 0 8px 24px rgba(0,0,0,.5)}
 .unit.ready{box-shadow:0 0 14px var(--frG,rgba(216,180,90,.4))}
 /* =====================================================================
    ГАРД ВПИСЫВАНИЯ: любое изображение в рамке корректно уменшается до неё
@@ -1381,9 +1392,10 @@ body[data-cb="1"] .card.f-Ethereal .artBox::before,body[data-cb="1"] .unit.f-Eth
 /* ── PATCH v2.12.3: подсказки боя — неатаковавшие подсвечены + пропуск боя ── */
 .unit.ready{box-shadow:0 0 0 2px rgba(255,220,120,.9),0 0 18px rgba(255,220,120,.55),0 0 30px rgba(255,180,60,.22) !important;animation:readyPulse 1.35s ease-in-out infinite}
 @keyframes readyPulse{0%,100%{box-shadow:0 0 0 2px rgba(255,220,120,.85),0 0 14px rgba(255,220,120,.5)}50%{box-shadow:0 0 0 2px rgba(255,220,120,1),0 0 22px rgba(255,220,120,.75),0 0 34px rgba(255,180,60,.3)}}
-.unit.ready::after{content:'⚔';position:absolute;top:-7px;right:-7px;width:20px;height:20px;border-radius:50%;background:linear-gradient(180deg,#ffd87a,#e8921a);border:1px solid #a35c08;color:#2b1600;font-size:.72rem;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 6px rgba(0,0,0,.45);z-index:3}
+.unit.ready::after{content:none;display:none}
+.unit .attackReadyMark{position:absolute;top:-7px;right:-7px;z-index:6;min-width:20px;height:20px;padding:0 5px;border-radius:999px;background:linear-gradient(180deg,#ffd87a,#e8921a);border:1px solid #a35c08;color:#2b1600;font-size:.72rem;line-height:1;display:flex;align-items:center;justify-content:center;white-space:nowrap;box-shadow:0 2px 6px rgba(0,0,0,.45)}
+.unit .attackReadyMark.again{min-width:38px;background:linear-gradient(180deg,#b7edff,#59b6dc);border-color:#317d9c;color:#08202a;font-size:.58rem}
 .unit.tapped{opacity:.92;filter:saturate(.85) brightness(.92)}
-.unit.tapped.ready{display:none} /* атаковавшие не подсвечиваются */
 #btnSkipCombat{border-color:rgba(255,220,120,.28);background:linear-gradient(180deg,rgba(40,34,22,.94),rgba(22,18,12,.98))}
 #btnSkipCombat:hover{border-color:rgba(255,220,120,.5);background:linear-gradient(180deg,rgba(55,46,28,.98),rgba(28,22,14,1));box-shadow:0 0 14px rgba(255,180,60,.18)}
 
@@ -2380,6 +2392,820 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
   #eventsSide{display:none!important}
 }
 
+/* ═══ PATCH v2.28.0: главный хаб — цельная сетка, ясная иерархия и мягкая динамика ═══ */
+#menu{
+  align-items:stretch!important;justify-content:flex-start!important;gap:0!important;
+  overflow-x:hidden!important;overflow-y:auto!important;scrollbar-gutter:stable;
+  padding:calc(var(--ec-topbar-base,52px) + env(safe-area-inset-top,0px)) clamp(12px,2.8vw,44px) calc(12px + env(safe-area-inset-bottom,0px))!important;
+}
+#menu .menuInner.ecHub{
+  width:100%!important;max-width:1560px!important;
+  min-height:calc(100dvh - var(--ec-topbar-base,52px) - env(safe-area-inset-top,0px) - env(safe-area-inset-bottom,0px) - 12px);
+  margin:0 auto!important;padding:clamp(10px,1.5vh,18px) 0 calc(8px + env(safe-area-inset-bottom,0px))!important;
+  gap:clamp(12px,1.35vw,20px)!important;align-items:stretch!important;
+  animation:ecHubArrive .48s cubic-bezier(.2,.65,.3,1) both;
+}
+#menu .ecMain{
+  grid-template-columns:minmax(0,1fr) minmax(300px,344px);
+  gap:clamp(16px,1.8vw,26px);align-items:start;width:100%;margin-top:0!important;
+}
+#menu .ecCards{
+  grid-template-columns:repeat(5,minmax(0,1fr))!important;
+  gap:clamp(10px,1vw,15px);align-items:stretch;min-width:0;
+}
+#menu .ecHub .fcard{
+  border-radius:14px!important;
+  transition:transform .2s ease,box-shadow .2s ease,border-color .2s ease,filter .2s ease;
+}
+#menu .ecHub .fcard:hover{transform:translateY(-4px)}
+#menu .ecHub .fcard.sel{transform:translateY(-4px)}
+#menu .ecHub .fcardArt{max-height:clamp(168px,28vh,252px);isolation:isolate}
+#menu .ecHub .fcardArtPh{
+  opacity:.78;
+  background:radial-gradient(ellipse at 50% 42%,var(--cardGlow,rgba(216,180,90,.22)),transparent 67%),linear-gradient(155deg,rgba(255,255,255,.055),rgba(0,0,0,.36));
+}
+#menu .ecHub .fcardArt::before{opacity:.2}
+#menu .ecHub .fcardBody{padding:.55rem .5rem .25rem}
+#menu .ecHub .fcardSig{display:none!important}
+#menu .ecHub .fcard .fcardStats{margin-top:auto!important;padding:.38rem .55rem .55rem}
+
+#menu .ecChallenge{
+  position:sticky;top:calc(var(--ec-topbar-base,52px) + env(safe-area-inset-top,0px) + 10px)!important;
+  align-self:start;gap:.62rem;padding:1rem;border-radius:16px;
+  background:radial-gradient(ellipse at 100% 0%,rgba(82,113,173,.14),transparent 52%),linear-gradient(155deg,rgba(19,24,39,.97),rgba(8,10,17,.985));
+  border:1px solid rgba(216,180,90,.32);
+  box-shadow:0 20px 42px rgba(0,0,0,.48),inset 0 1px 0 rgba(255,237,180,.08),0 0 0 1px rgba(0,0,0,.35);
+}
+#menu .ecChTitle{
+  text-align:left;font-size:.7rem;letter-spacing:.2em;padding:0 0 .62rem;
+  color:#f3dfac;border-bottom-color:rgba(216,180,90,.24);text-shadow:none;
+}
+#menu .ecChTitle::before{content:"◆";margin-right:.55rem;color:#d8b45a;font-size:.72em;text-shadow:0 0 10px rgba(216,180,90,.5)}
+#menu .ecOpp{
+  padding:.62rem;border:1px solid rgba(255,255,255,.055);border-radius:11px;
+  background:linear-gradient(110deg,rgba(255,255,255,.035),rgba(255,255,255,.012));
+}
+#menu .ecOppAva{border-radius:11px}
+#menu .ecField{gap:.28rem}
+#menu .ecField>span:first-child{letter-spacing:.14em;color:#c3b487}
+#menu .ecField select{border-radius:8px;background:linear-gradient(180deg,#171b29,#0e111a);transition:border-color .16s,box-shadow .16s}
+#menu .ecField select:focus{border-color:rgba(255,216,122,.75);box-shadow:0 0 0 3px rgba(255,216,122,.12)}
+#menu .ecChkWrap{border-radius:9px;padding:.45rem .55rem}
+#menu .ecProgress{border-radius:10px}
+#menu #btnPlay.ecPlay{min-height:56px!important;border-radius:11px!important;transition:transform .18s ease,filter .18s ease,box-shadow .18s ease!important}
+#menu .ecPlayHint:not([hidden]){grid-column:1/-1}
+
+#menu .ecBottomNav{
+  grid-template-columns:repeat(8,minmax(0,1fr))!important;
+  gap:clamp(6px,.8vw,12px);width:100%;margin: auto 0 0!important;padding:8px!important;
+  border:1px solid rgba(216,180,90,.18)!important;border-radius:14px!important;
+  background:linear-gradient(180deg,rgba(17,20,31,.94),rgba(7,9,15,.985));
+  box-shadow:0 12px 30px rgba(0,0,0,.38),inset 0 1px 0 rgba(255,255,255,.035);
+  animation:ecDockArrive .38s ease-out .06s both;
+}
+#menu .ecBottomNav .ecNavBtn{
+  min-width:0;min-height:60px;height:auto;padding:.48rem .28rem .42rem!important;
+  border-radius:9px;font-size:.64rem;letter-spacing:.045em;
+  background:linear-gradient(180deg,rgba(31,34,46,.92),rgba(13,15,23,.98));
+  border-color:rgba(216,180,90,.21);
+  transition:transform .17s ease,border-color .17s ease,box-shadow .17s ease,color .17s ease;
+}
+#menu .ecBottomNav .ecNavBtn:hover{transform:translateY(-2px)}
+#menu .ecBottomNav .ecNavBtn:active{transform:translateY(0)}
+#menu details.hint{max-width:1100px;width:100%;margin:.4rem auto 0!important}
+@keyframes ecHubArrive{from{opacity:0;transform:translateY(9px)}to{opacity:1;transform:translateY(0)}}
+@keyframes ecDockArrive{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:translateY(0)}}
+
+/* Ноутбуки и планшеты: три карточки в ряду, вызов остаётся отдельной колонкой. */
+@media(max-width:1260px) and (min-width:980px){
+  #menu .ecMain{grid-template-columns:minmax(0,1fr) minmax(286px,316px);gap:16px}
+  #menu .ecCards{grid-template-columns:repeat(3,minmax(0,1fr))!important;gap:12px}
+  #menu .ecChallenge{position:static;order:0;display:flex;grid-template-columns:none}
+}
+@media(max-width:979px){
+  #menu .menuInner.ecHub{min-height:auto;gap:12px!important;padding-top:10px!important}
+  #menu .ecMain{grid-template-columns:minmax(0,1fr);gap:14px}
+  #menu .ecCards{grid-template-columns:repeat(3,minmax(0,1fr))!important;gap:12px}
+  #menu .ecChallenge{position:static;top:auto!important;order:0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:14px;row-gap:.58rem}
+  #menu .ecChTitle,#menu .ecOpp,#menu .ecChkWrap,#menu .ecProgress,#menu #btnPlay.ecPlay,#menu .ecPlayHint{grid-column:1/-1}
+  #menu .ecChallenge .ecField{min-width:0}
+}
+@media(max-width:760px){
+  #menu{padding-left:12px!important;padding-right:12px!important}
+  #menu .menuInner.ecHub{gap:10px!important}
+  #menu .ecCards{grid-template-columns:repeat(2,minmax(0,1fr))!important;gap:10px}
+  #menu .ecHub .fcardArt{aspect-ratio:4/3;max-height:136px}
+  #menu .ecHub .fcardBody{padding:.46rem .4rem .18rem}
+  #menu .ecHub .fcard .fname{font-size:.76rem!important}
+  #menu .ecHub .fcard .fclass{font-size:.54rem}
+  #menu .ecHub .fcard .fcardStats span{width:27px;height:27px}
+  #menu .ecBottomNav{grid-template-columns:repeat(4,minmax(0,1fr))!important;margin-top:12px!important}
+  #menu .ecBottomNav .ecNavBtn{min-height:58px}
+  #menu .ecChallenge{gap:.5rem;padding:.8rem}
+}
+@media(max-width:420px){
+  #menu{padding-left:8px!important;padding-right:8px!important}
+  #menu .ecCards{gap:8px}
+  #menu .ecHub .fcardArt{max-height:120px}
+  #menu .ecChallenge{grid-template-columns:minmax(0,1fr);padding:.72rem .65rem}
+  #menu .ecChTitle,#menu .ecOpp,#menu .ecChkWrap,#menu .ecProgress,#menu #btnPlay.ecPlay,#menu .ecPlayHint{grid-column:1}
+}
+@media(max-height:820px) and (min-width:980px){
+  #menu .menuInner.ecHub{padding-top:10px!important}
+  #menu .menuInner.ecHub .ecOrbs{padding-bottom:2px!important}
+  #menu .menuInner.ecHub .ecOrbs .heroChip .orbCore{width:66px;height:66px}
+  #menu .ecHub .fcardArt{max-height:clamp(148px,24vh,196px)}
+  #menu .ecBottomNav{gap:7px;padding:6px!important}
+  #menu .ecBottomNav .ecNavBtn{min-height:56px}
+}
+@media(max-height:520px) and (orientation:landscape){
+  #menu .ecBottomNav{grid-template-columns:repeat(8,minmax(0,1fr))!important}
+  #menu .ecBottomNav .ecNavBtn{min-height:48px;height:48px!important;padding:.22rem .08rem!important;gap:.12rem!important;font-size:.53rem!important;letter-spacing:0!important}
+  #menu .ecBottomNav .ecNavBtn svg{width:18px;height:18px}
+}
+@media(prefers-reduced-motion:reduce){
+  #menu .menuInner.ecHub,#menu .ecBottomNav{animation:none!important}
+  #menu .ecHub .fcard,#menu .ecHub .fcardArtImg,#menu .ecOrbs .heroChip .orbCore,
+  #menu .ecBottomNav .ecNavBtn,#menu #btnPlay.ecPlay,#menu .ecField select{transition:none!important}
+  #menu .ecHub .fcard:hover,#menu .ecHub .fcard.sel,
+  #menu .ecOrbs .heroChip:hover .orbCore,#menu .ecOrbs .heroChip.sel .orbCore,
+  #menu .ecBottomNav .ecNavBtn:hover,#menu #btnPlay.ecPlay:hover{transform:none!important}
+  #menu .ecSpinA,#menu .ecSpinB,#menu .ecProgress.ready .ecChest{animation:none!important}
+}
+
+/* ═══ PATCH v2.29.0: главные карточки фракций — full-art и подпись снизу ═══ */
+#menu #playerFactions .fcard{
+  position:relative!important;height:clamp(226px,34vh,326px)!important;min-height:226px!important;
+  aspect-ratio:auto!important;padding:0!important;overflow:hidden!important;
+  background:#090d16!important;border-radius:14px!important;isolation:isolate;
+}
+#menu #playerFactions .fcard .fcardArt{
+  position:absolute!important;inset:0!important;width:100%!important;height:100%!important;min-height:0!important;
+  max-height:none!important;aspect-ratio:auto!important;flex:none!important;overflow:hidden!important;
+  border:0!important;background:#0a0e18!important;z-index:0;
+}
+#menu #playerFactions .fcard .fcardArtPh{
+  opacity:.34;background:radial-gradient(ellipse at 50% 35%,var(--cardGlow,rgba(216,180,90,.3)),transparent 66%),linear-gradient(160deg,rgba(255,255,255,.06),rgba(0,0,0,.48));
+}
+#menu #playerFactions .fcard .fcardArtPh img{width:42%!important;height:42%!important;opacity:.72!important}
+#menu #playerFactions .fcard .fcardArtImg{
+  z-index:1!important;width:100%!important;height:100%!important;object-fit:cover!important;
+  object-position:center 20%!important;opacity:.98!important;
+}
+#menu #playerFactions .fcard .fcardArtGrad{
+  z-index:2!important;background:linear-gradient(180deg,rgba(4,7,13,.04) 32%,rgba(4,7,13,.12) 49%,rgba(4,7,13,.72) 73%,rgba(4,7,13,.96) 100%)!important;
+}
+#menu #playerFactions .fcard .fcardBody{
+  position:absolute!important;left:0!important;right:0!important;bottom:0!important;z-index:3!important;
+  display:flex!important;flex-direction:column!important;align-items:flex-start!important;justify-content:flex-end!important;
+  gap:.28rem!important;min-height:0!important;padding:2.35rem .78rem .82rem!important;
+  text-align:left!important;background:linear-gradient(180deg,transparent,rgba(4,7,13,.20))!important;
+  border-top:1px solid rgba(255,255,255,.08);pointer-events:none;
+}
+#menu #playerFactions .fcard .fname{
+  width:100%;max-width:100%;font-size:clamp(.86rem,1.02vw,1.08rem)!important;
+  line-height:1.12!important;letter-spacing:.025em!important;text-align:left!important;
+  color:#fff2cf!important;text-shadow:0 2px 8px rgba(0,0,0,.95),0 0 18px rgba(0,0,0,.75)!important;
+  white-space:normal!important;overflow:hidden;text-overflow:ellipsis;
+}
+#menu #playerFactions .fcard .fclass{
+  width:100%;max-width:100%;font-size:.59rem!important;line-height:1.2!important;
+  letter-spacing:.13em!important;text-align:left!important;color:rgba(226,233,246,.86)!important;
+  text-shadow:0 1px 5px rgba(0,0,0,.95);white-space:nowrap!important;overflow:hidden;text-overflow:ellipsis;
+}
+#menu #playerFactions .fcard .fcardFacBadge,
+#menu #playerFactions .fcard .fcardLvl,
+#menu #playerFactions .fcard .fcardSig,
+#menu #playerFactions .fcard .fcardStats,
+#menu #playerFactions .fcard .fcardCheck{display:none!important}
+@media(max-width:760px){
+  #menu #playerFactions .fcard{height:clamp(226px,38vh,290px)!important;min-height:226px!important}
+  #menu #playerFactions .fcard .fcardBody{padding:2.15rem .62rem .7rem!important}
+  #menu #playerFactions .fcard .fname{font-size:clamp(.82rem,3.4vw,.98rem)!important}
+  #menu #playerFactions .fcard .fclass{font-size:.55rem!important;letter-spacing:.1em!important}
+}
+@media(max-width:420px){
+  #menu #playerFactions .fcard{height:226px!important;min-height:226px!important}
+  #menu #playerFactions .fcard .fcardBody{padding:1.9rem .52rem .62rem!important}
+}
+@media(prefers-reduced-motion:reduce){
+  #menu #playerFactions .fcard:hover .fcardArtImg{transform:none!important}
+}
+
+
+
+/* Обычные карты: внутренняя фракционная рамка и прежнее нижнее поле правил.
+   Borderless использует отдельные стили выше и этим блоком не затрагивается. */
+.card:not(.borderless){
+  border:2px solid var(--frB,#b98f3e)!important;outline:0!important;border-radius:10px!important;overflow:hidden!important;
+  background:#0b0d14!important;box-shadow:0 4px 14px rgba(0,0,0,.66)!important;
+}
+.card:not(.borderless) .frame{
+  inset:1px!important;border:1px solid rgba(246,226,163,.24)!important;border-radius:7px!important;
+  pointer-events:none!important;box-shadow:inset 0 0 0 1px rgba(0,0,0,.45)!important;
+}
+.card:not(.borderless) .cart{
+  top:0!important;bottom:auto!important;height:70%!important;border:0!important;border-radius:7px 7px 0 0!important;
+}
+.card:not(.borderless) .cart::after{
+  background:radial-gradient(115% 92% at 50% 42%,transparent 58%,rgba(4,5,9,.35) 100%),
+    linear-gradient(180deg,rgba(4,5,9,.30),transparent 16%,transparent 80%,rgba(4,5,9,.38))!important;
+}
+.card:not(.borderless) .chead{
+  background:linear-gradient(180deg,rgba(8,10,17,.86),rgba(8,10,17,.48))!important;
+  border:0!important;border-radius:5px!important;box-shadow:none!important;
+}
+.card:not(.borderless) .ctitle{
+  color:#fff5d9!important;background:transparent!important;border:0!important;border-radius:0!important;
+  text-shadow:0 1px 3px #000,0 0 8px rgba(0,0,0,.9)!important;
+}
+.card:not(.borderless) .ctype{
+  top:70%!important;bottom:auto!important;padding:.14rem 0 .1rem!important;
+  background:linear-gradient(180deg,rgba(22,20,16,.93),rgba(8,10,17,.97))!important;
+  color:#eadbb8!important;border-top:1px solid rgba(216,180,90,.48)!important;
+  border-bottom:1px solid #000!important;box-shadow:none!important;text-shadow:0 1px 2px #000!important;
+}
+.card:not(.borderless) .ctext{
+  top:calc(70% + 1.15em)!important;bottom:1.55em!important;height:auto!important;
+  color:#2b2011!important;background:linear-gradient(180deg,#e9dab6,#d3bf92)!important;
+  border-top:1px solid var(--frB,#8a6f2f)!important;border-bottom:1px solid var(--frB,#8a6f2f)!important;
+  border-radius:0!important;box-shadow:inset 0 1px 2px rgba(80,54,12,.18)!important;
+  backdrop-filter:none!important;text-shadow:0 1px 0 rgba(255,244,214,.55)!important;
+}
+.card:not(.borderless) .ctext *{text-shadow:none!important}
+.card:not(.borderless) .ctext .kw{color:#684b12!important}
+.card:not(.borderless) .cfoot{
+  background:linear-gradient(0deg,rgba(8,7,5,.96),rgba(14,11,7,.86))!important;
+  border-top:1px solid rgba(216,180,90,.45)!important;box-shadow:none!important;
+}
+.card:not(.borderless) .innerframe{
+  inset:3px!important;border:1px solid rgba(246,226,163,.72)!important;border-radius:5px!important;
+  box-shadow:inset 0 0 0 1px rgba(0,0,0,.58),0 0 0 1px rgba(0,0,0,.4)!important;
+}
+.card:not(.borderless) .rar{box-shadow:none!important}
+
+/* Общий hover — только спокойная глубина, без золотого ореола. */
+.card:hover{box-shadow:0 8px 18px rgba(0,0,0,.72)!important}
+.card::after{opacity:0!important;box-shadow:none!important}
+.card .spec,.card .foil,.card .holo{opacity:0!important;animation:none!important}
+.card.r-rare:not(:hover),.card.r-epic:not(:hover),.card.r-legendary:not(:hover){
+  box-shadow:0 4px 14px rgba(0,0,0,.66)!important;
+}
+
+/* Редкая (голубой блик), эпическая/«уникальная» (фиолетовый), легендарная (золотой фойл). */
+.card.r-rare:hover{
+  box-shadow:0 8px 20px rgba(0,0,0,.72),0 0 16px rgba(79,159,224,.34)!important;
+}
+.card.r-rare:hover .foil{
+  opacity:.58!important;animation:ecRareHoverFoil 2.8s ease-in-out infinite!important;
+  background:linear-gradient(115deg,transparent 25%,rgba(120,190,255,.34) 45%,rgba(255,255,255,.22) 51%,transparent 69%);
+}
+.card.r-rare:hover .spec{opacity:.42!important}
+.card.r-rare:hover::after{
+  opacity:1!important;box-shadow:inset 0 0 0 1px rgba(130,205,255,.66),0 0 14px rgba(79,159,224,.35)!important;
+}
+.card.r-epic:hover{
+  box-shadow:0 8px 22px rgba(0,0,0,.72),0 0 20px rgba(176,108,240,.38)!important;
+}
+.card.r-epic:hover .foil{opacity:.76!important;animation:foilShift 3.7s linear infinite!important}
+.card.r-epic:hover .spec{opacity:.55!important}
+.card.r-epic:hover::after{
+  opacity:1!important;box-shadow:inset 0 0 0 1px rgba(210,165,255,.72),0 0 17px rgba(176,108,240,.42)!important;
+}
+.card.r-legendary:hover{
+  box-shadow:0 8px 24px rgba(0,0,0,.74),0 0 22px rgba(245,166,35,.42)!important;
+}
+.card.r-legendary:hover .foil{opacity:.9!important;animation:foilShift 2.9s linear infinite!important}
+.card.r-legendary:hover .holo{opacity:.54!important;animation:holoCycle 3.6s linear infinite!important}
+.card.r-legendary:hover .spec{opacity:.62!important}
+.card.r-legendary:hover::after{
+  opacity:1!important;box-shadow:inset 0 0 0 1px rgba(255,220,135,.78),0 0 19px rgba(245,166,35,.48)!important;
+}
+@keyframes ecRareHoverFoil{0%,100%{background-position:140% 0}50%{background-position:-30% 0}}
+
+/* Обложка выбранной карты — без новых изображений, только существующие арты карт. */
+.dbAvatarField{display:flex;flex:1 1 220px;flex-direction:column;justify-content:center;gap:.18rem;min-width:190px;color:#cbb98a;font-size:.62rem}
+.dbAvatarLabel{font-size:.58rem;letter-spacing:.09em;text-transform:uppercase;color:#9ea8bc}
+.dbAvatarPicker{display:flex;align-items:center;gap:.4rem;min-width:0}
+.dbAvatarPicker select{flex:1 1 auto;min-width:0}
+.dbAvatarPreview{
+  position:relative;display:flex;flex:0 0 30px;align-items:center;justify-content:center;
+  width:30px;height:42px;overflow:hidden;border:1px solid rgba(216,180,90,.45);border-radius:5px;
+  background:linear-gradient(145deg,#202b3d,#10131d);color:#ffe9b0;font-size:1rem;
+}
+.dbAvatarPreview img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;object-position:center;z-index:1}
+.dbAvatarPlaceholder{position:relative;z-index:0}
+.deckArt img{z-index:1}
+.deckArt .deckArtFallback{z-index:0}
+.deckArt .deckAvatarTag{
+  position:absolute;top:7px;left:7px;z-index:3;max-width:calc(100% - 14px);overflow:hidden;
+  padding:.2rem .4rem;border:1px solid rgba(255,255,255,.26);border-radius:999px;
+  background:rgba(5,8,14,.76);color:#f4f7ff;font-size:.49rem;line-height:1.25;
+  text-overflow:ellipsis;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,.38);
+}
+.decksFooterRight{flex-wrap:wrap;justify-content:flex-end}
+#btnDecksPlay{min-width:86px}
+@media(max-width:760px){
+  .dbAvatarField{grid-column:span 2;min-width:0}
+  .decksFooterRight{justify-content:space-between}
+  #decksSelInfo{flex:1 1 100%;max-width:100%!important}
+}
+@media(max-width:560px){.dbAvatarField{grid-column:span 3}}
+
+@media(prefers-reduced-motion:reduce){
+  .card,.card::after,.card .foil,.card .spec,.card .holo{transition:none!important;animation:none!important}
+}
+
+
+/* Saved user decks sit beneath the five faction archetypes in the home hub. */
+#menu #playerFactions .menuDeckSectionTitle{
+  grid-column:1/-1;align-self:end;margin:.55rem 0 -.12rem;padding:.52rem .14rem .34rem;
+  border-bottom:1px solid rgba(216,180,90,.2);color:#aeb8cb;
+  font:600 .59rem/1.4 'Philosopher',Georgia,serif;letter-spacing:.15em;text-transform:uppercase;
+}
+#menu #playerFactions .customDeckCard{
+  cursor:pointer;outline:1px solid transparent;outline-offset:2px;
+  border-color:rgba(216,180,90,.26)!important;
+  transition:transform .18s,border-color .18s,box-shadow .18s;
+}
+#menu #playerFactions .customDeckCard:hover,
+#menu #playerFactions .customDeckCard:focus-visible{
+  border-color:rgba(255,216,122,.7)!important;box-shadow:0 12px 30px rgba(0,0,0,.58),0 0 16px rgba(216,180,90,.18)!important;
+  transform:translateY(-3px);outline-color:rgba(255,216,122,.35);
+}
+#menu #playerFactions .customDeckCard .fcardArtImg{object-position:center 24%!important}
+#menu #playerFactions .customDeckCard .customDeckRibbon{
+  position:absolute!important;top:10px!important;left:10px!important;right:auto!important;bottom:auto!important;z-index:4!important;
+  display:inline-flex!important;align-items:center!important;width:auto!important;height:auto!important;
+  padding:.25rem .46rem!important;border:1px solid rgba(255,230,170,.35)!important;border-radius:999px!important;
+  background:rgba(5,8,14,.82)!important;color:#ffe2a0!important;
+  font:700 .49rem/1.2 'Philosopher',Georgia,serif!important;letter-spacing:.12em!important;
+  box-shadow:0 2px 8px rgba(0,0,0,.48)!important;
+}
+#menu #playerFactions .customDeckCard .customDeckStats{
+  position:absolute!important;left:.7rem!important;right:.7rem!important;bottom:.68rem!important;z-index:4!important;
+  display:flex!important;align-items:center!important;justify-content:space-between!important;gap:.4rem!important;
+  margin:0!important;padding:.3rem .5rem!important;border:1px solid rgba(255,216,122,.2)!important;
+  border-radius:999px!important;background:rgba(5,8,14,.78)!important;color:#f3e7c9!important;
+  font:600 .54rem/1.2 'Philosopher',Georgia,serif!important;letter-spacing:.04em!important;
+}
+#menu #playerFactions .customDeckCard .customDeckStats span{
+  display:inline!important;width:auto!important;height:auto!important;min-width:0!important;padding:0!important;
+  border:0!important;border-radius:0!important;background:transparent!important;box-shadow:none!important;
+  color:inherit!important;font:inherit!important;white-space:nowrap!important;
+}
+#menu #playerFactions .customDeckCard .customDeckStats span:last-child{color:#ffe09a!important;letter-spacing:.1em!important}
+#menu #playerFactions .customDeckCard .fcardCheck{
+  position:absolute!important;top:10px!important;left:auto!important;right:10px!important;bottom:auto!important;z-index:5!important;
+  display:none!important;align-items:center!important;justify-content:center!important;
+  width:24px!important;height:24px!important;border-radius:50%!important;
+  background:linear-gradient(180deg,#ffe08a,#d99622)!important;color:#231603!important;
+  border:1px solid rgba(255,255,255,.55)!important;box-shadow:0 2px 8px rgba(0,0,0,.55)!important;
+}
+#menu #playerFactions .customDeckCard.sel .fcardCheck{display:flex!important}
+@media(max-width:760px){
+  #menu #playerFactions .menuDeckSectionTitle{font-size:.55rem;letter-spacing:.1em}
+  #menu #playerFactions .customDeckCard .customDeckStats{left:.5rem!important;right:.5rem!important;bottom:.54rem!important;font-size:.5rem!important}
+}
+@media(prefers-reduced-motion:reduce){
+  #menu #playerFactions .customDeckCard{transition:none!important}
+  #menu #playerFactions .customDeckCard:hover,#menu #playerFactions .customDeckCard:focus-visible{transform:none!important}
+}
+
+
+/* ── Latest hub/art readability pass: full-square faction art + legible deck covers ── */
+#menu .ecOrbs{
+  display:flex!important;align-items:center!important;justify-content:center!important;flex-wrap:nowrap!important;
+  gap:clamp(5px,1.1vw,13px)!important;max-width:100%;overflow-x:auto;overflow-y:hidden;
+  padding:8px 3px 10px!important;scroll-snap-type:x mandatory;scrollbar-width:thin;
+}
+#menu .ecOrbs::before{top:50%!important;left:4%!important;right:4%!important;height:2px!important}
+#menu .ecOrbs .heroChip{
+  position:relative!important;display:block!important;isolation:isolate!important;overflow:hidden!important;
+  flex:0 0 clamp(68px,7.2vw,92px)!important;width:clamp(68px,7.2vw,92px)!important;
+  min-width:clamp(68px,7.2vw,92px)!important;max-width:clamp(68px,7.2vw,92px)!important;
+  height:clamp(68px,7.2vw,92px)!important;min-height:0!important;aspect-ratio:1/1!important;
+  margin:0!important;padding:0!important;border:1px solid rgba(255,226,163,.42)!important;
+  border-radius:12px!important;background:#0b1019!important;
+  box-shadow:0 5px 15px rgba(0,0,0,.48),inset 0 1px 0 rgba(255,255,255,.12)!important;
+  color:#fff!important;font-size:0!important;scroll-snap-align:center;cursor:pointer;
+  transition:transform .16s,border-color .16s,box-shadow .16s!important;
+}
+#menu .ecOrbs .heroChip .orbCore{
+  position:absolute!important;inset:0!important;display:block!important;width:100%!important;height:100%!important;
+  overflow:hidden!important;border:0!important;border-radius:inherit!important;box-shadow:none!important;
+  transform:none!important;background:radial-gradient(circle at 32% 28%,#25334a,#0b1019 72%)!important;
+}
+#menu .ecOrbs .heroChip .orbCore::before{display:none!important;content:none!important}
+#menu .ecOrbs .heroChip .orbCore::after{
+  content:""!important;position:absolute!important;inset:0!important;z-index:2!important;border-radius:inherit!important;
+  background:linear-gradient(180deg,rgba(3,6,12,.02) 24%,rgba(3,6,12,.08) 48%,rgba(3,6,12,.82) 100%)!important;
+  pointer-events:none!important;
+}
+#menu .ecOrbs .heroChip .orbCore .orbIcon,
+#menu .ecOrbs .heroChip .orbCore img{
+  position:absolute!important;inset:0!important;display:block!important;transform:none!important;
+  width:100%!important;height:100%!important;max-width:none!important;max-height:none!important;
+  margin:0!important;border:0!important;border-radius:inherit!important;object-fit:cover!important;
+  object-position:center!important;opacity:1!important;filter:brightness(.84) saturate(1.08)!important;z-index:1!important;
+}
+#menu .ecOrbs .heroChip .chipName{
+  position:absolute!important;left:0!important;right:0!important;top:auto!important;bottom:0!important;
+  z-index:3!important;display:flex!important;align-items:center!important;justify-content:center!important;
+  width:100%!important;min-height:24px!important;margin:0!important;padding:.29rem .18rem .32rem!important;
+  box-sizing:border-box!important;transform:none!important;border:0!important;border-top:1px solid rgba(255,240,205,.2)!important;
+  border-radius:0!important;background:rgba(4,7,13,.32)!important;color:#fff1cf!important;
+  font:700 clamp(.48rem,.62vw,.61rem)/1.12 'Philosopher',Georgia,serif!important;
+  letter-spacing:.075em!important;text-align:center!important;text-transform:uppercase!important;
+  white-space:normal!important;text-shadow:0 1px 3px #000,0 0 8px #000!important;box-shadow:none!important;
+}
+#menu .ecOrbs .heroChip.sel{
+  border-color:#ffe08b!important;box-shadow:0 0 0 2px rgba(255,216,122,.7),0 0 18px rgba(255,190,69,.35),0 6px 16px rgba(0,0,0,.55)!important;
+  transform:translateY(-2px)!important;
+}
+#menu .ecOrbs .heroChip:hover{border-color:rgba(255,235,180,.84)!important;transform:translateY(-3px)!important}
+#menu .ecOrbs .heroChip:focus-visible{outline:2px solid #ffe08b!important;outline-offset:3px!important}
+#menu .ecOrbs .heroChip[data-f="Aurites"] .orbCore{background:#8e6b22!important}
+#menu .ecOrbs .heroChip[data-f="Necrus"] .orbCore{background:#542366!important}
+#menu .ecOrbs .heroChip[data-f="Terramorph"] .orbCore{background:#27522c!important}
+#menu .ecOrbs .heroChip[data-f="Pyromancer"] .orbCore{background:#7e350e!important}
+#menu .ecOrbs .heroChip[data-f="Ethereal"] .orbCore{background:#155551!important}
+
+/* Card art stays complete in the deck picker; names and metadata wrap instead of disappearing. */
+.deckBox .deckArt{overflow:hidden!important;background-color:#0a0e16!important}
+.deckBox .deckArt img{object-fit:contain!important;object-position:center center!important}
+.deckBox .deckLabel{box-sizing:border-box;width:100%;min-width:0;gap:.38rem!important}
+.deckBox .deckName{
+  display:-webkit-box!important;-webkit-box-orient:vertical!important;-webkit-line-clamp:2!important;
+  min-width:0;min-height:2.36em;max-height:2.36em;overflow:hidden!important;
+  white-space:normal!important;text-overflow:clip!important;overflow-wrap:anywhere!important;
+  font-size:clamp(.72rem,1.1vw,.9rem)!important;line-height:1.18!important;text-align:center!important;
+  color:#fff0cd!important;text-shadow:0 1px 4px rgba(0,0,0,.52);
+}
+.deckBox .deckMeta{min-width:0;min-height:22px;flex-wrap:wrap;justify-content:center!important;gap:.3rem .55rem!important}
+.deckBox .deckCount{white-space:normal!important;overflow-wrap:anywhere;text-align:center;line-height:1.2;color:#c4d0df!important}
+#menu #playerFactions .customDeckCard .fcardArtImg{
+  object-fit:contain!important;object-position:center!important;opacity:1!important;mix-blend-mode:normal!important;
+}
+#menu #playerFactions .customDeckCard .fcardBody{
+  display:flex!important;flex-direction:column!important;justify-content:center!important;gap:.12rem!important;
+  width:100%!important;min-width:0!important;padding:.35rem .48rem .25rem!important;box-sizing:border-box!important;
+}
+#menu #playerFactions .customDeckCard .fname{
+  display:-webkit-box!important;-webkit-box-orient:vertical!important;-webkit-line-clamp:2!important;
+  min-width:0;min-height:2.32em;max-height:2.32em;overflow:hidden!important;
+  white-space:normal!important;text-overflow:clip!important;overflow-wrap:anywhere!important;
+  text-align:center!important;line-height:1.16!important;color:#fff0cf!important;
+  font-size:clamp(.68rem,1vw,.82rem)!important;text-shadow:0 1px 4px rgba(0,0,0,.7)!important;
+}
+#menu #playerFactions .customDeckCard .fclass{
+  display:block!important;min-width:0;overflow:hidden!important;text-overflow:ellipsis!important;white-space:nowrap!important;
+  color:#bcc9da!important;font-size:.58rem!important;line-height:1.2!important;text-align:center!important;
+}
+@media(max-width:740px){
+  #menu .ecOrbs{justify-content:flex-start!important;gap:5px!important}
+  #menu .ecOrbs .heroChip{flex-basis:60px!important;width:60px!important;min-width:60px!important;max-width:60px!important;height:60px!important;border-radius:9px!important}
+  #menu .ecOrbs .heroChip .chipName{min-height:21px!important;padding:.24rem .12rem!important;font-size:.48rem!important;letter-spacing:.04em!important}
+  .deckBox .deckName{font-size:.72rem!important}
+}
+@media(max-width:400px){
+  #menu .ecOrbs{gap:4px!important}
+  #menu .ecOrbs .heroChip{flex-basis:52px!important;width:52px!important;min-width:52px!important;max-width:52px!important;height:52px!important;border-radius:8px!important}
+  #menu .ecOrbs .heroChip .chipName{min-height:19px!important;font-size:.45rem!important;letter-spacing:.025em!important}
+}
+@media(prefers-reduced-motion:reduce){
+  #menu .ecOrbs .heroChip{transition:none!important}
+  #menu .ecOrbs .heroChip:hover,#menu .ecOrbs .heroChip.sel{transform:none!important}
+}
+
+
+
+/* PATCH v2.48 — booster PNG is the package itself: no artificial card frame/crop. */
+#shopModal .packVisWrap{width:190px;height:196px;filter:none}
+#shopModal .packOfferArt.hasPackArt::after{display:none!important}
+#shopModal .packVis{width:clamp(100px,8vw,124px);height:auto;aspect-ratio:5/7}
+#shopModal .packVis.v1{left:0}
+#shopModal .packVis.v2{left:32px}
+#shopModal .packVis.v3{left:64px}
+#shopModal .packVis.hasArt{
+  overflow:visible!important;border:0!important;border-radius:0!important;
+  background:transparent!important;box-shadow:none!important;
+}
+#shopModal .packVis.hasArt .packOfferArtImg{
+  object-fit:contain!important;object-position:center!important;border-radius:0!important;
+  opacity:1!important;filter:drop-shadow(0 12px 14px rgba(0,0,0,.62));
+}
+#shopModal .packVis.hasArt .pvSig,#shopModal .packVis.hasArt .pvLbl{display:none!important}
+
+#boosterModal .boosterInvVisual.hasArt{
+  overflow:visible!important;border:0!important;border-radius:0!important;
+  background:transparent!important;box-shadow:none!important;
+}
+#boosterModal .boosterInvVisual.hasArt::after{display:none!important}
+#boosterModal .boosterInvVisual.hasArt .boosterInvArt{
+  object-fit:contain!important;object-position:center!important;border-radius:0!important;
+  filter:drop-shadow(0 5px 7px rgba(0,0,0,.62));
+}
+
+#boosterModal .packSealedInner{width:clamp(244px,20vw,300px);height:auto;aspect-ratio:5/7}
+#boosterModal .packSealedInner.hasArt{
+  overflow:visible!important;border:0!important;border-radius:0!important;
+  background:transparent!important;box-shadow:none!important;
+}
+#boosterModal .packSealedInner.hasArt::before{display:none!important;content:none!important}
+#boosterModal .packSealedInner.hasArt .packSealedArtImg{
+  object-fit:contain!important;object-position:center!important;border-radius:0!important;
+  filter:drop-shadow(0 20px 26px rgba(0,0,0,.64));
+}
+#boosterModal .packSealedInner.hasArt .packSealedArt,
+#boosterModal .packSealedInner.hasArt .packSealedShine,
+#boosterModal .packSealedInner.hasArt .packSealedGlow,
+#boosterModal .packSealedInner.hasArt .volGlare{display:none!important}
+#boosterModal .packSealed:hover .packSealedInner.hasArt{box-shadow:none!important;transform:translateY(-4px) scale(1.025)}
+#boosterModal .packSealed:focus-visible .packSealedInner.hasArt{outline:0!important;box-shadow:none!important}
+#boosterModal .packSealed:focus-visible .packSealedHint{outline:2px solid #a6d8ff;outline-offset:3px}
+#boosterModal .packTearHalf{border-radius:0!important;background-size:100% 100%!important}
+
+@media(max-width:860px){
+  #shopModal .packVisWrap{width:164px;height:176px}
+  #shopModal .packVis{width:102px}
+  #shopModal .packVis.v1{left:0}
+  #shopModal .packVis.v2{left:27px}
+  #shopModal .packVis.v3{left:54px}
+}
+@media(max-width:760px){
+  #boosterModal .packStage{min-height:390px}
+  #boosterModal .packSealedInner{width:clamp(196px,54vw,250px)}
+}
+@media(max-width:560px){
+  #shopModal .packVisWrap{width:142px;height:150px}
+  #shopModal .packVis{width:82px}
+  #shopModal .packVis.v1{left:0}
+  #shopModal .packVis.v2{left:24px}
+  #shopModal .packVis.v3{left:48px}
+}
+@media(max-width:480px){
+  #boosterModal .packStage{min-height:370px}
+  #boosterModal .packSealedInner{width:clamp(188px,56vw,230px)}
+}
+@media(max-height:700px) and (min-width:761px){
+  #boosterModal .packStage{min-height:260px}
+  #boosterModal .packSealed{gap:.35rem}
+  #boosterModal .packSealedInner{width:min(190px,24vh)}
+}
+@media(prefers-reduced-motion:reduce){
+  #boosterModal .packSealed:hover .packSealedInner.hasArt{transform:none}
+}
+
+
+/* ═══ PATCH v2.48 · responsive quests, progressive collection, deck picker & mastery ═══ */
+/* Home quests: compact Arena-style objectives with visible progress and reset clocks. */
+#menu .questDashboard{
+  width:100%;min-width:0;margin:0!important;padding:clamp(14px,1.5vw,22px);
+  display:flex;flex-direction:column;gap:14px;border:1px solid rgba(143,170,210,.18);border-radius:18px;
+  background:radial-gradient(90% 120% at 100% 0%,rgba(72,106,164,.12),transparent 54%),
+    linear-gradient(155deg,rgba(16,22,35,.96),rgba(8,11,19,.97));
+  box-shadow:0 18px 38px rgba(0,0,0,.36),inset 0 1px 0 rgba(255,255,255,.045);
+}
+#menu .questDashboardHeader{display:flex;align-items:flex-end;justify-content:space-between;gap:1rem;padding:0 2px .8rem;border-bottom:1px solid rgba(216,180,90,.18)}
+#menu .questDashboardTitle{min-width:0}
+#menu .questDashboardEyebrow,.questGroupEyebrow{display:block;color:#9fb3d3;font:800 .55rem/1.2 system-ui,sans-serif;letter-spacing:.19em;text-transform:uppercase}
+#menu .questDashboardHeader h2{margin:.2rem 0 0;color:#f3e2bd;font:600 clamp(1.2rem,2vw,1.55rem)/1.15 'Philosopher',Georgia,serif;letter-spacing:.04em}
+#menu .questDashboardHeader p{max-width:58ch;color:#aab5c8;font-size:.72rem;line-height:1.5;text-align:right}
+#menu .questDashboardGroups{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:clamp(10px,1.2vw,16px);align-items:start}
+#menu .questGroup{min-width:0;padding:clamp(10px,1.1vw,14px);border:1px solid rgba(255,255,255,.065);border-radius:13px;background:rgba(4,7,13,.26)}
+#menu .questGroupDaily{border-top:2px solid rgba(255,216,122,.48)}
+#menu .questGroupWeekly{border-top:2px solid rgba(158,133,230,.52)}
+#menu .questGroupHeader{display:flex;align-items:center;justify-content:space-between;gap:.65rem;margin-bottom:10px}
+#menu .questGroupHeader h3{margin:.22rem 0 0;color:#eee3ca;font:600 .94rem/1.15 'Philosopher',Georgia,serif;letter-spacing:.045em}
+.questReset{color:#9ba9c0;font:600 .58rem/1.25 system-ui,sans-serif;font-variant-numeric:tabular-nums;letter-spacing:.02em;white-space:nowrap}
+.questTaskReset{display:block;margin-top:.33rem;color:#9fb9d9}
+.questList{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;min-width:0}
+.questTask{
+  min-width:0;min-height:104px;display:grid;grid-template-columns:48px minmax(0,1fr) auto;align-items:center;gap:9px;
+  padding:9px;border:1px solid rgba(255,255,255,.075);border-radius:11px;
+  background:linear-gradient(145deg,rgba(33,41,58,.68),rgba(14,18,28,.82));
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.035);transition:border-color .15s,background .15s;
+}
+.questTaskDone{border-color:rgba(255,216,122,.34);background:linear-gradient(145deg,rgba(68,52,26,.44),rgba(16,18,25,.86))}
+.questTaskClaimed{border-color:rgba(114,203,153,.24);background:linear-gradient(145deg,rgba(27,60,50,.36),rgba(13,19,24,.86))}
+.questTaskIcon{position:relative;width:46px;height:54px;display:grid;place-items:center;overflow:hidden;border:1px solid rgba(255,216,122,.22);border-radius:9px;background:radial-gradient(circle at 35% 28%,rgba(255,216,122,.22),rgba(38,45,62,.88) 72%);color:#ffe09a;box-shadow:inset 0 1px 0 rgba(255,255,255,.12)}
+.questGroupWeekly .questTaskIcon{border-color:rgba(185,154,255,.25);background:radial-gradient(circle at 35% 28%,rgba(169,130,236,.24),rgba(38,35,61,.9) 72%)}
+.questTaskIcon b{position:relative;z-index:0;font:700 1.55rem/1 Georgia,serif;text-shadow:0 2px 6px #000}
+.questTaskIcon img{position:absolute;inset:0;z-index:1;width:100%;height:100%;object-fit:contain;object-position:center;padding:4px;filter:drop-shadow(0 2px 5px rgba(0,0,0,.55))}
+.questTaskIcon.hasArt{border-color:transparent;background:transparent;overflow:visible}
+.questTaskIcon.hasArt img{padding:0;filter:drop-shadow(0 5px 8px rgba(0,0,0,.55))}
+.questTaskIcon.hasArt b{display:none}
+.questTaskMain{min-width:0;display:flex;flex-direction:column;align-items:flex-start;gap:5px}
+.questTaskTitle{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;max-width:100%;color:#f0e4ca;font:600 .72rem/1.25 'Philosopher',Georgia,serif;overflow-wrap:anywhere}
+.questTaskProgressLine{width:100%;display:flex;align-items:center;gap:7px}
+.questTaskProgressText{flex:0 0 auto;color:#e7d6ac;font:700 .59rem/1 system-ui,sans-serif;font-variant-numeric:tabular-nums}
+.questTaskProgressBar{height:6px;flex:1;min-width:26px;overflow:hidden;border:1px solid rgba(255,255,255,.07);border-radius:99px;background:rgba(0,0,0,.42)}
+.questTaskProgressBar i{display:block;height:100%;border-radius:inherit;background:linear-gradient(90deg,#4c9fc2,#ffd87a);box-shadow:0 0 9px rgba(255,216,122,.26);transition:width .2s ease}
+.questTaskDone .questTaskProgressBar i{background:linear-gradient(90deg,#60c48e,#ffe18b)}
+.questTaskReward{color:#aeb9ca;font:600 .55rem/1.2 system-ui,sans-serif;white-space:nowrap}
+.questTaskReward i{margin-left:.25rem;color:#d6bfff;font-style:normal}
+.homeQuestClaim{min-width:76px;min-height:42px;padding:.42rem .58rem!important;border-radius:8px!important;border:1px solid rgba(255,216,122,.32)!important;background:linear-gradient(180deg,rgba(83,65,31,.75),rgba(36,28,18,.9))!important;color:#ffe7aa!important;font:700 .6rem/1.15 system-ui,sans-serif!important;white-space:nowrap}
+.homeQuestClaim:not(:disabled){background:linear-gradient(180deg,#ffda83,#d99a37)!important;border-color:#f3cb74!important;color:#261806!important;box-shadow:0 4px 12px rgba(217,154,55,.2)}
+.homeQuestClaim:disabled{opacity:.58;cursor:default}
+.homeQuestClaim:focus-visible{outline:2px solid #a6dcff;outline-offset:2px}
+.profileQuestRow{align-items:center}
+.profileQuestText{flex:1;min-width:0;font-size:.74rem;color:#e6d6ac;line-height:1.45;overflow-wrap:anywhere}
+.profileWeeklyQuestText{color:#c9b6e6}
+.questInlineReset{margin-top:.18rem}
+
+/* The collection paints a small first page; more cards are appended as the grid is scrolled. */
+.collectionGrid{scroll-behavior:auto}
+.collectionSentinel{grid-column:1/-1;width:min(100%,620px);min-height:78px;margin:10px auto 4px;padding:.7rem;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.38rem;text-align:center;border:1px dashed rgba(216,180,90,.22);border-radius:12px;background:linear-gradient(180deg,rgba(18,22,31,.82),rgba(9,12,19,.86))}
+.collectionLoadMore{min-height:44px!important;padding:.52rem 1.2rem!important;border-radius:999px!important;border-color:rgba(255,216,122,.32)!important;background:linear-gradient(180deg,rgba(55,48,34,.9),rgba(24,24,29,.98))!important;color:#ffe5ab!important;font-size:.78rem!important}
+.collectionLoadMore:hover:not(:disabled){border-color:rgba(255,216,122,.68)!important;box-shadow:0 0 16px rgba(255,216,122,.12)}
+.collectionLoadMore:disabled{opacity:.72;cursor:default}
+.collectionLoadNote{color:#99a6bb;font-size:.64rem;line-height:1.4}
+.collectionSentinel.allLoaded{border-style:solid;border-color:rgba(92,176,133,.22);background:rgba(20,43,37,.24)}
+.collectionEmpty{grid-column:1/-1;align-self:start;margin:2rem auto;padding:1rem 1.3rem;border:1px solid rgba(216,180,90,.18);border-radius:10px;color:#aeb7c7;background:rgba(255,255,255,.025);font-size:.82rem;text-align:center;line-height:1.5}
+.collectionCount{max-width:min(38vw,440px);line-height:1.35;font-variant-numeric:tabular-nums}
+
+/* Deck selection is a coherent adaptive workspace; preserve the full portrait cover. */
+#decksScreen .decksHeader{flex:0 0 auto;max-width:1500px;padding:.7rem clamp(.65rem,2vw,1.4rem);gap:1rem}
+#decksScreen .decksHeader h2{min-width:0;font-size:clamp(1.05rem,2vw,1.55rem);letter-spacing:.07em}
+#decksScreen .decksHeader .screenBack{min-width:86px;min-height:44px;padding:.5rem .9rem!important;border-radius:9px;font-size:.78rem!important}
+#decksScreen .decksFilters{flex:0 0 auto;max-width:1500px;gap:.5rem;padding:.6rem clamp(.65rem,2vw,1.4rem);background:rgba(8,11,18,.64)}
+#decksScreen .decksFilters select,#decksScreen .decksFilters input{min-width:0;min-height:44px;padding:.48rem .68rem!important;border-radius:9px;font-size:.78rem}
+#decksScreen #decksSort{flex:1 1 180px}
+#decksScreen #decksFormat{flex:1 1 120px}
+#decksScreen #decksSearch{flex:1 1 220px}
+#decksScreen #decksSearchClear{flex:0 0 44px;min-width:44px;min-height:44px!important;padding:0!important;border-radius:9px;font-size:.9rem!important}
+#decksScreen .decksFilters .colorFilters{gap:5px;flex:0 0 auto}
+#decksScreen .decksFilters .colorDot{appearance:none;width:42px;height:42px;min-width:42px;min-height:42px;flex:0 0 42px;padding:0;border-radius:50%;font:700 .9rem/1 system-ui,sans-serif;box-shadow:0 2px 8px rgba(0,0,0,.28);cursor:pointer}
+#decksScreen .decksFilters .colorDot.on{transform:translateY(-1px) scale(1.04);border-color:#ffe19a;box-shadow:0 0 0 2px rgba(255,216,122,.16),0 0 12px rgba(255,216,122,.25)}
+#decksScreen .decksFilters .colorDot:focus-visible{outline:2px solid #a6dcff;outline-offset:3px}
+#decksScreen #decksCount{flex:0 0 auto;margin-left:auto!important;white-space:nowrap;font-size:.75rem!important;font-variant-numeric:tabular-nums}
+#decksScreen .deckGridWrap{flex:1 1 auto;min-height:0;overflow:auto;padding:clamp(12px,1.5vw,22px) clamp(10px,1.8vw,24px) calc(96px + env(safe-area-inset-bottom,0px));overscroll-behavior:contain}
+#decksScreen .deckGrid{display:grid!important;grid-template-columns:repeat(auto-fill,minmax(min(100%,clamp(156px,16vw,224px)),1fr));align-content:start;justify-content:stretch!important;justify-items:stretch;gap:clamp(10px,1.2vw,17px);max-width:1500px;margin:0 auto}
+#decksScreen .deckBox{position:relative;display:flex;flex-direction:column;flex:initial!important;width:100%!important;height:auto!important;min-width:0;min-height:418px;overflow:hidden;border:1px solid rgba(157,178,211,.2);border-radius:14px;background:linear-gradient(180deg,#141b29,#0a0e16);box-shadow:0 12px 28px rgba(0,0,0,.42),inset 0 1px 0 rgba(255,255,255,.05);text-align:center;cursor:pointer;transition:transform .17s,border-color .17s,box-shadow .17s}
+#decksScreen .deckBox:hover{transform:translateY(-3px);border-color:rgba(255,216,122,.4);box-shadow:0 18px 34px rgba(0,0,0,.52),0 0 16px rgba(255,190,74,.11)}
+#decksScreen .deckBox.sel{border-color:rgba(255,216,122,.8);box-shadow:0 0 0 2px rgba(255,216,122,.18),0 16px 34px rgba(0,0,0,.5),0 0 20px rgba(255,216,122,.14)}
+#decksScreen .deckBox:focus-visible{outline:2px solid #9ddcff;outline-offset:3px}
+#decksScreen .deckBox .deckArt{position:relative;isolation:isolate;flex:1 1 auto;width:100%;height:auto!important;min-height:0;aspect-ratio:512/720;overflow:hidden;background:radial-gradient(ellipse at 50% 38%,rgba(70,101,139,.18),transparent 68%),linear-gradient(155deg,#141c2a,#080c13)}
+#decksScreen .deckBox .deckArt img{position:absolute!important;inset:0!important;width:100%!important;height:100%!important;object-fit:contain!important;object-position:center!important;mix-blend-mode:normal!important;opacity:1!important}
+#decksScreen .deckBox .deckArt .deckArtFallback{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;z-index:0;opacity:.42;font-size:2.8rem;pointer-events:none}
+#decksScreen .deckBox .deckLabel{position:relative;z-index:2;display:flex;flex:0 0 auto;flex-direction:column;align-items:stretch;justify-content:center;gap:.34rem;min-width:0;min-height:112px;width:100%;padding:.65rem .62rem .7rem;background:linear-gradient(180deg,#111925,#090d14);border-top:1px solid rgba(255,255,255,.08);box-sizing:border-box}
+#decksScreen .deckBox .deckName{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;min-width:0;min-height:2.36em;max-height:2.36em;overflow:hidden;white-space:normal;text-overflow:clip;overflow-wrap:anywhere;color:#fff0cd;font:600 clamp(.72rem,1vw,.9rem)/1.18 'Philosopher',Georgia,serif;text-align:center;text-shadow:0 1px 4px rgba(0,0,0,.52)}
+#decksScreen .deckBox .deckMeta{min-width:0;min-height:22px;display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:.3rem .55rem}
+#decksScreen .deckBox .deckColors{display:flex;justify-content:center;gap:.25rem}
+#decksScreen .deckBox .deckCount{max-width:100%;color:#c4d0df;font-size:.65rem;line-height:1.2;white-space:normal;text-align:center;overflow-wrap:anywhere}
+#decksScreen .deckBox .deckArtEdit{width:100%;min-height:42px;padding:.45rem .5rem;border-radius:8px;font-size:.7rem}
+#decksScreen .deckBox.addBox{appearance:none;min-height:418px;align-items:center;justify-content:center;gap:.85rem;padding:1rem;background:radial-gradient(120% 100% at 50% 25%,rgba(49,55,75,.48),rgba(9,12,19,.97));border:1px dashed rgba(255,216,122,.32);color:#f4e5c6;font:inherit}
+#decksScreen .deckBox.addBox .deckAddIcon{width:68px;height:68px;border-radius:15px;font-size:2.55rem}
+#decksScreen .deckBox.addBox .deckAddLabel{font-size:.78rem;letter-spacing:.13em}
+#decksScreen .deckBox::before,#decksScreen .deckBox::after{pointer-events:none}
+#decksScreen .decksFooter{left:0;right:0;bottom:0;z-index:151;display:flex;align-items:center;justify-content:space-between;gap:.65rem;flex-wrap:wrap;height:auto!important;min-height:64px;padding:.55rem clamp(.6rem,1.7vw,1.25rem) calc(.55rem + env(safe-area-inset-bottom,0px));border-top:1px solid rgba(255,216,122,.18);background:linear-gradient(180deg,rgba(13,17,25,.97),rgba(6,8,13,.99));box-shadow:0 -8px 22px rgba(0,0,0,.46)}
+#decksScreen .decksFooterLeft,#decksScreen .decksFooterRight{display:flex;align-items:center;gap:.42rem;flex-wrap:wrap}
+#decksScreen .decksFooter .btn{min-height:44px!important;padding:.46rem .8rem!important;border-radius:8px;font-size:.75rem!important;white-space:nowrap}
+#decksScreen .decksFooterRight #decksSelInfo{max-width:min(28vw,340px)!important;color:#c9d3e3!important;font-size:.72rem!important}
+#decksScreen .decksFooter .btn:focus-visible{outline:2px solid #a6dcff;outline-offset:2px}
+
+/* MTG Arena-like mastery track: large reward art, generous tap targets, responsive level count. */
+#bpModal{padding:clamp(8px,2vh,20px);background:rgba(4,6,11,.82);backdrop-filter:blur(7px)}
+#bpModal .packPanel.bpArenaLarge{width:min(1460px,98vw)!important;max-width:1460px;max-height:calc(100dvh - 24px)!important;overflow:auto;align-items:stretch;margin:auto;padding:clamp(12px,1.8vw,24px);border-radius:18px;background:radial-gradient(1100px 420px at 50% -100px,rgba(146,69,20,.31),transparent 70%),linear-gradient(160deg,rgba(25,23,32,.99),rgba(8,10,16,.99))!important;box-shadow:0 34px 100px rgba(0,0,0,.72),inset 0 1px 0 rgba(255,239,195,.08)}
+#bpModal #bpBody{display:flex;flex-direction:column;gap:clamp(9px,1.2vh,15px);min-width:0}
+#bpModal .bpTop{gap:clamp(.6rem,1.2vw,1rem);padding:.15rem .2rem .85rem}
+#bpModal .bpEmblem{width:58px;height:58px;flex:0 0 58px;font-size:30px}
+#bpModal .bpTitle{font-size:clamp(1.05rem,2vw,1.55rem);line-height:1.2}
+#bpModal .bpPageNo{padding:.45rem .72rem;border:1px solid rgba(255,216,122,.18);border-radius:999px;background:rgba(255,255,255,.035);font-size:.72rem;font-variant-numeric:tabular-nums}
+#bpModal .bpPill{min-height:44px;padding:.48rem 1rem;font-size:.76rem}
+#bpModal .bpMid{align-items:stretch;gap:clamp(6px,1vw,14px);margin:.35rem 0 0}
+#bpModal .bpPages{min-width:0;overflow:hidden}
+#bpModal .bpPage,#bpModal .bpPage.on{grid-template-columns:repeat(8,minmax(0,1fr));gap:clamp(6px,.8vw,12px);align-items:stretch}
+#bpModal .bpPage .bpCol{display:flex!important;min-width:0;gap:9px;padding-top:1.25rem}
+#bpModal .bpColHead{top:-2px}
+#bpModal .bpLvl{width:36px;height:36px;border-width:2px;font-size:.78rem;font-weight:800;box-shadow:0 4px 12px rgba(0,0,0,.34)}
+#bpModal .bpArrow{top:-13px;font-size:.8rem}
+#bpModal .bpCol.curCol .bpTile{border-color:rgba(255,216,122,.56)}
+#bpModal .bpTile{width:100%;min-width:0;min-height:156px;display:flex;align-items:center;justify-content:flex-start;gap:8px;padding:10px 7px 9px;border-radius:12px;border-color:rgba(255,255,255,.12);box-shadow:0 8px 20px rgba(0,0,0,.28),inset 0 1px 0 rgba(255,255,255,.055);font-size:.68rem;transform:none;transition:transform .16s,border-color .16s,box-shadow .16s,filter .16s}
+#bpModal .bpTile.free{background:linear-gradient(155deg,rgba(53,62,73,.97),rgba(20,24,32,.99))}
+#bpModal .bpTile.prem{background:linear-gradient(155deg,rgba(64,43,81,.96),rgba(23,16,32,.99));border-color:rgba(202,171,255,.24)}
+#bpModal .bpTile:not(:disabled):hover{transform:translateY(-3px);border-color:rgba(255,216,122,.7);box-shadow:0 14px 26px rgba(0,0,0,.4),0 0 20px rgba(255,204,117,.12)}
+#bpModal .bpTile:disabled{opacity:.67;filter:saturate(.8)}
+#bpModal .bpRewardVisual{position:relative;display:grid;place-items:center;flex:0 0 auto;width:min(76px,72%);height:82px;overflow:hidden;border:1px solid rgba(255,231,173,.2);border-radius:11px;background:radial-gradient(circle at 50% 35%,rgba(255,216,122,.2),rgba(8,11,18,.72));box-shadow:inset 0 1px 0 rgba(255,255,255,.13),0 5px 11px rgba(0,0,0,.32)}
+#bpModal .bpTile.prem .bpRewardVisual{border-color:rgba(207,175,255,.27);background:radial-gradient(circle at 50% 35%,rgba(174,130,234,.22),rgba(13,10,21,.78))}
+#bpModal .bpRewardArt{position:absolute;inset:0;z-index:1;width:100%;height:100%;object-fit:contain;object-position:center;padding:5px;filter:drop-shadow(0 5px 7px rgba(0,0,0,.48))}
+#bpModal .bpRewardVisual.hasArt{overflow:visible;border-color:transparent;background:transparent;box-shadow:none}
+#bpModal .bpRewardVisual.hasArt .bpRewardArt{padding:0;filter:drop-shadow(0 8px 11px rgba(0,0,0,.6))}
+#bpModal .bpIco{position:relative;z-index:0;font-size:clamp(1.7rem,2.6vw,2.35rem);filter:drop-shadow(0 3px 8px #000)}
+#bpModal .bpRewardVisual.hasArt .bpIco{display:none}
+#bpModal .bpTile .bpLbl{display:-webkit-box;max-width:100%;min-height:2.5em;overflow:hidden;color:#e5d6b6;font-size:clamp(.56rem,.68vw,.68rem);line-height:1.24;text-align:center;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow-wrap:anywhere;transform:none}
+#bpModal .bpTile.got{min-height:156px;font-size:1.55rem;color:#ffe08b;background:linear-gradient(155deg,rgba(83,64,31,.95),rgba(29,23,13,.99));border-color:rgba(255,216,122,.45)}
+#bpModal .bpTile.got .bpLbl{display:none}
+#bpModal .bpLock{top:6px;left:7px;font-size:.72rem}
+#bpModal .bpNav{flex:0 0 48px;width:48px;min-height:52px;min-width:48px;padding:0;font-size:1.8rem;border-radius:11px}
+#bpModal .bpDots{gap:.5rem;margin:.1rem 0 .15rem}
+#bpModal .bpDot{min-width:36px;min-height:36px;padding:.35rem;border-radius:50%;font-size:.7rem}
+#bpModal .bpDot.on{background:rgba(255,216,122,.1);box-shadow:inset 0 0 0 1px rgba(255,216,122,.32)}
+#bpModal .bpBottom{gap:.65rem;padding:.75rem .2rem .15rem}
+#bpModal .bpXpBox{min-width:min(300px,100%)}
+#bpModal .bpXpLine{font-size:.76rem;line-height:1.45}
+#bpModal .bpBar{height:10px;border:1px solid rgba(255,255,255,.12);background:rgba(0,0,0,.42)}
+#bpModal .bpRates{font-size:.64rem;line-height:1.4}
+#bpModal .bpGold,#bpModal .bpGem{min-height:48px;padding:.62rem 1.2rem;font-size:.82rem}
+#bpModal .screenCloseRow{position:sticky;bottom:calc(-1 * env(safe-area-inset-bottom,0px));z-index:3;margin-top:.55rem;padding:.65rem 0 max(.2rem,env(safe-area-inset-bottom,0px));background:linear-gradient(180deg,rgba(15,17,24,0),rgba(10,12,18,.98) 30%);}
+#bpModal .screenBack{min-height:44px;padding:.45rem 1rem}
+
+@media(max-width:1080px){
+  #decksScreen .decksHeader,#decksScreen .decksFilters{max-width:100%}
+  #decksScreen .decksFilters .colorDot{width:38px;height:38px;min-width:38px;min-height:38px;flex-basis:38px}
+}
+@media(max-width:920px){
+  #bpModal .bpPage,#bpModal .bpPage.on{grid-template-columns:repeat(4,minmax(0,1fr))}
+  #bpModal .bpTile{min-height:146px}
+}
+@media(max-width:760px){
+  #menu .questDashboard{padding:12px;gap:11px}
+  #menu .questDashboardHeader{align-items:flex-start}
+  #menu .questDashboardHeader p{max-width:42ch;font-size:.66rem}
+  #menu .questDashboardGroups{grid-template-columns:minmax(0,1fr)}
+  #menu .questGroup{padding:11px}
+  .questList{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+  .questTask{min-height:98px;grid-template-columns:42px minmax(0,1fr) auto;gap:7px;padding:8px}
+  .questTaskIcon{width:40px;height:48px}
+  .homeQuestClaim{min-width:70px;padding:.4rem .45rem!important}
+  #decksScreen .deckGridWrap{padding:12px 10px calc(154px + env(safe-area-inset-bottom,0px))}
+  #decksScreen .deckGrid{grid-template-columns:repeat(auto-fill,minmax(min(100%,clamp(148px,30vw,196px)),1fr));gap:11px}
+  #decksScreen .deckBox{min-height:380px}
+  #decksScreen .deckBox.addBox{min-height:380px}
+  #decksScreen .decksFooter{display:grid;grid-template-columns:minmax(0,1fr);gap:7px;padding:.48rem .65rem calc(.48rem + env(safe-area-inset-bottom,0px))}
+  #decksScreen .decksFooterLeft{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
+  #decksScreen .decksFooterRight{display:grid;width:100%;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
+  #decksScreen .decksFooterRight #decksSelInfo{grid-column:1/-1;max-width:none!important;white-space:normal!important;line-height:1.25;text-align:center;padding:.12rem 0}
+  #decksScreen .decksFooter .btn{width:100%;min-width:0;min-height:44px!important;padding:.42rem .36rem!important;font-size:.68rem!important}
+  #bpModal .packPanel.bpArenaLarge{width:min(760px,98vw)!important;padding:14px}
+  #bpModal .bpTop{align-items:center}
+  #bpModal .bpEmblem{width:48px;height:48px;flex-basis:48px;font-size:25px}
+  #bpModal .bpTitle{min-width:0}
+  #bpModal .bpTile{min-height:138px;padding:8px 5px}
+  #bpModal .bpRewardVisual{width:min(68px,72%);height:72px}
+  #bpModal .bpTile.got{min-height:138px}
+  #bpModal .bpNav{flex-basis:42px;width:42px;min-width:42px}
+  #bpModal .bpBottom{align-items:stretch}
+  #bpModal .bpXpBox{flex:1 1 100%;min-width:0}
+  #bpModal .bpGold,#bpModal .bpGem{flex:1 1 210px}
+}
+@media(max-width:600px){
+  #menu .questDashboardHeader{display:block}
+  #menu .questDashboardHeader p{margin-top:.45rem;text-align:left}
+  .questList{grid-template-columns:minmax(0,1fr)}
+  .questTask{min-height:94px;grid-template-columns:42px minmax(0,1fr) auto}
+  .questTaskTitle{font-size:.7rem}
+  .questReset{font-size:.54rem}
+  #decksScreen .decksHeader h2 span{display:none}
+  #decksScreen .decksFilters{gap:6px;padding:.48rem .6rem}
+  #decksScreen .decksFilters select,#decksScreen .decksFilters input{flex:1 1 calc(50% - 8px)!important;min-height:44px;font-size:.74rem}
+  #decksScreen #decksSearch{flex:1 1 calc(100% - 50px)!important}
+  #decksScreen #decksSearchClear{flex:0 0 44px}
+  #decksScreen .decksFilters .colorFilters{width:100%;justify-content:space-between}
+  #decksScreen .decksFilters .colorDot{width:40px;height:40px;min-width:40px;min-height:40px;flex-basis:40px}
+  #decksScreen #decksCount{margin-left:auto!important;font-size:.68rem!important}
+  #decksScreen .deckGrid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  #decksScreen .deckBox{min-height:355px}
+  #decksScreen .deckBox.addBox{min-height:355px}
+  #decksScreen .deckBox .deckLabel{min-height:108px;padding:.52rem .42rem .58rem}
+  #decksScreen .deckBox .deckName{font-size:.75rem}
+  #decksScreen .decksFooterLeft{grid-template-columns:repeat(3,minmax(0,1fr))}
+  #decksScreen .decksFooterRight{grid-template-columns:1fr 1fr}
+  #bpModal{padding:6px}
+  #bpModal .packPanel.bpArenaLarge{width:100%!important;max-height:calc(100dvh - 12px)!important;padding:11px 9px}
+  #bpModal .bpPage,#bpModal .bpPage.on{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+  #bpModal .bpTile{min-height:124px;gap:6px;padding:7px 5px}
+  #bpModal .bpRewardVisual{width:58px;height:60px}
+  #bpModal .bpTile .bpLbl{font-size:.6rem}
+  #bpModal .bpTile.got{min-height:124px}
+  #bpModal .bpNav{flex-basis:38px;width:38px;min-width:38px;min-height:46px}
+  #bpModal .bpPageNo{font-size:.62rem;padding:.35rem .5rem}
+  #bpModal .bpPill{min-height:40px;padding:.38rem .65rem;font-size:.68rem}
+  #bpModal .bpDots{gap:.28rem;flex-wrap:wrap}
+  #bpModal .bpDot{min-width:32px;min-height:32px}
+}
+@media(max-width:390px){
+  #decksScreen .decksHeader{padding:.5rem .48rem}
+  #decksScreen .decksHeader h2{font-size:1rem}
+  #decksScreen .decksFooterLeft{grid-template-columns:repeat(2,minmax(0,1fr))}
+  #decksScreen .decksFooter{gap:5px;padding:.36rem .48rem calc(.36rem + env(safe-area-inset-bottom,0px))}
+  #bpModal .bpTitle{font-size:1rem}
+  #bpModal .bpEmblem{width:42px;height:42px;flex-basis:42px;font-size:22px}
+}
+@media(max-height:700px) and (min-width:761px){
+  #bpModal .bpTile{min-height:130px}
+  #bpModal .bpRewardVisual{height:66px}
+  #bpModal .bpTile.got{min-height:130px}
+  #bpModal .bpMid{margin-top:0}
+}
+@media(prefers-reduced-motion:reduce){
+  #menu .questTask,#menu .questTaskProgressBar i,#decksScreen .deckBox,#decksScreen .decksFilters .colorDot,
+  #bpModal .bpTile,#bpModal .bpBar>div{transition:none!important;animation:none!important;scroll-behavior:auto!important}
+  #decksScreen .deckBox:hover,#decksScreen .deckBox.sel,#decksScreen .decksFilters .colorDot.on,
+  #bpModal .bpTile:not(:disabled):hover{transform:none!important}
+}
+
 </style>
 </head>
 <body>
@@ -2398,7 +3224,7 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
 <!-- ======================= ГЛАВНОЕ МЕНЮ ======================= -->
 <!-- ===== ВЕРХНЯЯ ПАНЕЛЬ (макет: бургер · логотип-табличка · кошелёк · профиль) ===== -->
 <nav id="arenaTopNav" aria-label="Главная навигация">
-  <button id="btnBurger" class="ecBurger" type="button" aria-label="Разделы игры" aria-expanded="false" title="Разделы игры">
+  <button id="btnBurger" class="ecBurger" type="button" aria-label="Разделы игры" aria-controls="ecDrawer" aria-expanded="false" title="Разделы игры">
     <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
   </button>
   <div class="ecLogoPlate" title="Эхо-Цитадель — коллекционная карточная игра">
@@ -2407,8 +3233,8 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
     <span class="ecLogoSub">ЭХО-ЦИТАДЕЛЬ · ККИ</span>
   </div>
 
-  <div class="ecDrawer" id="ecDrawer">
-    <div class="ecDrawerHead">Разделы игры</div>
+  <div class="ecDrawer" id="ecDrawer" role="region" aria-labelledby="ecDrawerLabel">
+    <div class="ecDrawerHead" id="ecDrawerLabel">Разделы игры</div>
     <div class="topTabs">
       <button class="topTab active" data-tab="home" title="Главная"><span class="ico">⌂</span> Главная</button>
       <button class="topTab" data-tab="profile" title="Профиль и ранг"><span class="ico">👤</span> Профиль</button>
@@ -2429,7 +3255,7 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
   </div>
 
   <div id="topWallet">
-    <span class="shardPill ecPill ecPillGold" title="Пыль ◈ (золото): бустеры, крафт (5/20/100/400) и разбор (1/5/20/100); дубликаты свыше 4 копий → ◈"><img class="curIco" src="img/ico_cur_0.png" alt="◈" onerror="this.outerHTML='◈ '"><b id="shardBal">0</b></span>
+    <span class="shardPill ecPill ecPillGold" title="Монеты: бустеры, крафт и разбор; дубликаты сверх 4 копий дают монеты"><img class="curIco" src="img/ico_cur_0.png" alt="🪙" onerror="this.outerHTML='🪙 '"><b id="shardBal">0</b></span>
     <span class="shardPill ecPill ecPillGem" title="Гемы: премиум-валюта (достижения, пропуск, кампания, стартовые наборы)"><img class="curIco" src="img/ico_cur_2.png" alt="💎" onerror="this.outerHTML='💎 '"><b id="gemBal">0</b></span>
     <span class="shardPill ecPill ecPillElo" title="Рейтинг (MMR) — очки в рейтинговой лестнице"><img class="curIco" src="img/ico_cur_1.png" alt="✦" onerror="this.outerHTML='✦ '"><b id="topMmr">0</b></span>
     <button class="btn" id="btnAdmin" title="Админка — управление аккаунтами" style="padding:.28rem .5rem;font-size:.72rem;display:none">🛡 Админ</button>
@@ -2446,7 +3272,23 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
       <span class="ecAvaLvl" id="ecProfLvl">1</span>
     </div>
   </div>
-  <div class="ecScrim" id="ecScrim" aria-hidden="true"></div>
+</nav>
+<div class="ecScrim" id="ecScrim" aria-hidden="true"></div>
+
+<!-- Контекстный нав-док под верхней панелью: быстрые разделы и понятный возврат без открытия бургера. -->
+<nav id="ecQuickNav" class="ecQuickNav hidden" aria-label="Быстрые переходы" aria-hidden="true">
+  <button type="button" class="ecQuickBack" data-route="back" title="Назад к предыдущему разделу" aria-label="Назад">
+    <span class="ecQuickIcon" aria-hidden="true">←</span><span class="ecQuickLabel">Назад</span>
+  </button>
+  <span class="ecQuickDivider" aria-hidden="true"></span>
+  <button type="button" data-route="home" title="Главная" aria-label="Главная"><span class="ecQuickIcon" aria-hidden="true">⌂</span><span class="ecQuickLabel">Главная</span></button>
+  <button type="button" data-route="collection" title="Коллекция карт" aria-label="Коллекция"><span class="ecQuickIcon" aria-hidden="true">▤</span><span class="ecQuickLabel">Коллекция</span></button>
+  <button type="button" data-route="decks" title="Колоды" aria-label="Колоды"><span class="ecQuickIcon" aria-hidden="true">▣</span><span class="ecQuickLabel">Колоды</span></button>
+  <button type="button" data-route="packs" title="Бустеры" aria-label="Бустеры"><span class="ecQuickIcon" aria-hidden="true">◈</span><span class="ecQuickLabel">Бустеры</span></button>
+  <button type="button" data-route="store" title="Магазин и косметика" aria-label="Магазин"><span class="ecQuickIcon" aria-hidden="true">🛒</span><span class="ecQuickLabel">Магазин</span></button>
+  <button type="button" data-route="events" title="События" aria-label="События"><span class="ecQuickIcon" aria-hidden="true">⚑</span><span class="ecQuickLabel">События</span></button>
+  <button type="button" data-route="mastery" title="Боевой пропуск" aria-label="Пропуск"><span class="ecQuickIcon" aria-hidden="true">✧</span><span class="ecQuickLabel">Пропуск</span></button>
+  <button type="button" data-route="profile" title="Профиль" aria-label="Профиль"><span class="ecQuickIcon" aria-hidden="true">◉</span><span class="ecQuickLabel">Профиль</span></button>
 </nav>
 
 <!-- ======================= ГЛАВНОЕ МЕНЮ · ХАБ (макет) ======================= -->
@@ -2488,10 +3330,10 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
   </div>
 
   <div class="menuInner ecHub">
-    <div class="ecOrbs facCarousel" id="menuHeroes" title="Карусель фракций: клик выбирает фракцию (аватары героев — art_raw/heroes/&lt;Фракция&gt;/)"></div>
+    <div class="ecOrbs facCarousel" id="menuHeroes" role="group" aria-label="Быстрый выбор фракции" title="Быстрый выбор фракции: нажатие сразу переключает фракцию (аватары — art_raw/heroes/&lt;Фракция&gt;/)"></div>
 
     <div class="ecMain">
-      <div class="ecCards" id="playerFactions"></div>
+      <div class="ecCards" id="playerFactions" role="group" aria-label="Архетипы фракций: открыть описание и выбрать фракцию"></div>
 
       <aside class="ecChallenge" aria-label="Активный вызов">
         <div class="ecChTitle">Активный вызов</div>
@@ -2520,7 +3362,7 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
           </select>
         </label>
         <div class="ecField"><span>Колода</span>
-          <span class="ecDeckRow"><select id="deckPick"></select><button class="btn ecMiniBtn" id="btnMakeDeck" title="Открыть конструктор колод (вкладка «Конструктор» в коллекции)">＋</button></span>
+          <span class="ecDeckRow"><select id="deckPick" aria-label="Выберите колоду для матча"></select><button class="btn ecMiniBtn" id="btnMakeDeck" aria-label="Открыть конструктор колод" title="Открыть конструктор колод (вкладка «Конструктор» в коллекции)">＋</button></span>
         </div>
 
         <div class="ecProgress" id="ecProgress" title="Каждые 5 побед в рейтинге — сундук с наградой">
@@ -2540,6 +3382,32 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
       </aside>
     </div>
 
+    <section class="questDashboard" id="homeQuests" aria-label="Ежедневные и еженедельные задания">
+      <header class="questDashboardHeader">
+        <div class="questDashboardTitle">
+          <span class="questDashboardEyebrow">ПРОГРЕСС · НАГРАДЫ</span>
+          <h2>Задания</h2>
+        </div>
+        <p>Выполняйте цели в матчах и забирайте монеты вместе с опытом боевого пропуска.</p>
+      </header>
+      <div class="questDashboardGroups">
+        <section class="questGroup questGroupDaily" aria-label="Ежедневные задания">
+          <header class="questGroupHeader">
+            <div><span class="questGroupEyebrow">КАЖДЫЙ ДЕНЬ</span><h3>Ежедневные</h3></div>
+            <span class="questReset" data-quest-reset="daily" data-reset-prefix="Сброс через">—</span>
+          </header>
+          <div class="questList" id="homeDailyQuests" role="list" aria-live="polite"></div>
+        </section>
+        <section class="questGroup questGroupWeekly" aria-label="Еженедельные задания">
+          <header class="questGroupHeader">
+            <div><span class="questGroupEyebrow">КАЖДУЮ НЕДЕЛЮ</span><h3>Еженедельные</h3></div>
+            <span class="questReset" data-quest-reset="weekly" data-reset-prefix="Сброс через">—</span>
+          </header>
+          <div class="questList" id="homeWeeklyQuests" role="list" aria-live="polite"></div>
+        </section>
+      </div>
+    </section>
+
     <nav id="menuNav" class="ecBottomNav" aria-label="Разделы игры">
       <button class="ecNavBtn active" id="btnNavHome" title="Главная"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 11.5 12 4l8 7.5V20a1 1 0 0 1-1 1h-4.5v-5.5h-5V21H5a1 1 0 0 1-1-1z"/></svg><span>Главная</span></button>
       <button class="ecNavBtn" id="btnNavDecks" title="Мои колоды"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="7" y="4" width="12" height="16" rx="2"/><path d="M5 7v12a2 2 0 0 0 2 2h9"/></svg><span>Колоды</span></button>
@@ -2547,7 +3415,7 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
       <button class="ecNavBtn" id="btnNavQuests" title="Задания и профиль"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="4" width="14" height="17" rx="2"/><rect x="9" y="2" width="6" height="3" rx="1"/><path d="M8.5 11h7M8.5 15h5"/></svg><span>Задания</span></button>
       <button class="ecNavBtn" id="btnNavMulti" title="Сетевые режимы и события"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="3"/><circle cx="16.8" cy="9.5" r="2.4"/><path d="M3.5 19.5c.6-3.4 3-5.2 5.5-5.2s4.9 1.8 5.5 5.2"/><path d="M14.8 14.8c2.4.4 4.3 1.9 4.9 4.7"/></svg><span>Сетевая</span></button>
       <button class="ecNavBtn" id="btnShop" title="Магазин: бустеры, бандлы, косметика, крафт"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h2.4l2.1 10.2h9.8L19.5 8H7"/><circle cx="9.5" cy="19" r="1.6" fill="currentColor" stroke="none"/><circle cx="16.3" cy="19" r="1.6" fill="currentColor" stroke="none"/></svg><span>Магазин</span></button>
-      <button class="ecNavBtn" id="btnTopSettings" title="Настройки интерфейса"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M12 3.4v2.4M12 18.2v2.4M3.4 12h2.4M18.2 12h2.4M5.9 5.9l1.7 1.7M16.4 16.4l1.7 1.7M18.1 5.9l-1.7 1.7M7.6 16.4l-1.7 1.7"/></svg><span>Настройки</span></button>
+      <button class="ecNavBtn" id="btnTopSettings" title="Настройки интерфейса" aria-haspopup="dialog" aria-controls="settingsPanel"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M12 3.4v2.4M12 18.2v2.4M3.4 12h2.4M18.2 12h2.4M5.9 5.9l1.7 1.7M16.4 16.4l1.7 1.7M18.1 5.9l-1.7 1.7M7.6 16.4l-1.7 1.7"/></svg><span>Настройки</span></button>
       <button class="ecNavBtn" id="btnNavExit" title="Выход"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4"/><path d="M4 12h9m0 0-3.2-3.2M13 12l-3.2 3.2"/></svg><span>Выход</span></button>
     </nav>
 
@@ -2561,36 +3429,69 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
   </div>
 </div>
 
-<!-- ======================= БУСТЕР ======================= -->
-<div id="boosterModal" class="hidden" role="dialog" aria-label="Бустер">
-  <div class="packPanel">
-    <h3 style="margin:0;font-family:'Philosopher',serif;color:#ffe9b0;letter-spacing:.08em;font-size:1.15rem">Бустер «Эхо-Цитадель»</h3>
-    <div style="font-size:.66rem;color:#cbb98a;letter-spacing:.06em">набор «Расширение I» (ECH1): падают ТОЛЬКО новые карты — база 150 открыта на старте · состав как в MTG: 3 обычных, 1 редкая, 1 эпическая (1/8 легендарная) · фойл 1/5 · лимит 4 копии, излишек → ◈ · клик — перевернуть</div>
-    <div class="packStage" id="packStage">
-      <div class="packSealed hidden" id="packSealed" role="button" tabindex="0" aria-label="Вскрыть бустер">
-        <div class="packSealedInner">
-          <img class="packSealedArtImg" alt="" loading="lazy">
-          <div class="packTearHalf top" aria-hidden="true"></div>
-          <div class="packTearHalf bot" aria-hidden="true"></div>
-          <div class="packSealedGlow"></div>
-          <div class="packSealedArt">
-            <span class="psTop">ECH I</span>
-            <span class="psSig">✦</span>
-            <span class="psBot">ЭХО-ЦИТАДЕЛЬ</span>
-          </div>
-          <div class="packSealedShine"></div>
-          <div class="volGlare" aria-hidden="true"></div>
-        </div>
-        <div class="packSealedHint">Нажми, чтобы вскрыть ✦</div>
+<!-- ======================= БУСТЕРЫ: коллекция паков + сцена вскрытия ======================= -->
+<div id="boosterModal" class="hidden" role="dialog" aria-modal="true" aria-label="Коллекция бустеров">
+  <div class="packPanel boosterPanel">
+    <header class="boosterHeader">
+      <div class="boosterHeading">
+        <span class="boosterEyebrow">ЭХО-ЦИТАДЕЛЬ · КОЛЛЕКЦИЯ ПАКОВ</span>
+        <h2>Бустеры</h2>
+        <p>Выберите тип слева. Пока пачка запечатана, её можно переключить без списания из запаса.</p>
       </div>
-      <div class="packRow" id="packRow"></div>
+      <div class="boosterHeaderTools">
+        <div class="boosterWallet" aria-label="Баланс">
+          <span title="Монеты"><i>🪙</i><b id="boosterShardBal">0</b></span>
+          <span title="Гемы"><i>◆</i><b id="boosterGemBal">0</b></span>
+        </div>
+        <button class="btn boosterClose screenBack" id="btnPackClose" title="Назад к предыдущему экрану" aria-label="Назад">← Назад</button>
+      </div>
+    </header>
+    <div class="boosterWorkspace">
+      <aside class="boosterShelf" aria-label="Мои бустеры">
+        <div class="boosterShelfHeading"><span>Мои бустеры</span><b id="boosterCountTotal">0</b></div>
+        <div class="boosterInventory" id="boosterInventory" aria-live="polite"></div>
+        <p class="boosterShelfNote">Купленные и наградные паки собраны здесь. Изображение бустера подставляется из арт-папки проекта.</p>
+      </aside>
+      <section class="boosterOpenZone" aria-label="Сцена вскрытия бустера">
+        <div class="boosterOpenHeader">
+          <div><span class="boosterOpenEyebrow">СЦЕНА ВСКРЫТИЯ</span><small id="packTypeSubtitle">Выберите тип · 5 карт в наборе</small></div>
+          <span class="boosterStageStatus" id="packStageStatus" aria-live="polite">Выберите бустер слева</span>
+        </div>
+        <div class="packStage" id="packStage">
+          <div class="packEmpty" id="packEmpty" aria-live="polite">
+            <span class="packEmptyGlyph" aria-hidden="true">✦</span>
+            <strong>Выберите бустер</strong>
+            <span>Пак появится здесь. Нажмите на него, чтобы вскрыть.</span>
+          </div>
+          <div class="packSealed hidden" id="packSealed" role="button" tabindex="0" aria-label="Вскрыть бустер">
+            <div class="packSealedInner">
+              <img class="packSealedArtImg" alt="" loading="lazy">
+              <div class="packTearHalf top" aria-hidden="true"></div>
+              <div class="packTearHalf bot" aria-hidden="true"></div>
+              <div class="packSealedGlow"></div>
+              <div class="packSealedArt">
+                <span class="psTop">ECH I</span>
+                <span class="psSig">✦</span>
+                <span class="psBot">ЭХО-ЦИТАДЕЛЬ</span>
+              </div>
+              <div class="packSealedShine"></div>
+              <div class="volGlare" aria-hidden="true"></div>
+            </div>
+            <div class="packSealedHint">Нажмите, чтобы вскрыть · тип можно сменить до этого</div>
+          </div>
+          <div class="packRow" id="packRow" aria-label="Карты из бустера"></div>
+        </div>
+        <div class="boosterOpenFooter"><span>Клик по карте — перевернуть</span><span>Редкие карты подсвечиваются отдельно</span></div>
+      </section>
     </div>
-    <div style="display:flex;gap:.6rem;justify-content:center;flex-wrap:wrap">
-      <button class="btn primary" id="btnPackNew">Купить бустер — 300 ◈</button>
-      <button class="btn" id="btnPackPrem" title="Награда премиум-ветки пропуска: 2 обычных + 1 редкая + 2 эпических+ (12.5% легендарная)">🌟 Премиум-бустер (в запасе: 0)</button>
-      <button class="btn" id="btnPackFlip">Показать все</button>
-      <button class="btn" id="btnPackClose">В коллекцию</button>
-    </div>
+    <footer class="boosterActions">
+      <span class="boosterActionHint">Пак можно открыть мышью, касанием или клавишей Enter.</span>
+      <div class="boosterActionButtons">
+        <button class="btn primary" id="btnPackNew" title="Перейти в магазин бустеров">Магазин бустеров</button>
+        <button class="btn" id="btnPackPrem" title="Выбрать премиум-бустер; запас спишется при вскрытии">🌟 Премиум-бустер (в запасе: 0)</button>
+        <button class="btn" id="btnPackFlip" disabled>Показать все</button>
+      </div>
+    </footer>
   </div>
 </div>
 
@@ -2646,23 +3547,26 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
 </div>
 
 <div id="bpModal" class="hidden" role="dialog" aria-label="Боевой пропуск">
-  <div class="packPanel bpArena">
+  <div class="packPanel bpArena bpArenaLarge">
     <div id="bpBody"></div>
-    <div style="display:flex;justify-content:center;margin-top:.6rem"><button class="btn" id="btnBPClose">Закрыть</button></div>
+    <div class="screenCloseRow"><button class="btn screenBack" id="btnBPClose">← Назад</button></div>
   </div>
 </div>
 
-<div id="profileModal" class="hidden" role="dialog" aria-label="Профиль">
-  <div class="packPanel" style="max-width:560px;width:92vw;max-height:86vh;overflow:auto">
+<div id="profileModal" class="hidden" role="dialog" aria-label="Профиль игрока" aria-modal="true">
+  <div class="packPanel profileArena">
+    <header class="profilePageTop">
+      <div><span class="profileEyebrow">ЭХО-ЦИТАДЕЛЬ · ЛИЧНОЕ ДЕЛО</span><h2>Профиль игрока</h2></div>
+      <button class="btn profileBack" id="btnProfileClose" type="button" aria-label="Назад к предыдущему разделу">← Назад</button>
+    </header>
     <div id="profBody"></div>
-    <div style="display:flex;justify-content:center;margin-top:.6rem"><button class="btn" id="btnProfileClose">Закрыть</button></div>
   </div>
 </div>
 
 <div id="shopModal" class="hidden" role="dialog" aria-label="Магазин">
   <div class="packPanel shopArena">
     <div id="shopBody"></div>
-    <div style="display:flex;justify-content:center;margin-top:.6rem"><button class="btn" id="btnShopClose">Закрыть</button></div>
+    <div class="screenCloseRow"><button class="btn screenBack" id="btnShopClose">← Назад</button></div>
   </div>
 </div>
 
@@ -2718,7 +3622,7 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
     <div class="spacer"></div>
     <div id="whoTurn">Ваш ход</div>
     <button class="btn" id="btnSound" title="Звук: синтезируется в браузере, файлов нет" style="padding:.3rem .7rem;font-size:.7rem">🔊 Звук</button>
-    <button class="btn" id="btnSettings" title="Настройки интерфейса (H)" aria-haspopup="dialog" style="padding:.3rem .7rem;font-size:.7rem">⚙</button>
+    <button class="btn" id="btnSettings" title="Настройки интерфейса (H)" aria-haspopup="dialog" aria-controls="settingsPanel" style="padding:.3rem .7rem;font-size:.7rem">⚙</button>
     <button class="btn" id="btnMenu" style="padding:.3rem .7rem;font-size:.7rem">Меню</button>
   </div>
 
@@ -2818,9 +3722,9 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
 
 <!-- ======================= НАСТРОЙКИ ======================= -->
 <div id="settingsScrim" class="hidden" aria-hidden="true"></div>
-<div id="settingsPanel" class="hidden" role="dialog" aria-label="Настройки интерфейса">
+<div id="settingsPanel" class="hidden" role="dialog" aria-modal="true" aria-labelledby="settingsTitle" aria-label="Настройки интерфейса">
   <div class="setHead">
-    <h3>Настройки</h3>
+    <h3 id="settingsTitle">Настройки</h3>
     <button class="btn setClose" id="btnSetClose" aria-label="Закрыть настройки" title="Закрыть (Esc)">✕</button>
   </div>
   <div class="setGroups">
@@ -2974,72 +3878,85 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
 </div>
 
 <!-- ======================= КОЛЛЕКЦИЯ ======================= -->
-<div id="collection" class="hidden" style="position:fixed;inset:52px 0 0 0;z-index:150;background:rgba(4,5,9,.96);display:flex;flex-direction:column">
-  <div style="display:flex;gap:.6rem;align-items:center;padding:.7rem 1rem;border-bottom:1px solid var(--line);flex-wrap:wrap">
-    <h2 style="font-size:1.1rem;letter-spacing:.16em;text-transform:uppercase;color:var(--gold-hi)">Коллекция</h2>
-    <div style="display:flex;border:1px solid var(--line);border-radius:4px;overflow:hidden">
-      <button class="btn tabBtn sel" id="tabCollection" style="border:0;border-radius:0">Карты</button>
-      <button class="btn tabBtn" id="tabBuilder" style="border:0;border-radius:0;border-left:1px solid var(--line)">Конструктор колод</button>
+<div id="collection" class="collectionScreen hidden" role="region" aria-label="Коллекция карт и конструктор колод">
+  <header class="collectionHeader">
+    <div class="collectionTopline">
+      <h2 class="collectionTitle">Коллекция</h2>
+      <div class="collectionTabs" role="group" aria-label="Раздел коллекции">
+        <button class="btn tabBtn sel" id="tabCollection" aria-controls="colGrid">Карты</button>
+        <button class="btn tabBtn" id="tabBuilder" aria-controls="dbMain">Конструктор колод</button>
+      </div>
+      <span id="colHint" class="collectionHint">Коллекция загружается постепенно · Borderless — тот же игровой ID, только без рамки</span>
+      <span id="colCount" class="collectionCount" aria-live="polite"></span>
+      <button class="btn collectionClose" id="btnColClose" aria-label="Закрыть коллекцию">Закрыть</button>
     </div>
-    <span id="colHint" style="font-size:.68rem;color:var(--muted)">клик по карте — открыть и прочитать описание</span>
-    <div id="colFilters" style="display:contents">
-    <select id="colFaction"></select>
-    <select id="colType">
-      <option value="">Все типы</option><option value="Creature">Существа</option>
-      <option value="Spell">Заклинания</option><option value="Rune">Руны</option>
-    </select>
-    <select id="colRarity">
-      <option value="">Все редкости</option><option value="Common">Обычные</option>
-      <option value="Uncommon">Необычные</option><option value="Rare">Редкие</option>
-      <option value="Epic">Эпические</option><option value="Legendary">Легендарные</option>
-    </select>
-    <input id="colSearch" placeholder="Поиск по названию…" style="background:#14161f;border:1px solid var(--line);color:var(--text);padding:.45rem;border-radius:3px;font-family:inherit;min-width:190px">
-    <select id="colCost" title="Стоимость">
-      <option value="">Любая цена</option><option value="low">1–3</option><option value="mid">4–5</option><option value="high">6+</option>
-    </select>
-    <select id="colKw" title="Ключевое слово">
-      <option value="">Любые слова</option><option value="Taunt">Провокация</option><option value="Rush">Рывок</option>
-      <option value="Trample">Прорыв</option><option value="Lifesteal">Вампиризм</option><option value="Windfury">Буря</option>
-      <option value="Unblockable">Неуклонность</option>
-    </select>
-    <label style="display:inline-flex;align-items:center;gap:.35rem;font-size:.72rem;color:#cbb98a;cursor:pointer"><input type="checkbox" id="colOwned"> только полученные</label>
+    <div id="colFilters" class="collectionFilters">
+      <select id="colFaction" aria-label="Фракция"></select>
+      <select id="colType" aria-label="Тип карты">
+        <option value="">Все типы</option><option value="Creature">Существа</option>
+        <option value="Spell">Заклинания</option><option value="Rune">Руны</option>
+      </select>
+      <select id="colRarity" aria-label="Редкость">
+        <option value="">Все редкости</option><option value="Common">Обычные</option>
+        <option value="Uncommon">Необычные</option><option value="Rare">Редкие</option>
+        <option value="Epic">Эпические</option><option value="Legendary">Легендарные</option>
+      </select>
+      <input id="colSearch" aria-label="Поиск карт" placeholder="Поиск по названию…">
+      <select id="colCost" title="Стоимость" aria-label="Стоимость карты">
+        <option value="">Любая цена</option><option value="low">1–3</option><option value="mid">4–5</option><option value="high">6+</option>
+      </select>
+      <select id="colKw" title="Ключевое слово" aria-label="Ключевое слово">
+        <option value="">Любые слова</option><option value="Taunt">Провокация</option><option value="Rush">Рывок</option>
+        <option value="Trample">Прорыв</option><option value="Lifesteal">Вампиризм</option><option value="Windfury">Буря</option>
+        <option value="Unblockable">Неуклонность</option>
+      </select>
+      <select id="colStyle" title="Оформление карты" aria-label="Оформление карты">
+        <option value="classic">Классические · 500</option><option value="borderless">Borderless · ещё 500</option><option value="" selected>Все варианты · 1000</option>
+      </select>
+      <label class="ownedFilter"><input type="checkbox" id="colOwned"> только полученные</label>
     </div>
-    <div id="dbBar" class="hidden" style="display:contents">
-      <select id="dbMyDecks" title="Мои сохранённые колоды"></select>
+    <div id="dbBar" class="builderToolbar hidden">
+      <select id="dbMyDecks" title="Мои сохранённые колоды" aria-label="Мои сохранённые колоды"></select>
       <button class="btn" id="btnDbNew" title="Новая колода выбранной фракцией">＋ Новая</button>
       <button class="btn" id="btnDbDup" title="Скопировать текущую выбранную колоду в редактор">Дубликат</button>
-      <input id="dbName" placeholder="Название колоды…" style="background:#14161f;border:1px solid var(--line);color:var(--text);padding:.45rem;border-radius:3px;font-family:inherit;min-width:150px">
-      <select id="dbFaction" title="Фракция колоды: смена пересобирает пул"></select>
+      <input id="dbName" aria-label="Название колоды" placeholder="Название колоды…">
+      <select id="dbFaction" title="Фракция колоды: смена пересобирает пул" aria-label="Фракция колоды"></select>
+      <label class="dbAvatarField" title="Выберите карту из колоды: её существующий арт станет обложкой">
+        <span class="dbAvatarLabel">Обложка колоды</span>
+        <span class="dbAvatarPicker">
+          <span id="dbAvatarPreview" class="dbAvatarPreview" aria-hidden="true"></span>
+          <select id="dbAvatarCard" aria-label="Карта-аватар колоды"><option value="">Добавьте карты</option></select>
+          <button class="btn dbAvatarGalleryBtn" id="btnDbAvatarGallery" type="button" title="Открыть галерею артов карт этой колоды" disabled>Выбрать арт</button>
+        </span>
+      </label>
       <button class="btn" id="btnDbExport" title="Скопировать код колоды">Экспорт</button>
       <button class="btn" id="btnDbImport" title="Вставить код колоды">Импорт</button>
       <button class="btn primary" id="btnDbSave">Сохранить</button>
       <button class="btn" id="btnDbDelete">Удалить</button>
-      <button class="btn" id="btnDbUse" title="Выбрать редактируемую колоду для боя в главном меню">В бой</button>
-      <span id="dbCount" style="font-size:.8rem;color:var(--gold-hi);font-variant-numeric:tabular-nums"></span>
+      <button class="btn" id="btnDbUse" title="Запустить бой на этой сохранённой колоде">В бой</button>
+      <span id="dbCount" class="builderCount" aria-live="polite"></span>
     </div>
-    <div class="spacer" style="flex:1"></div>
-    <span id="colCount" style="font-size:.72rem;color:var(--muted)"></span>
-    <button class="btn" id="btnColClose">Закрыть</button>
-  </div>
-  <div id="dbStatus" class="hidden" style="padding:.4rem 1rem;font-size:.74rem;color:#ffb4a8;background:rgba(120,30,20,.16);border-bottom:1px solid var(--line)"></div>
-  <div id="colGrid" style="flex:1;overflow-y:auto;padding:1rem;display:flex;gap:.8rem;flex-wrap:wrap;align-content:flex-start;justify-content:center"></div>
-  <div id="dbMain" class="hidden">
-    <div id="dbDeckCol">
+  </header>
+  <div id="dbStatus" class="builderStatus hidden" role="status" aria-live="polite"></div>
+  <div id="colGrid" class="collectionGrid" role="region" aria-label="Карты коллекции"></div>
+  <div id="dbMain" class="builderMain hidden">
+    <section id="dbDeckCol" aria-label="Состав колоды">
       <div class="dbHead">Колода <span id="dbDeckFaction" style="color:var(--muted)"></span></div>
-      <div id="dbDeckList"></div>
-      <div class="dbCurve" id="dbCurve" title="Кривая маны"></div>
-    </div>
-    <div id="dbPoolCol">
+      <div id="dbDeckList" role="region" aria-label="Карты в колоде"></div>
+      <div class="dbCurve" id="dbCurve" role="img" aria-label="Кривая стоимости карт" title="Кривая маны"></div>
+    </section>
+    <section id="dbPoolCol" aria-label="Пул доступных карт">
       <div class="dbPoolBar">
-        <input id="dbSearch" placeholder="Поиск карты…" style="background:#14161f;border:1px solid var(--line);color:var(--text);padding:.4rem;border-radius:3px;font-family:inherit;min-width:170px">
-        <select id="dbType">
+        <input id="dbSearch" aria-label="Поиск карт для колоды" placeholder="Поиск карты…">
+        <select id="dbType" aria-label="Тип карты в пуле">
           <option value="">Все типы</option><option value="Creature">Существа</option>
           <option value="Spell">Заклинания</option><option value="Rune">Руны</option>
         </select>
-        <span style="font-size:.66rem;color:var(--muted)">клик — добавить · ПКМ — убрать · двойной клик — описание</span>
+        <button class="btn dbStyleAll" id="btnDbStyleAll" title="Применить или снять Borderless-стиль у всех полученных карт">◇ Все стили</button>
+        <span class="dbPoolHelp">Клик — добавить · ПКМ — убрать · «i» — описание · ◇ — выбрать стиль. ID и лимиты общие; стиль отображается в матче.</span>
       </div>
-      <div id="dbPoolGrid"></div>
-    </div>
+      <div id="dbPoolGrid" role="region" aria-label="Доступные карты для добавления"></div>
+    </section>
   </div>
 </div>
 
@@ -3047,27 +3964,27 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
 <div id="decksScreen" class="hidden" role="region" aria-label="Колоды">
   <div class="decksHeader">
     <h2><i>🂠</i> Колоды <span style="font-size:.62rem;color:#8b93ab;letter-spacing:.08em;text-transform:none;margin-left:.4rem;font-family:inherit">ваши колоды и конструктор</span></h2>
-    <button class="btn" id="btnDecksClose" style="padding:.32rem .7rem;font-size:.72rem">✕ Закрыть</button>
+    <button class="btn screenBack" id="btnDecksClose" style="padding:.42rem .8rem;font-size:.72rem">← Назад</button>
   </div>
   <div class="decksFilters">
-    <select id="decksSort" title="Сортировка">
+    <select id="decksSort" title="Сортировка" aria-label="Сортировать колоды">
       <option value="modified">Последние изменения</option>
       <option value="name">Название А-Я</option>
       <option value="faction">Фракция</option>
     </select>
-    <select id="decksFormat" title="Формат">
+    <select id="decksFormat" title="Формат" aria-label="Формат колод">
       <option value="all">Все колоды</option>
       <option value="standard">Стандарт</option>
     </select>
-    <input id="decksSearch" placeholder="Поиск колоды..." autocomplete="off">
-    <button class="btn" id="decksSearchClear" style="padding:.32rem .5rem;font-size:.68rem">✕</button>
+    <input id="decksSearch" aria-label="Поиск колоды" placeholder="Поиск колоды..." autocomplete="off">
+    <button type="button" class="btn" id="decksSearchClear" aria-label="Очистить поиск" title="Очистить поиск" style="padding:.32rem .5rem;font-size:.68rem">✕</button>
     <div class="colorFilters" id="decksColorFilters" title="Фильтр по фракции">
-      <span class="colorDot aur on" data-f="Aurites" title="Ауриты">✵</span>
-      <span class="colorDot nec on" data-f="Necrus" title="Некрусы">☠</span>
-      <span class="colorDot ter on" data-f="Terramorph" title="Терраморфы">⛰</span>
-      <span class="colorDot pyr on" data-f="Pyromancer" title="Пироманты">🜂</span>
-      <span class="colorDot eth on" data-f="Ethereal" title="Эфирные">☁</span>
-      <span class="colorDot neu on" data-f="Neutral" title="Все">◈</span>
+      <button type="button" class="colorDot aur on" data-f="Aurites" title="Ауриты" aria-label="Фильтр: Ауриты" aria-pressed="true">✵</button>
+      <button type="button" class="colorDot nec on" data-f="Necrus" title="Некрусы" aria-label="Фильтр: Некрусы" aria-pressed="true">☠</button>
+      <button type="button" class="colorDot ter on" data-f="Terramorph" title="Терраморфы" aria-label="Фильтр: Терраморфы" aria-pressed="true">⛰</button>
+      <button type="button" class="colorDot pyr on" data-f="Pyromancer" title="Пироманты" aria-label="Фильтр: Пироманты" aria-pressed="true">🜂</button>
+      <button type="button" class="colorDot eth on" data-f="Ethereal" title="Эфирные" aria-label="Фильтр: Эфирные" aria-pressed="true">☁</button>
+      <button type="button" class="colorDot neu on" data-f="Neutral" title="Нейтральные" aria-label="Фильтр: нейтральные колоды" aria-pressed="true">◈</button>
     </div>
     <span id="decksCount" style="font-size:.68rem;color:#8b93ab;margin-left:auto"></span>
   </div>
@@ -3082,9 +3999,27 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
     </div>
     <div class="decksFooterRight">
       <span id="decksSelInfo" style="font-size:.68rem;color:#cbb98a;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
-      <button class="btn primary" id="btnDecksEdit" disabled>Редактировать</button>
+      <button class="btn primary" id="btnDecksPlay" disabled>Играть</button>
+      <button class="btn" id="btnDecksEdit" disabled>Редактировать</button>
     </div>
   </div>
+</div>
+<div id="deckArtPickerModal" class="deckArtPickerModal hidden" role="dialog" aria-modal="true" aria-labelledby="deckArtPickerTitle" aria-describedby="deckArtPickerHint">
+  <section class="deckArtPickerPanel" role="document">
+    <header class="deckArtPickerHeader">
+      <div class="deckArtPickerHeading">
+        <span class="deckArtPickerEyebrow">ОБЛОЖКА КОЛОДЫ</span>
+        <h2 id="deckArtPickerTitle">Выберите арт колоды</h2>
+        <p id="deckArtPickerHint">Выберите карту из состава. Арт будет показан целиком, без обрезки.</p>
+      </div>
+      <button class="deckArtPickerClose" id="btnDeckArtPickerClose" type="button" aria-label="Закрыть выбор арта" title="Закрыть">×</button>
+    </header>
+    <div id="deckArtPickerGrid" class="deckArtPickerGrid" role="list" aria-label="Арты карт этой колоды"></div>
+    <footer class="deckArtPickerFooter">
+      <span>На обложку можно поставить любую карту этой колоды.</span>
+      <button class="btn" id="btnDeckArtPickerDone" type="button">Готово</button>
+    </footer>
+  </section>
 </div>
 <!-- ======================= HOME ARENA (как на скрине 3) ======================= -->
 <div id="homeScreen" class="hidden" role="region" aria-label="Home">
@@ -3109,14 +4044,7 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
       <div class="draftCard" style="height:74px" data-draft="neon"><div class="draftInfo"><div class="draftTitle">Neon Arcade</div><div class="draftSub">Event</div></div><span class="draftArrow">›</span></div>
     </div>
   </div>
-  <div class="homeQuests" id="homeQuests">
-    <div class="questChip"><span class="qIcon">◈</span><span class="qText"><b>750</b> Attack with 45 creatures.</span><span style="font-size:.58rem;color:#8b93ab;margin-left:auto">28/45</span></div>
-    <div class="questChip"><span class="qIcon">◈</span><span class="qText"><b>500</b> Cast 20 blue or green spells.</span><span style="font-size:.58rem;color:#8b93ab;margin-left:auto">0/20</span></div>
-    <div class="questChip"><span class="qIcon">◈</span><span class="qText"><b>500</b> Cast 20 white or green spells.</span><span style="font-size:.58rem;color:#8b93ab;margin-left:auto">0/20</span></div>
-    <div class="questChip"><span class="qIcon">◈</span><span class="qText"><b>250</b> Daily win</span><span style="font-size:.58rem;color:#8b93ab;margin-left:auto">0/15</span></div>
-    <div class="questChip xp"><span class="qIcon">XP</span><span class="qText"><b>Level 12</b> Mastery pass</span></div>
-    <div class="questChip" style="min-width:92px;justify-content:center;background:linear-gradient(180deg,#2a3a2a,#101616)"><span style="font-size:.62rem;color:#8b93ab">Weekly wins 0/15</span></div>
-  </div>
+  <div class="homeQuests" id="legacyHomeQuests" aria-hidden="true"></div>
   <div class="homeBottom">
     <div style="height:4px;flex:1;background:rgba(255,255,255,.06);border-radius:2px;position:relative"><div style="position:absolute;left:0;top:0;bottom:0;width:18%;background:linear-gradient(90deg,#ff9c2a,#ffd87a);border-radius:2px"></div></div>
     <button class="playBtn" id="homePlayBtn">Play</button>
@@ -3124,7 +4052,7 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
 </div>
 <!-- ======================= EVENTS ARENA (как на скрине 4) ======================= -->
 <div id="eventsScreen" class="hidden" role="region" aria-label="Events" style="position:fixed;inset:52px 0 0 0;z-index:146;background:radial-gradient(1100px 420px at 50% -60px,rgba(22,18,32,.4),transparent 68%),linear-gradient(180deg,#0a0d14,#07090e);display:flex;flex-direction:column;overflow:hidden;padding-right:220px">
-  <div style="max-width:1180px;width:100%;margin:0 auto;padding:12px 12px 8px;display:flex;align-items:center;gap:.8rem"><h2 style="font-family:Philosopher,serif;color:#ffe9b0;letter-spacing:.1em;font-size:1.25rem">События</h2><span style="font-size:.62rem;color:#8b93ab">Все режимы игры</span><button class="btn" id="btnEventsClose" style="margin-left:auto;padding:.32rem .7rem;font-size:.72rem">✕</button></div>
+  <div style="max-width:1180px;width:100%;margin:0 auto;padding:12px 12px 8px;display:flex;align-items:center;gap:.8rem"><h2 style="font-family:Philosopher,serif;color:#ffe9b0;letter-spacing:.1em;font-size:1.25rem">События</h2><span style="font-size:.62rem;color:#8b93ab">Все режимы игры</span><button class="btn screenBack" id="btnEventsClose" style="margin-left:auto;padding:.42rem .8rem;font-size:.72rem">← Назад</button></div>
   <div id="eventsGrid" style="flex:1;overflow:auto;padding:8px 12px 12px;display:grid;grid-template-columns:repeat(3,1fr);gap:10px;max-width:1180px;width:100%;margin:0 auto"></div>
   <div style="position:fixed;right:0;top:52px;bottom:0;width:220px;background:rgba(6,6,9,.92);border-left:1px solid rgba(255,255,255,.06);padding:10px;display:flex;flex-direction:column;gap:8px;overflow:auto" id="eventsSide">
     <div style="font-family:Philosopher,serif;color:#ffe9b0;font-size:.82rem;display:flex;align-items:center;gap:.4rem">◆ СОБЫТИЯ</div>
@@ -3146,9 +4074,10 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
     <span id="cmPos" style="font-size:.74rem;color:var(--muted);min-width:74px;text-align:center"></span>
     <button class="btn" id="cmNext" title="Следующая карта (→)">→</button>
     <span id="cmOwned" style="font-size:.7rem;color:#cbb98a;min-width:110px;text-align:center"></span>
-    <button class="btn" id="cmCraft" title="Создать копию за осколки">Создать</button>
-    <button class="btn" id="cmDust" title="Разобрать копию в осколки">Разобрать</button>
+    <button class="btn" id="cmCraft" title="Создать копию за монеты">Создать</button>
+    <button class="btn" id="cmDust" title="Разобрать копию и получить монеты">Разобрать</button>
     <button class="btn" id="cmFoil" title="Фойл-жетон пропуска: сделать фойл-версию карты">🌟 Фойл</button>
+    <button class="btn cmBorderlessBtn" id="cmBorderless" title="Надеть или посмотреть оформление Borderless">◇ Borderless</button>
     <button class="btn" id="cmClose" title="Закрыть (Esc)">Закрыть</button>
   </div>
 </div>
@@ -3184,7 +4113,7 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
         <h2>Админка · Эхо-Цитадель</h2>
         <div class="admHeadSub">Управление прототипом · локальные данные · готово к <code>/api/admin/*</code></div>
       </div>
-      <span id="adminVer" class="admVer">v2.25.0</span>
+      <span id="adminVer" class="admVer">v2.45.0</span>
       <button class="btn admX" id="btnAdminClose" aria-label="Закрыть админку">✕</button>
     </div>
     <div id="adminTabs" class="admTabs">
@@ -3192,6 +4121,7 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
       <button class="btn admTab" data-tab="users"><span class="admIco">👥</span>Игроки</button>
       <button class="btn admTab" data-tab="economy"><span class="admIco">💰</span>Экономика</button>
       <button class="btn admTab" data-tab="cards"><span class="admIco">🃏</span>Коллекция</button>
+      <button class="btn admTab" data-tab="borderless"><span class="admIco">◇</span>Borderless</button>
       <button class="btn admTab" data-tab="decks"><span class="admIco">🂠</span>Колоды</button>
       <button class="btn admTab" data-tab="system"><span class="admIco">⚙</span>Система</button>
     </div>
@@ -3237,6 +4167,6 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
 </div>
 
 <script>window.addEventListener("error",function(e){var n=document.getElementById("subsLine");if(n){n.textContent="\u26A0 Ошибка интерфейса: "+(e.message||e.error||"");n.classList.add("on");setTimeout(function(){n.classList.remove("on")},5000);}});</script>
-<script src="./prototype.js?v=2.28.0"></script>
+<script src="./prototype.js?v=2.48.0"></script>
 </body>
 </html>

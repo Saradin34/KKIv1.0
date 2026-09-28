@@ -140,8 +140,12 @@ namespace EchoCitadel.Core
         /// <summary>Нужен ли карте выбор цели (массовые цели выбора не требуют).</summary>
         public bool NeedsTarget(Side side, CardData card)
         {
-            if (card.Target == TargetKind.None) return false;
-            return HasValidTarget(side, card);
+            return card.Target == TargetKind.EnemyCreature
+                || card.Target == TargetKind.FriendlyCreature
+                || card.Target == TargetKind.AnyCreature
+                || card.Target == TargetKind.EnemyHero
+                || card.Target == TargetKind.FriendlyHero
+                || card.Target == TargetKind.AnyHero;
         }
 
         public bool HasValidTarget(Side side, CardData card) => ValidTargets(side, card).Count > 0;
@@ -199,14 +203,30 @@ namespace EchoCitadel.Core
             var card = check.Card;
             var pl = P(side);
 
-            // ритуалы и заклинания с обязательной целью: фиксируем цель
+            // Цель должна быть выбрана из актуального списка; не подменяем
+            // ошибочный или устаревший выбор первой попавшейся целью.
             if (check.NeedsTarget)
             {
                 var valid = ValidTargets(side, card);
                 TargetOption? chosen = null;
-                foreach (var v in valid) if (v.Uid == targetUid && v.Side == targetSide) { chosen = v; break; }
-                if (chosen == null) foreach (var v in valid) if (v.Uid == targetUid) { chosen = v; break; }
-                chosen ??= valid[0];
+                foreach (var v in valid)
+                {
+                    if (v.Uid == targetUid && (targetSide == null || v.Side == targetSide))
+                    {
+                        chosen = v;
+                        break;
+                    }
+                }
+                if (chosen == null && !targetUid.HasValue && targetSide.HasValue)
+                {
+                    foreach (var v in valid)
+                        if (!v.Uid.HasValue && v.Side == targetSide) { chosen = v; break; }
+                }
+                if (chosen == null)
+                {
+                    Say("Нужно выбрать допустимую цель", side);
+                    return false;
+                }
                 targetUid = chosen.Uid;
                 targetSide = chosen.Side;
             }
@@ -228,7 +248,7 @@ namespace EchoCitadel.Core
             switch (card.Type)
             {
                 case CardType.Creature:
-                    Summon(side, card, fromHand: true);
+                    Summon(side, card, fromHand: true, targetUid: targetUid, targetSide: targetSide);
                     break;
 
                 case CardType.Rune:
@@ -882,6 +902,8 @@ namespace EchoCitadel.Core
                 HeroDamage = 0,
                 DefenderDamage = 0,
                 AttackerDamage = 0,
+                Lifesteal = !attacker.Silenced && attacker.Keywords.Contains(Keyword.Lifesteal),
+                LifestealAmount = 0,
             };
 
             if (attacker.Attack <= 0) return;
@@ -911,7 +933,28 @@ namespace EchoCitadel.Core
                     Source = attacker.Name,
                     SourceCardId = attacker.CardId,
                 });
-                if (dealt > 0 && lifesteal) HealHero(ownerSide, dealt, "Вампиризм");
+                int damageToCreature = Math.Min(dealt, Math.Max(0, defHpBefore));
+                if (damageToCreature > 0 && lifesteal)
+                {
+                    rec.LifestealAmount += HealHero(ownerSide, damageToCreature, "Вампиризм");
+                }
+                // Прорыв переносит в героя только урон сверх оставшегося здоровья защитника.
+                if (!attacker.Silenced && attacker.Keywords.Contains(Keyword.Trample) && defender.Health <= 0)
+                {
+                    int excess = Math.Max(0, attacker.Attack - Math.Max(0, defHpBefore));
+                    if (excess > 0)
+                    {
+                        int hpBeforeHeal = P(ownerSide).Health;
+                        rec.HeroDamage = DamageHero(defender.Owner, excess, new DamageOptions
+                        {
+                            Source = $"{attacker.Name} (Прорыв)",
+                            SourceCardId = attacker.CardId,
+                            LifestealFor = lifesteal ? ownerSide : null,
+                        });
+                        if (lifesteal)
+                            rec.LifestealAmount += Math.Max(0, P(ownerSide).Health - hpBeforeHeal);
+                    }
+                }
                 // v2.12.2: Ядовитый / Ледяное касание
                 if (dealt > 0 && !attacker.Silenced && defender.Health > 0)
                 {
@@ -956,12 +999,15 @@ namespace EchoCitadel.Core
                     Text = $"«{attacker.Name}» атакует героя {enemyHero.Name}",
                 });
 
+                int hpBeforeHeal = P(ownerSide).Health;
                 int dealt = DamageHero(enemyHero.Side, dmg, new DamageOptions
                 {
                     Source = attacker.Name,
                     SourceCardId = attacker.CardId,
                     LifestealFor = lifesteal ? ownerSide : null,
                 });
+                if (lifesteal)
+                    rec.LifestealAmount = Math.Max(0, P(ownerSide).Health - hpBeforeHeal);
 
                 rec.HeroDamage = dealt;
                 rec.AttackerHpAfter = Math.Max(0, attacker.Health);
@@ -1066,6 +1112,7 @@ namespace EchoCitadel.Core
                         Uid = c.Uid,
                         Side = side,
                         CardName = c.Name,
+                        Data = new Dictionary<string, object> { ["status"] = s.Type.ToString() },
                         Text = $"«{c.Name}»: {GameText.StatusRu(s.Type)} рассеивается",
                     });
                 }
@@ -1099,8 +1146,13 @@ namespace EchoCitadel.Core
                 });
             }
 
-            // сброс временных модификаторов героя
-            pl.IncomingDamageReductionTurns = 0;
+            // Временная защита героя заканчивается на конце следующего хода противника.
+            var guarded = P(side.Other());
+            if (guarded.IncomingDamageReductionTurns > 0)
+            {
+                guarded.IncomingDamageReductionTurns--;
+                if (guarded.IncomingDamageReductionTurns == 0) guarded.DamageReduction = 0;
+            }
 
             CheckDeaths();
 

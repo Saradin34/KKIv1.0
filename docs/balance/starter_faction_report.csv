@@ -1,0 +1,6 @@
+Faction,FactionRu,Games,Wins,Losses,WinRate,WithinTarget45_55,AvgTurns,AvgDamage,AvgHeal,AvgCardsPlayed,AvgEchoUsed
+Ethereal,Эфирные,4015,2091,1924,0.5208,YES,11.6,28.8,1.4,16.2,0.92
+Pyromancer,Пироманты,3912,1995,1917,0.5100,YES,8.4,34.0,2.8,9.2,0.99
+Terramorph,Терраморфы,4026,2046,1980,0.5082,YES,12.8,31.8,0.7,16.5,0.85
+Necrus,Некрусы,3962,1934,2028,0.4881,YES,12.6,30.1,27.6,18.8,0.98
+Aurites,Ауриты,4085,1934,2151,0.4734,YES,15.9,29.0,18.2,19.1,0.96

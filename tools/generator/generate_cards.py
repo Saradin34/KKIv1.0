@@ -584,8 +584,7 @@ def build_pool() -> List[Dict[str, Any]]:
         creature("nec_05", "Могильный жнец", N, 3, 4, 3, "Chaos", ["Rush"], tags=["aggro"]),
         creature("nec_06", "Чумной разносчик", N, 3, 2, 3, "Chaos", ["Battlecry"],
                  target="EnemyCreature",
-                 effects=[E("applyStatus", status="Poison", value=1, to="EnemyCreature",
-                            filter=F(random=True, count=1))], tags=["poison"]),
+                 effects=[E("applyStatus", status="Poison", value=1, to="EnemyCreature")], tags=["poison"]),
         creature("nec_07", "Полуночный душитель", N, 3, 3, 3, "Chaos", [], tags=["vanilla"]),
         creature("nec_08", "Кровавый архонт", N, 4, 4, 3, "Chaos", ["Lifesteal"], tags=["aggro"]),
         creature("nec_09", "Некромант Склепа", N, 4, 3, 4, "Chaos", ["Battlecry"],
@@ -1433,33 +1432,34 @@ def build_decks(pool: List[Dict[str, Any]], rng: random.Random) -> Dict[str, Lis
         runes     = [c for c in fac_cards if c["type"] == "Rune"]
         deck: List[str] = []
 
-        # 18 существ (по кривой стоимости), 14 заклинаний, 4 руны, 4 нейтральных = 40
-        curve_creature = [1,1,1,2,2,2,3,3,3,3,4,4,4,5,5,5,6,7]
+        # MTG Constructed: строим прекон на 60 карт (27 существ, 21 заклинание,
+        # 6 рун и 6 нейтральных), без верхнего лимита размера колоды.
+        curve_creature = [1,1,1,1,2,2,2,2,2,3,3,3,3,3,3,3,4,4,4,4,5,5,5,5,6,6,7]
         for want in curve_creature:
             cands = [c for c in creatures if c["cost"] == want] or \
                     sorted(creatures, key=lambda c: abs(c["cost"] - want))
             deck.append(rng.choice(cands)["id"])
-        curve_spell = [1,1,2,2,2,3,3,3,4,4,4,5,5,6]
+        curve_spell = [1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,6,6,7]
         for want in curve_spell:
             cands = [c for c in spells if c["cost"] == want] or \
                     sorted(spells, key=lambda c: abs(c["cost"] - want))
             deck.append(rng.choice(cands)["id"])
-        for _ in range(4):
+        for _ in range(6):
             deck.append(rng.choice(runes)["id"])
-        for _ in range(4):
+        for _ in range(6):
             deck.append(rng.choice(neutral)["id"])
 
-        # дубликаты: максимум 2 копии одной карты (легендарные — 1)
+        # Единый playset: максимум 4 копии любой карты, включая легендарные.
         deck = apply_copy_limit(deck, pool, rng)
         decks[fac] = deck
 
     # Стартовая колода новичка: микс с упором на Ауритов (по ТЗ — «упор на одну основную»)
     starter: List[str] = []
     aur = [c for c in main if c["faction"] == "Aurites"]
-    for _ in range(22): starter.append(rng.choice(aur)["id"])
+    for _ in range(33): starter.append(rng.choice(aur)["id"])
     others = [c for c in main if c["faction"] != "Aurites"]
-    for _ in range(14): starter.append(rng.choice(others)["id"])
-    for _ in range(4):  starter.append(rng.choice(neutral)["id"])
+    for _ in range(21): starter.append(rng.choice(others)["id"])
+    for _ in range(6):  starter.append(rng.choice(neutral)["id"])
     starter = apply_copy_limit(starter, pool, rng)
     decks["Starter"] = starter
     return decks
@@ -1470,22 +1470,27 @@ def apply_copy_limit(deck: List[str], pool: List[Dict[str, Any]], rng: random.Ra
     counts: Counter = Counter()
     out: List[str] = []
     alternates = [c["id"] for c in pool if c["faction"] in FACTIONS]
+
+    def eligible() -> List[str]:
+        return [cid for cid in alternates if counts[cid] < 4]
+
     for cid in deck:
-        limit = 1 if by_id[cid]["rarity"] == "Legendary" else 2
-        tries = 0
-        while counts[cid] >= limit and tries < 40:
-            cid = rng.choice(alternates)
-            limit = 1 if by_id[cid]["rarity"] == "Legendary" else 2
-            tries += 1
+        if counts[cid] >= 4:
+            choices = eligible()
+            if not choices:
+                raise ValueError("Не хватает карт для колоды на 60 карт с лимитом 4 копии")
+            cid = rng.choice(choices)
         counts[cid] += 1
         out.append(cid)
-    # добиваем до 40
-    while len(out) < 40:
-        cid = rng.choice(alternates)
-        limit = 1 if by_id[cid]["rarity"] == "Legendary" else 2
-        if counts[cid] < limit:
-            counts[cid] += 1; out.append(cid)
-    return out[:40]
+    # Добираем до минимального constructed-размера (60), потолка нет.
+    while len(out) < 60:
+        choices = eligible()
+        if not choices:
+            raise ValueError("Не хватает карт для колоды на 60 карт с лимитом 4 копии")
+        cid = rng.choice(choices)
+        counts[cid] += 1
+        out.append(cid)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1703,7 +1708,7 @@ def main() -> int:
     # колоды
     decks = build_decks(pool, random.Random(args.seed + 7))
     deck_out = {
-        "meta": {"deckSize": 40, "copyLimit": 2, "legendaryCopyLimit": 1},
+        "meta": {"deckSize": 60, "copyLimit": 4, "legendaryCopyLimit": 4},
         "decks": [{"id": k, "name": deck_name(k), "faction": k, "cards": v} for k, v in decks.items()],
     }
     deck_path = os.path.join(OUT_DIR, "unity", "EchoCitadel", "Assets", "StreamingAssets", "Decks.json")

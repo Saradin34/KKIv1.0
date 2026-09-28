@@ -17,7 +17,7 @@ export interface CardsFile {
 
 export interface DeckFile {
   meta: { deckSize: number; copyLimit: number; legendaryCopyLimit: number };
-  decks: { id: string; name: string; faction: string; cards: string[] }[];
+  decks: { id: string; name: string; faction: string; cards: string[]; format?: string }[];
 }
 
 export function buildDatabase(file: CardsFile): { db: Map<string, CardData>; tokens: Map<string, CardData> } {
@@ -37,10 +37,10 @@ function normalizeAndSet(map: Map<string, CardData>, c: CardData): void {
   map.set(c.id, c);
 }
 
-/** Проверка целостности колоды: 40 карт, все id существуют, лимит копий. */
-export function validateDeck(deck: string[], db: Map<string, CardData>, size = 40): string[] {
+/** Проверка целостности: минимум 60 карт, без максимума, известные id и playset ×4. */
+export function validateDeck(deck: string[], db: Map<string, CardData>, minSize = 60): string[] {
   const errs: string[] = [];
-  if (deck.length !== size) errs.push(`Размер колоды ${deck.length}, требуется ${size}`);
+  if (deck.length < minSize) errs.push(`Размер колоды ${deck.length}, минимум ${minSize}`);
   const counts = new Map<string, number>();
   for (const id of deck) {
     const c = db.get(id);
@@ -48,7 +48,7 @@ export function validateDeck(deck: string[], db: Map<string, CardData>, size = 4
     counts.set(id, (counts.get(id) ?? 0) + 1);
   }
   for (const [id, n] of counts) {
-    const limit = db.get(id)!.rarity === 'Legendary' ? 1 : 2;
+    const limit = 4;
     if (n > limit) errs.push(`Превышен лимит копий ${id}: ${n} > ${limit}`);
   }
   return errs;

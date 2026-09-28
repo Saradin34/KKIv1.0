@@ -48,11 +48,18 @@ function main(): void {
   const decksFile = JSON.parse(fs.readFileSync(path.join(ASSETS, 'Decks.json'), 'utf-8')) as DeckFile;
   const { db } = buildDatabase(cardsFile);
 
+  const format = arg('format', 'constructed');
+  const factionOrder = ['Aurites', 'Necrus', 'Terramorph', 'Pyromancer', 'Ethereal'];
   const decks: Record<string, string[]> = {};
-  for (const d of decksFile.decks) decks[d.id] = d.cards;
-  const factionIds = Object.keys(decks).filter(k => k !== 'Starter');
+  if (format === 'starter') {
+    for (const d of decksFile.decks) if (d.format === 'starter') decks[d.faction] = d.cards;
+  } else {
+    for (const d of decksFile.decks) if (factionOrder.includes(d.id) && d.format !== 'starter') decks[d.id] = d.cards;
+  }
+  const factionIds = factionOrder.filter(id => !!decks[id]);
+  if (factionIds.length !== factionOrder.length) throw new Error(`Не найдены 5 колод для формата ${format}`);
 
-  console.log(`База: ${db.size} карт. Колод: ${Object.keys(decks).length}. Матчей: ${matches}, seed=${seed}`);
+  console.log(`База: ${db.size} карт. Колод: ${Object.keys(decks).length} (${format}). Матчей: ${matches}, seed=${seed}`);
   const t0 = Date.now();
 
   // коэффициенты пассивок из tools/generator/faction_balance.json

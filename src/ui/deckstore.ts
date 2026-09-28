@@ -5,9 +5,9 @@
    (ключ echo-citadel.decks.v1) и доступны прототипу наравне со встроенными
    колодами из Decks.json: меню «Колода», бой, список «Мои колоды».
 
-   Правила сборки — по ТЗ п.3 (деки):
-     • ровно 40 карт;
-     • не более 2 копий одной карты, легендарных — не более 1;
+   Правила сборки (MTG Constructed):
+     • минимум 60 карт, верхнего лимита нет;
+     • не более 4 копий любой карты, включая легендарные;
      • карта может быть своей фракции или нейтральной.
 
    Единая точка проверки — validateDeck(): её же вызывает конструктор
@@ -21,6 +21,10 @@ export interface DeckLike {
   name: string;
   faction: string;
   cards: string[];
+  /** У встроенных преконструктов `starter` разрешён отдельный учебный формат на 30 карт. */
+  format?: string;
+  /** ID карты из колоды, чьё существующее изображение используется как обложка. */
+  avatarCardId?: string;
 }
 
 export interface CustomDeck extends DeckLike {
@@ -28,9 +32,11 @@ export interface CustomDeck extends DeckLike {
   updated: number;
 }
 
-export const DECK_SIZE = 40;
+export const MIN_DECK_SIZE = 60;
+/** @deprecated Используйте MIN_DECK_SIZE: верхнего лимита колоды нет. */
+export const DECK_SIZE = MIN_DECK_SIZE;
 export const MAX_COPIES = 4;   // MTG playset: максимум 4 копии карты в колоде
-export const MAX_LEGENDARY_COPIES = 1;
+export const MAX_LEGENDARY_COPIES = 4; // легендарные также подчиняются playset ×4
 
 const KEY = 'echo-citadel.decks.v1';
 
@@ -76,7 +82,7 @@ export function resolveDeck(id: string, builtins: DeckLike[]): DeckLike | null {
 }
 
 /* --------------------------------------------------------------------- */
-/* Валидация по ТЗ                                                        */
+/* Валидация MTG Constructed                                              */
 /* --------------------------------------------------------------------- */
 
 export interface DeckProblems {
@@ -94,8 +100,8 @@ export function validateDeck(
   const counts = new Map<string, number>();
   for (const id of cards) counts.set(id, (counts.get(id) ?? 0) + 1);
 
-  if (cards.length !== DECK_SIZE) {
-    problems.push(`нужно ровно ${DECK_SIZE} карт, сейчас ${cards.length}`);
+  if (cards.length < MIN_DECK_SIZE) {
+    problems.push(`нужно минимум ${MIN_DECK_SIZE} карт, сейчас ${cards.length}`);
   }
   for (const [id, n] of counts) {
     const card = lookup(id);
@@ -111,21 +117,21 @@ export function validateDeck(
   return { ok: problems.length === 0, problems, total: cards.length };
 }
 
-/** Базовая валидность колоды для гейта «В бой» (спека «1. Главное меню» п.1.4):
- *  ровно DECK_SIZE карт, лимиты копий (4 / 1 легендарка), карты известны.
- *  Чистоту фракции НЕ проверяет — это правило конструктора для ПОЛЬЗОВАТЕЛЬСКИХ
- *  колод (validateDeck): базовые колоды Decks.json содержат сплэши чужих фракций
- *  и отбалансированы прогоном 10k матчей именно в таком виде. */
+/** Базовая валидность колоды для гейта «В бой»: по умолчанию Constructed — минимум
+ *  MIN_DECK_SIZE (60), без верхнего лимита, не более 4 копий любой карты.
+ *  Только встроенный формат `starter` явно передаёт 30; пользовательские колоды всегда
+ *  идут через validateDeck() и остаются минимум 60 карт. */
 export function validateDeckSize(
   cards: string[],
   lookup: (id: string) => CardData | undefined,
+  minSize = MIN_DECK_SIZE,
 ): DeckProblems {
   const problems: string[] = [];
   const counts = new Map<string, number>();
   for (const id of cards) counts.set(id, (counts.get(id) ?? 0) + 1);
 
-  if (cards.length !== DECK_SIZE) {
-    problems.push(`нужно ровно ${DECK_SIZE} карт, сейчас ${cards.length}`);
+  if (cards.length < minSize) {
+    problems.push(`нужно минимум ${minSize} карт, сейчас ${cards.length}`);
   }
   for (const [id, n] of counts) {
     const card = lookup(id);

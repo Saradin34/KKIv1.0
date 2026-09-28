@@ -10,7 +10,7 @@ import { GameEngine } from '../src/engine/engine';
 import { GameResult } from '../src/engine/types';
 import { MatchRunner } from '../src/engine/match';
 import {
-  CardData, CardType, Faction, GameEventType, Keyword, Phase, Side, StatusType, TargetKind,
+  CardData, CardType, Element, Faction, GameEventType, Keyword, Phase, Side, StatusType, TargetKind,
 } from '../src/engine/types';
 
 const ROOT = (() => { let d = __dirname; for (let i = 0; i < 8; i++) { if (fs.existsSync(path.join(d, 'package.json'))) return d; d = path.dirname(d); } return process.cwd(); })();
@@ -46,6 +46,7 @@ const find = (pred: (c: CardData) => boolean): CardData => {
   return c;
 };
 
+async function main(): Promise<void> {
 console.log('\n=== Аудит способностей «Эхо-Цитадель» ===\n[1] Покрытие ключевых слов и целей');
 for (const kw of Object.values(Keyword)) {
   const n = ALL.filter(c => (c.keywords ?? []).includes(kw)).length;
@@ -146,6 +147,188 @@ console.log('\n[2] Сценарии способностей');
   const evs = e.drainEvents();
   check('руна встаёт в ряд рун и даёт событие RunePlayed',
     e.p(Side.Player).runes.length === 1 && evs.some(v => v.type === GameEventType.RunePlayed), rune.name);
+}
+
+console.log('\n[2а] Сквозные регрессии: цели, комбинированные эффекты, статусы, бой');
+{
+  const e = freshEngine();
+  const targeted = find(c => c.type === CardType.Spell && c.target === TargetKind.EnemyCreature
+    && (c.effects ?? []).length > 0);
+  const idx = e.p(Side.Player).hand.push(targeted.id) - 1;
+  const playable = e.canPlay(Side.Player, idx);
+  const played = e.playCard(Side.Player, idx);
+  check('целевая карта без допустимой цели заблокирована и не тратится',
+    !playable.ok && !played && e.p(Side.Player).hand.includes(targeted.id), targeted.name);
+}
+{
+  const e = freshEngine();
+  const nec06 = db.get('nec_06')!;
+  const plain = find(c => c.type === CardType.Creature && (c.keywords ?? []).length === 0);
+  const first = e.summon(Side.Opponent, plain)!;
+  const chosen = e.summon(Side.Opponent, plain)!;
+  const idx = e.p(Side.Player).hand.push(nec06.id) - 1;
+  const ok = e.playCard(Side.Player, idx, chosen.uid, Side.Opponent);
+  check('Боевой клич сохраняет выбранную цель (nec_06)', ok
+    && chosen.statuses.some(s => s.type === StatusType.Poison)
+    && !first.statuses.some(s => s.type === StatusType.Poison),
+    `выбрано ${chosen.name} #${chosen.uid}`);
+}
+{
+  const e = freshEngine();
+  const spore = db.get('ter_s10')!;
+  const plain = find(c => c.type === CardType.Creature && (c.keywords ?? []).length === 0);
+  const own = e.summon(Side.Player, plain)!;
+  const foes = [e.summon(Side.Opponent, plain)!, e.summon(Side.Opponent, plain)!];
+  own.health = own.maxHealth = 20;
+  for (const foe of foes) foe.health = foe.maxHealth = 20;
+  const idx = e.p(Side.Player).hand.push(spore.id) - 1;
+  const ok = e.playCard(Side.Player, idx);
+  check('ter_s10 — заклинание без creature-only полей; базовые 3 + пассивка Pyromancer (+2)',
+    spore.type === CardType.Spell && spore.attack == null && spore.health == null
+      && !(spore.keywords ?? []).length && spore.healReduction == null
+      && ok && own.health === 20 && foes.every(c => c.health === 15),
+    `свои ${own.health}; враги ${foes.map(c => c.health).join('/')}`);
+}
+{
+  const e = freshEngine();
+  const spell = db.get('pyr_s01')!; // AnyCreature; у эффекта damage нет отдельного поля to
+  const plain = find(c => c.type === CardType.Creature && (c.keywords ?? []).length === 0);
+  const first = e.summon(Side.Opponent, plain)!;
+  const chosen = e.summon(Side.Opponent, plain)!;
+  first.health = first.maxHealth = 20;
+  chosen.health = chosen.maxHealth = 20;
+  const idx = e.p(Side.Player).hand.push(spell.id) - 1;
+  const ok = e.playCard(Side.Player, idx, chosen.uid, Side.Opponent);
+  check('цель заклинания сохраняется через стек и наследуется эффектом без to',
+    ok && chosen.health < 20 && first.health === 20, `${first.health}/${chosen.health}`);
+}
+{
+  const e = freshEngine();
+  const nec06 = db.get('nec_06')!;
+  const friendly = find(c => c.type === CardType.Creature && (c.keywords ?? []).length === 0);
+  const enemy = e.summon(Side.Opponent, friendly)!;
+  e.summon(Side.Player, friendly);
+  const idx = e.p(Side.Player).hand.push(nec06.id) - 1;
+  const mana = e.p(Side.Player).mana;
+  const ok = e.playCard(Side.Player, idx, e.p(Side.Player).creatures[0].uid, Side.Player);
+  check('невалидная/чужая цель не подменяется первой допустимой и не тратит карту',
+    !ok && e.p(Side.Player).hand.includes(nec06.id) && e.p(Side.Player).mana === mana
+      && !enemy.statuses.some(s => s.type === StatusType.Poison));
+}
+{
+  const e = freshEngine();
+  const combo = db.get('wtc_04')!;
+  const plain = find(c => c.type === CardType.Creature && (c.keywords ?? []).length === 0);
+  const chosen = e.summon(Side.Opponent, plain)!;
+  const randomTarget = e.summon(Side.Opponent, plain)!;
+  // Задаём случайную выборку так, чтобы второй эффект обязан был попасть в другую цель.
+  (e.rng as any).shuffle = (arr: unknown[]) => arr.slice().reverse();
+  const idx = e.p(Side.Player).hand.push(combo.id) - 1;
+  const ok = e.playCard(Side.Player, idx, chosen.uid, Side.Opponent);
+  const has = (c: typeof chosen, s: StatusType): boolean => c.statuses.some(x => x.type === s);
+  check('составной эффект: ручная цель и случайная компонента не перехватывают друг друга', ok
+    && has(chosen, StatusType.Poison) && !has(chosen, StatusType.Burn)
+    && has(randomTarget, StatusType.Burn) && !has(randomTarget, StatusType.Poison),
+    `${combo.name}: Яд на выбранной, Горение на другой`);
+}
+{
+  const e = freshEngine();
+  const source = find(c => c.type === CardType.Creature && (c.keywords ?? []).includes(Keyword.Lifesteal));
+  const wall = find(c => c.type === CardType.Creature && (c.keywords ?? []).length === 0);
+  const attacker = e.summon(Side.Player, source)!;
+  attacker.attack = 10;
+  attacker.keywords.push(Keyword.Trample);
+  attacker.justPlayed = false; attacker.summonedOnTurn = -5;
+  const defender = e.summon(Side.Opponent, wall)!;
+  defender.health = 2; defender.maxHealth = 2;
+  e.p(Side.Player).health = 5;
+  e.resolveAttack(attacker, defender, e.p(Side.Opponent));
+  const rec = e.attackQueue[e.attackQueue.length - 1]!;
+  check('Вампиризм + Прорыв: overkill по существу не лечит повторно',
+    e.p(Side.Player).health === 15 && rec.lifestealAmount === 10,
+    `5→${e.p(Side.Player).health}, фактическое лечение ${rec.lifestealAmount} (2 по существу + 8 герою)`);
+}
+{
+  const e = freshEngine();
+  const silenceCard = db.get('aur_08')!;
+  const plain = find(c => c.type === CardType.Creature && (c.keywords ?? []).length === 0);
+  const frozen = e.summon(Side.Opponent, plain)!;
+  frozen.justPlayed = false; frozen.summonedOnTurn = -5;
+  e.addStatus(frozen, { type: StatusType.Freeze, value: 1, turnsLeft: 2 });
+  const idx = e.p(Side.Player).hand.push(silenceCard.id) - 1;
+  const ok = e.playCard(Side.Player, idx, frozen.uid, Side.Opponent);
+  check('Немота снимает заморозку и разблокирует атаку', ok && frozen.silenced
+    && !frozen.frozen && e.canAttack(frozen));
+}
+{
+  const e = freshEngine();
+  const rune = find(c => c.type === CardType.Rune && (c as any).aura?.op === 'debuffAttackEnemy');
+  const plain = find(c => c.type === CardType.Creature && (c.keywords ?? []).length === 0);
+  e.playRune(Side.Opponent, rune);
+  const creature = e.summon(Side.Player, plain)!;
+  const expected = Math.max(0, (plain.attack ?? 0) - ((rune as any).aura.value ?? 0));
+  check('вражеская руна-аура ослабляет существо, призванное позже', creature.attack === expected,
+    `${creature.attack} атаки; ожидалось ${expected}`);
+}
+{
+  const e = freshEngine();
+  const baseRune = find(c => c.type === CardType.Rune && (c as any).aura?.op === 'buffAttack');
+  const aura = (baseRune as any).aura;
+  const focused = { ...baseRune, aura: { ...aura, matches: [Element.Fire] } } as CardData;
+  e.playRune(Side.Player, focused);
+  const fireCard = find(c => c.type === CardType.Creature && c.element === Element.Fire);
+  const earthCard = find(c => c.type === CardType.Creature && c.element === Element.Earth);
+  const fire = e.summon(Side.Player, fireCard)!;
+  const earth = e.summon(Side.Player, earthCard)!;
+  check('фильтр matches у ауры применяет бафф только к совпавшей стихии',
+    fire.attack === (fireCard.attack ?? 0) + (aura.value ?? 0)
+      && earth.attack === (earthCard.attack ?? 0), `${fire.name}/${earth.name}`);
+}
+{
+  const e = freshEngine();
+  const shield = db.get('aur_s18')!;
+  e.p(Side.Player).damageReduction = 0;
+  e.p(Side.Player).incomingDamageReductionTurns = 0;
+  e.castInstantSpell(Side.Player, shield);
+  const firstHit = e.damageHero(Side.Player, 4);
+  e.finishMainPhase(); // собственный конец хода защиту не снимает
+  const survivesOwnEnd = e.p(Side.Player).damageReduction === 1;
+  e.runTurn(); // ход противника
+  e.finishMainPhase(); // его конец снимает временную защиту
+  const expired = e.p(Side.Player).damageReduction === 0;
+  const nextHit = e.damageHero(Side.Player, 2);
+  check('Защита героя действует до конца следующего хода противника и затем сбрасывается',
+    firstHit === 3 && survivesOwnEnd && expired && nextHit === 2,
+    `урон ${firstHit}, после своего хода ${survivesOwnEnd}, после чужого ${expired}`);
+}
+{
+  const e = freshEngine();
+  const ramp = db.get('ter_s09')!;
+  e.p(Side.Player).maxMana = 10; e.p(Side.Player).mana = 10;
+  e.castInstantSpell(Side.Player, ramp);
+  check('прирост максимальной маны не переполняет текущую ману',
+    e.p(Side.Player).maxMana === 10 && e.p(Side.Player).mana === 10);
+}
+{
+  const e = freshEngine();
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  e.onBeforeCombatEnd = () => gate;
+  const finished = e.finishMainPhase();
+  const waitsForCombat = e.phase === Phase.Combat && e.activeSide === Side.Player && e.animating
+    && finished instanceof Promise;
+  release();
+  await finished;
+  check('фаза/передача хода ждёт завершения боевой анимации', waitsForCombat
+    && e.phase === Phase.End && e.activeSide === Side.Opponent && !e.animating);
+}
+{
+  const e = freshEngine();
+  e.onBeforeCombatEnd = () => Promise.reject(new Error('VFX-тест'));
+  let rejected = false;
+  try { await e.finishMainPhase(); } catch { rejected = true; }
+  check('ошибка VFX не оставляет движок в Combat и не блокирует передачу хода',
+    rejected && e.phase === Phase.End && e.activeSide === Side.Opponent && !e.animating);
 }
 
 console.log('\n[2б] Стадии назначения защитника (блоки/уклонение/статусы)');
@@ -329,7 +512,164 @@ console.log('\n[4] Корректность стадий по MTG (порядо�
   check('Мана: +1 кристалл за свой ход (до 10), пул заполнен с учётом бонусной маны', manaBad === 0, `нарушений ${manaBad}`);
 }
 
-console.log('\n[3] Инварианты случайных партий (40 матчей AI vs AI)');
+console.log('\n[3] Exhaustive-аудит каталога и легального розыгрыша');
+{
+  const typeLines = fs.readFileSync(path.join(ROOT, 'src', 'engine', 'types.ts'), 'utf-8').split(/\r?\n/);
+  const declaredOps = new Set<string>();
+  let inEffectOp = false;
+  for (const line of typeLines) {
+    if (line.includes('export type EffectOp =')) { inEffectOp = true; continue; }
+    if (!inEffectOp) continue;
+    for (const match of line.matchAll(/'([^']+)'/g)) declaredOps.add(match[1]);
+    if (line.trim().endsWith(';')) break;
+  }
+  const engineText = fs.readFileSync(path.join(ROOT, 'src', 'engine', 'engine.ts'), 'utf-8');
+  const implementedOps = new Set(Array.from(engineText.matchAll(/case\s+'([^']+)'/g), m => m[1]));
+  const targetValues = new Set(Object.values(TargetKind));
+  const keywordValues = new Set(Object.values(Keyword));
+  const triggerKeys = ['effects', 'onPlay', 'onDeath', 'onTurnStart', 'onTurnEnd', 'onDamageTaken',
+    'onCreatureDies', 'onSpellCast', 'onEnemyTurnStart'];
+  const allOps = new Set<string>();
+  const ids = new Set<string>();
+  const auraOps = new Set<string>();
+  const visit = (eff: any): void => {
+    if (!eff || typeof eff !== 'object') return;
+    if (typeof eff.op === 'string') allOps.add(eff.op);
+    if (eff.then) visit(eff.then);
+  };
+  let schemaProblems = 0;
+  for (const raw of cardsFile.cards as any[]) {
+    if (!raw.id || ids.has(raw.id) || !raw.name || !Object.values(CardType).includes(raw.type)
+      || !targetValues.has(raw.target) || !Array.isArray(raw.keywords) || !Array.isArray(raw.effects)
+      || !Number.isInteger(raw.cost) || raw.cost < 0 || raw.cost > 10
+      || (raw.type === CardType.Creature && (!Number.isFinite(raw.attack) || !Number.isFinite(raw.health)))) schemaProblems++;
+    if (raw.id) ids.add(raw.id);
+    for (const kw of raw.keywords ?? []) if (!keywordValues.has(kw)) schemaProblems++;
+    if (raw.aura?.op) auraOps.add(raw.aura.op);
+    for (const key of triggerKeys) for (const eff of raw[key] ?? []) visit(eff);
+  }
+  const untyped = [...allOps].filter(op => !declaredOps.has(op));
+  const unhandled = [...allOps].filter(op => !implementedOps.has(op));
+  const declaredButUnhandled = [...declaredOps].filter(op => !implementedOps.has(op));
+  const auraHandled = new Set([
+    ...Array.from(engineText.matchAll(/case\s+'([^']+)'/g), m => m[1]),
+    ...Array.from(engineText.matchAll(/aura\.op\s*===\s*'([^']+)'/g), m => m[1]),
+    ...Array.from(engineText.matchAll(/aura\?\.op\s*===\s*'([^']+)'/g), m => m[1]),
+  ]);
+  const unhandledAuras = [...auraOps].filter(op => !auraHandled.has(op));
+  const brokenDeathrattles = ALL.filter(c => (c.keywords ?? []).includes(Keyword.Deathrattle) && !(c.onDeath?.length));
+  const brokenBattlecries = ALL.filter(c => (c.keywords ?? []).includes(Keyword.Battlecry)
+    && c.type === CardType.Creature && !(c.effects ?? []).length);
+  const creatureOnlyKeywords = new Set([
+    Keyword.Taunt, Keyword.Lifesteal, Keyword.Deathrattle, Keyword.Battlecry, Keyword.Rush,
+    Keyword.Windfury, Keyword.Unblockable, Keyword.Trample, Keyword.DivineShield,
+    Keyword.Poisonous, Keyword.Freezing,
+  ]);
+  const misplacedCreatureFields = ALL.filter(c => c.type !== CardType.Creature
+    && (c.attack != null || c.health != null || (c.keywords ?? []).some(k => creatureOnlyKeywords.has(k))));
+  check('все 500 записей Cards.json проходят проверку схемы/целей/ключевых слов',
+    cardsFile.cards.length === 500 && schemaProblems === 0, `${cardsFile.cards.length} карт; ошибок ${schemaProblems}`);
+  check('все эффекты карты и триггеры объявлены и имеют обработчик движка',
+    untyped.length === 0 && unhandled.length === 0 && declaredButUnhandled.length === 0,
+    `${allOps.size} ops в каталоге; untyped=${untyped.join(',') || 0}; без обработчика=${unhandled.join(',') || 0}`);
+  check('ауры и keywords согласованы с правилами движка',
+    unhandledAuras.length === 0 && brokenDeathrattles.length === 0
+      && brokenBattlecries.length === 0 && misplacedCreatureFields.length === 0,
+    `ауры без обработчика=${unhandledAuras.join(',') || 0}; Deathrattle без onDeath=${brokenDeathrattles.length}; Battlecry без эффектов=${brokenBattlecries.length}; поля существ на не-существе=${misplacedCreatureFields.map(c => c.id).join(',') || 0}`);
+
+  const plain = find(c => c.type === CardType.Creature && !(c.keywords ?? []).length
+    && !(c.effects ?? []).length && !(c.onDeath ?? []).length && !(c.onTurnStart ?? []).length
+    && !(c.onTurnEnd ?? []).length && !(c.onDamageTaken ?? []).length && !(c.onCreatureDies ?? []).length
+    && !(c.onSpellCast ?? []).length);
+  let played = 0, illegal = 0, runtimeErrors = 0;
+  const badCards: string[] = [];
+  for (const card of ALL) {
+    try {
+      const fa = decks[card.faction] ? card.faction : Faction.Pyromancer;
+      const fb = fa === Faction.Necrus ? Faction.Pyromancer : Faction.Necrus;
+      const e = freshEngine(fa, fb);
+      e.interactiveStack = false;
+      e.summon(Side.Player, plain, { fromHand: false });
+      e.summon(Side.Opponent, plain, { fromHand: false });
+      e.p(Side.Player).mana = 10; e.p(Side.Player).maxMana = 10;
+      const idx = e.p(Side.Player).hand.push(card.id) - 1;
+      const target = e.validTargets(Side.Player, card)[0];
+      const check0 = e.canPlay(Side.Player, idx);
+      const ok = check0.ok && e.playCard(Side.Player, idx, target?.uid, target?.side as Side | undefined);
+      if (ok) { played++; e.checkDeaths(); }
+      else {
+        illegal++;
+        if (badCards.length < 10) badCards.push(`${card.id}: ${check0.reason ?? 'розыгрыш отклонён'}`);
+      }
+    } catch (err) {
+      runtimeErrors++;
+      if (badCards.length < 10) badCards.push(`${card.id}: ${String(err)}`);
+    }
+  }
+  check('каждая карта проходит хотя бы один легальный розыгрыш со стандартной целью',
+    played === ALL.length && illegal === 0 && runtimeErrors === 0,
+    `${played}/${ALL.length}; отказов ${illegal}, исключений ${runtimeErrors}${badCards.length ? ' | ' + badCards.join(' ; ') : ''}`);
+
+  const deathCards = ALL.filter(c => c.type === CardType.Creature && (c.onDeath?.length ?? 0) > 0);
+  let deathErrors = 0;
+  for (const card of deathCards) {
+    try {
+      const e = freshEngine();
+      e.summon(Side.Player, plain, { fromHand: false });
+      e.summon(Side.Opponent, plain, { fromHand: false });
+      const unit = e.summon(Side.Player, card, { fromHand: false });
+      if (unit) { unit.health = 0; e.checkDeaths(); }
+    } catch { deathErrors++; }
+  }
+  check('каждый onDeath/Deathrattle-эффект исполняется в сценарии смерти',
+    deathErrors === 0, `${deathCards.length} карт; исключений ${deathErrors}`);
+
+  const startCards = ALL.filter(c => ((c as any).onTurnStart?.length ?? 0) > 0);
+  let startErrors = 0;
+  for (const card of startCards) {
+    try {
+      const e = freshEngine();
+      e.summon(Side.Player, plain, { fromHand: false });
+      e.summon(Side.Opponent, plain, { fromHand: false });
+      if (card.type === CardType.Creature) e.summon(Side.Player, card, { fromHand: false });
+      else if (card.type === CardType.Rune) e.playRune(Side.Player, card);
+      else throw new Error(`неподдерживаемый тип триггера: ${card.type}`);
+      e.runTurn();
+    } catch { startErrors++; }
+  }
+  check('каждый onTurnStart-триггер исполняется на начале хода',
+    startErrors === 0, `${startCards.length} карт; исключений ${startErrors}`);
+
+  const damageCards = ALL.filter(c => (c.onDamageTaken?.length ?? 0) > 0);
+  let damageTriggerErrors = 0;
+  for (const card of damageCards) {
+    try {
+      const e = freshEngine();
+      const unit = e.summon(Side.Player, card, { fromHand: false });
+      if (unit) e.damageCreature(unit, 1, { pierceShield: true, source: 'аудит onDamageTaken' });
+    } catch { damageTriggerErrors++; }
+  }
+  check('каждый onDamageTaken-триггер исполняется при получении урона',
+    damageTriggerErrors === 0, `${damageCards.length} карт; исключений ${damageTriggerErrors}`);
+
+  const spellCards = ALL.filter(c => (c.onSpellCast?.length ?? 0) > 0);
+  const buffSpell = find(c => c.type === CardType.Spell && c.target === TargetKind.FriendlyCreature
+    && (c.effects ?? []).some(x => x.op === 'buffAttack' || x.op === 'buffHealth'));
+  let spellTriggerErrors = 0;
+  for (const card of spellCards) {
+    try {
+      const e = freshEngine();
+      const target = e.summon(Side.Player, plain, { fromHand: false })!;
+      e.summon(Side.Opponent, plain, { fromHand: false });
+      e.summon(Side.Player, card, { fromHand: false });
+      e.castInstantSpell(Side.Player, buffSpell, target.uid, Side.Player);
+    } catch { spellTriggerErrors++; }
+  }
+  check('каждый onSpellCast-триггер исполняется при розыгрыше заклинания',
+    spellTriggerErrors === 0, `${spellCards.length} карт; исключений ${spellTriggerErrors}`);
+}
+
+console.log('\n[4] Инварианты случайных партий (40 матчей AI vs AI)');
 {
   let crashes = 0, bad = 0;
   const facs = Object.values(Faction).filter(f => decks[f as string]);
@@ -353,4 +693,10 @@ console.log('\n[3] Инварианты случайных партий (40 ма
 }
 
 console.log(`\n=== ИТОГ АУДИТА: ${pass} PASS / ${fail} FAIL ===`);
-process.exit(fail === 0 ? 0 : 1);
+process.exitCode = fail === 0 ? 0 : 1;
+}
+
+void main().catch(err => {
+  console.error('Критическая ошибка аудита:', err);
+  process.exitCode = 1;
+});

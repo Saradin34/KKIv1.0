@@ -391,7 +391,7 @@ namespace EchoCitadel.Core
                 Value = dmg,
                 SourceCardId = opts.SourceCardId,
                 SourceElement = ElementOfCard(opts.SourceCardId),
-                FromSpell = _spellSourceCard != null,
+                FromSpell = opts.FromSpell || _spellSourceCard != null,
                 Text = $"{pl.Name} получает {dmg} урона{(opts.Source != null ? $" ({opts.Source})" : "")}",
             });
 
@@ -537,7 +537,8 @@ namespace EchoCitadel.Core
         /// Порядок шагов повторяет TS: ауры рун → пассивка Ауритов → события →
         /// боевой клич → проверка смертей.
         /// </summary>
-        public EntityCreature? Summon(Side side, CardData card, bool fromHand = true)
+        public EntityCreature? Summon(Side side, CardData card, bool fromHand = true,
+            int? targetUid = null, Side? targetSide = null)
         {
             var pl = P(side);
             if (pl.Creatures.Count >= Config.MaxCreaturesPerSide)
@@ -617,6 +618,8 @@ namespace EchoCitadel.Core
                 {
                     SourceUid = c.Uid,
                     SourceCard = card,
+                    TargetUid = targetUid,
+                    TargetSide = targetSide,
                     IsBattlecry = true,
                 });
 
@@ -624,39 +627,43 @@ namespace EchoCitadel.Core
             return c;
         }
 
-        /// <summary>Постоянные ауры уже стоящих рун применяются к новичку.</summary>
+        /// <summary>Постоянные дружественные и вражеские ауры применяются к новичку.</summary>
         private void ApplyAuraToNewCreature(Side side, EntityCreature c)
         {
             var pl = P(side);
+            var en = P(side.Other());
+            bool Matches(AuraDef aura) => aura.Matches == null || aura.Matches.Count == 0 || aura.Matches.Contains(c.Element);
+
             foreach (var r in pl.Runes)
             {
                 if (r.Silenced) continue;
                 var aura = r.Data.Aura;
-                if (aura == null) continue;
-                if (aura.Op != AuraOp.buffAttackHealth && aura.Op != AuraOp.buffAttack && aura.Op != AuraOp.buffHealth)
-                    continue;
-
-                // matches: пустой/отсутствующий список = «все стихии»
-                if (aura.Matches == null || aura.Matches.Count == 0 || aura.Matches.Contains(c.Element))
+                if (aura == null || !Matches(aura)) continue;
+                switch (aura.Op)
                 {
-                    switch (aura.Op)
-                    {
-                        case AuraOp.buffAttackHealth:
-                            c.Attack += aura.Atk ?? 0;
-                            c.Health += aura.Hp ?? 0;
-                            c.MaxHealth += aura.Hp ?? 0;
-                            break;
-                        case AuraOp.buffAttack:
-                            c.Attack += aura.Value ?? 0;
-                            break;
-                        case AuraOp.buffHealth:
-                            c.Health += aura.Value ?? 0;
-                            c.MaxHealth += aura.Value ?? 0;
-                            break;
-                    }
+                    case AuraOp.buffAttackHealth:
+                        c.Attack += aura.Atk ?? 0;
+                        c.Health += aura.Hp ?? 0;
+                        c.MaxHealth += aura.Hp ?? 0;
+                        break;
+                    case AuraOp.buffAttack:
+                        c.Attack += aura.Value ?? 0;
+                        break;
+                    case AuraOp.buffHealth:
+                        c.Health += aura.Value ?? 0;
+                        c.MaxHealth += aura.Value ?? 0;
+                        break;
                 }
             }
-            // пассивная аура существ со SpellDamage учтена в SpellDamageOf()
+
+            foreach (var r in en.Runes)
+            {
+                if (r.Silenced) continue;
+                var aura = r.Data.Aura;
+                if (aura != null && aura.Op == AuraOp.debuffAttackEnemy && Matches(aura))
+                    c.Attack = Math.Max(0, c.Attack - (aura.Value ?? 0));
+            }
+            // пассивная аура существ со SpellDamage учтена в SpellDamageOf().
         }
 
         /// <summary>

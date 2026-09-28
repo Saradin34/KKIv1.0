@@ -30,6 +30,6 @@ out.db.sample = ((): any => { const c = db.get('aur_01')!; return { id: c.id, na
 const runes = [...db.values()].filter(c => c.type === 'Rune');
 out.db.runeAuraSample = runes.slice(0, 3).map(r => ({ id: r.id, aura: (r as any).aura, runeLimit: (r as any).runeLimit, duration: (r as any).duration }));
 for (const d of (decksRaw as unknown as DeckFile).decks) {
-  out.decks.push({ id: d.id, name: d.name, faction: d.faction, size: d.cards.length, errors: validateDeck(d.cards, db, 40) });
+  out.decks.push({ id: d.id, name: d.name, faction: d.faction, size: d.cards.length, errors: validateDeck(d.cards, db, 60) });
 }
 console.log(JSON.stringify(out));

@@ -26,6 +26,8 @@ namespace EchoCitadel.Core
     {
         public List<EntityCreature> Creatures = new();
         public Side? HeroSide;
+        public bool Invalid;
+        public bool AllowHeroFallback;
     }
 
     public sealed partial class GameEngine
@@ -86,7 +88,7 @@ namespace EchoCitadel.Core
                         int baseAmt = eff.Value ?? 0;
                         int amt = isSpellDamage ? baseAmt + SpellDamageOf(side, srcElement, srcCost) : baseAmt;
                         var t = ResolveTarget(side, eff.To, eff.Filter, ctx);
-                        if (amt <= 0) break;
+                        if (amt <= 0 || t.Invalid) break;
 
                         var opts = new DamageOptions
                         {
@@ -98,7 +100,7 @@ namespace EchoCitadel.Core
                             foreach (var c in t.Creatures) DamageCreature(c, amt, opts);
                         else if (t.HeroSide.HasValue)
                             DamageHero(t.HeroSide.Value, amt, opts);
-                        else
+                        else if (t.AllowHeroFallback)
                             DamageHero(en.Side, amt, opts);
                         break;
                     }
@@ -107,11 +109,12 @@ namespace EchoCitadel.Core
                     {
                         var t = ResolveTarget(side, eff.To, eff.Filter, ctx);
                         int amt = eff.Value ?? 0;
+                        if (t.Invalid) break;
                         if (t.Creatures.Count > 0)
                             foreach (var c in t.Creatures) HealCreature(c, amt, srcId);
                         else if (t.HeroSide.HasValue)
                             HealHero(t.HeroSide.Value, amt, srcName, srcId);
-                        else
+                        else if (t.AllowHeroFallback)
                             HealHero(side, amt, srcName, srcId);
                         break;
                     }
@@ -285,9 +288,20 @@ namespace EchoCitadel.Core
                         break;
 
                     case EffectOp.gainMaxMana:
+                    {
+                        int oldMax = me.MaxMana;
                         me.MaxMana = Math.Min(Config.MaxMana, me.MaxMana + (eff.Value ?? 1));
-                        me.Mana += eff.Value ?? 1;
+                        int gained = me.MaxMana - oldMax;
+                        me.Mana = Math.Min(Config.MaxMana, me.Mana + gained);
+                        Emit(new GameEvent
+                        {
+                            Type = GameEventType.ManaChanged,
+                            Side = side,
+                            Value = me.Mana,
+                            Data = new Dictionary<string, object> { ["max"] = Math.Min(Config.MaxMana, me.MaxMana + me.BonusMana) },
+                        });
                         break;
+                    }
 
                     case EffectOp.gainEcho:
                         me.EchoPoints = Math.Min(Config.EchoPointsMax, me.EchoPoints + (eff.Value ?? 1));
@@ -338,7 +352,7 @@ namespace EchoCitadel.Core
                     {
                         int amt = (eff.Value ?? 0) + (isSpellDamage ? SpellDamageOf(side, srcElement, srcCost) : 0);
                         foreach (var c in new List<EntityCreature>(me.Creatures))
-                            DamageCreature(c, amt, new DamageOptions { Source = srcName, SourceCardId = srcId });
+                            DamageCreature(c, amt, new DamageOptions { Source = srcName, FromSpell = isSpellDamage, SourceCardId = srcId });
                         break;
                     }
 
@@ -346,7 +360,7 @@ namespace EchoCitadel.Core
                     {
                         int amt = (eff.Value ?? 0) + (isSpellDamage ? SpellDamageOf(side, srcElement, srcCost) : 0);
                         foreach (var c in AllCreatures())
-                            DamageCreature(c, amt, new DamageOptions { Source = srcName, SourceCardId = srcId });
+                            DamageCreature(c, amt, new DamageOptions { Source = srcName, FromSpell = isSpellDamage, SourceCardId = srcId });
                         break;
                     }
 
@@ -375,13 +389,23 @@ namespace EchoCitadel.Core
                         break;
 
                     case EffectOp.damageHeroes:
-                        DamageHero(en.Side, eff.Value ?? 1, new DamageOptions { Source = srcName });
-                        DamageHero(side, eff.Value ?? 1, new DamageOptions { Source = srcName });
+                    {
+                        int amount = (eff.Value ?? 1)
+                            + (isSpellDamage ? SpellDamageOf(side, srcElement, srcCost) : 0);
+                        var opts = new DamageOptions
+                        {
+                            Source = srcName,
+                            SourceCardId = srcId,
+                            FromSpell = isSpellDamage,
+                        };
+                        DamageHero(en.Side, amount, opts);
+                        DamageHero(side, amount, opts);
                         break;
+                    }
 
                     case EffectOp.reduceIncomingDamage:
                         me.DamageReduction += eff.Value ?? 1;
-                        me.IncomingDamageReductionTurns = eff.Value ?? 1;
+                        me.IncomingDamageReductionTurns = Math.Max(me.IncomingDamageReductionTurns, 1);
                         break;
 
                     case EffectOp.increaseSpellDamage:
@@ -407,28 +431,41 @@ namespace EchoCitadel.Core
         /* ----------------------------- ЦЕЛИ ЭФФЕКТОВ ----------------------------- */
 
         /// <summary>
-        /// Резолв цели эффекта с учётом фильтра. Явно указанная игроком цель
-        /// имеет приоритет над фильтром (как в TS).
+        /// Резолв цели по каждой компоненте эффекта. Ручной выбор влияет только на
+        /// совместимый одиночный эффект; массовые и случайные эффекты сохраняют свои правила.
         /// </summary>
         private EffectTarget ResolveTarget(Side side, TargetKind? to, EffectFilter? filter, EffectContext ctx)
         {
             var me = P(side);
             var en = P(side.Other());
-            var kind = to ?? TargetKind.None;
+            var kind = to.HasValue && to.Value != TargetKind.None
+                ? to.Value : (ctx.SourceCard?.Target ?? TargetKind.None);
             var res = new EffectTarget();
+            bool isSingleCreature = kind == TargetKind.EnemyCreature
+                || kind == TargetKind.FriendlyCreature || kind == TargetKind.AnyCreature;
 
-            if (ctx.TargetUid.HasValue)
+            if (ctx.TargetUid.HasValue && isSingleCreature && filter?.Random != true)
             {
                 var c = FindCreature(ctx.TargetUid.Value);
-                if (c != null)
+                bool sideMatches = c != null && (kind == TargetKind.AnyCreature
+                    || (kind == TargetKind.FriendlyCreature && c.Owner == me.Side)
+                    || (kind == TargetKind.EnemyCreature && c.Owner == en.Side));
+                bool filterMatches = c != null && FilterCreatures(new List<EntityCreature> { c }, filter).Count > 0;
+                if (!sideMatches || !filterMatches)
                 {
-                    res.Creatures.Add(c);
+                    res.Invalid = true;
                     return res;
                 }
+                res.Creatures.Add(c!);
+                return res;
             }
 
+            res.AllowHeroFallback = kind == TargetKind.None
+                && !ctx.TargetUid.HasValue && !ctx.TargetSide.HasValue;
             switch (kind)
             {
+                case TargetKind.None:
+                    break;
                 case TargetKind.EnemyCreature:
                     res.Creatures = FilterCreatures(en.Creatures, filter);
                     break;
@@ -458,10 +495,7 @@ namespace EchoCitadel.Core
                     res.HeroSide = me.Side;
                     break;
                 case TargetKind.AnyHero:
-                    // TS для AnyHero выбирает героя противника — сохраняем поведение
-                    res.HeroSide = en.Side;
-                    break;
-                default:
+                    res.HeroSide = ctx.TargetSide == me.Side ? me.Side : en.Side;
                     break;
             }
             return res;

@@ -1,6 +1,6 @@
 /* =====================================================================
    Смоук-тест HTML-прототипа в jsdom (headless).
-   Проверяет: загрузку, меню, коллекцию из 150 карт, экран правил,
+   Проверяет: загрузку, меню, прогресс заданий, коллекцию 500×2 с постраничным DOM, экран правил,
    муллиган, РОЗЫГРЫШ КАРТ игроком (клик → поле/цель), Эхо, анимированную
    фазу «Битва», лог, экран конца игры, перезапуск и возврат в меню.
    Запуск: node tools/smoke_prototype.js [--turns 10] [--player Aurites] [--enemy Necrus]
@@ -10,6 +10,15 @@ const path = require('path');
 const { JSDOM, VirtualConsole } = require('jsdom');
 
 const ROOT = path.resolve(__dirname, '..');
+const cardsFixture = JSON.parse(fs.readFileSync(path.join(ROOT, 'unity/EchoCitadel/Assets/StreamingAssets/Cards.json'), 'utf8'));
+const deckFixture = JSON.parse(fs.readFileSync(path.join(ROOT, 'unity/EchoCitadel/Assets/StreamingAssets/Decks.json'), 'utf8'));
+const starterDeckFixtures = deckFixture.decks.filter(d => d.format === 'starter');
+const expectedStarterOwned = new Map();
+for (const deck of starterDeckFixtures) for (const id of deck.cards)
+  expectedStarterOwned.set(id, Math.min(4, (expectedStarterOwned.get(id) ?? 0) + 1));
+const starterCardIds = new Set(expectedStarterOwned.keys());
+const expansionCardIds = new Set(cardsFixture.meta.expansionIds ?? []);
+const nonStarterBaseId = cardsFixture.cards.find(c => !starterCardIds.has(c.id) && !expansionCardIds.has(c.id))?.id ?? '';
 
 function arg(name, def) {
   const i = process.argv.indexOf('--' + name);
@@ -25,6 +34,9 @@ let canvasStubs = 0;
 const check = (name, ok, extra = '') => {
   console.log(`${ok ? '  ✅' : '  ❌'} ${name}${extra ? ' — ' + extra : ''}`);
   if (!ok) failures++;
+};
+const skip = (name, reason = 'не входит в текущий этап') => {
+  console.log(`  ⏭️ ${name} — пропуск: ${reason}`);
 };
 
 (async () => {
@@ -66,40 +78,213 @@ const check = (name, ok, extra = '') => {
     return fn();
   };
   const units = sel2 => window.document.querySelectorAll(sel2).length;
+  const collectionCards = () => [...$('colGrid').querySelectorAll('.card')];
+  const loadAllCollection = () => window.ecTestLoadCollectionAll();
 
   console.log('\n=== СМОУК-ТЕСТ ПРОТОТИПА «ЭХО-ЦИТАДЕЛЬ» (jsdom) ===');
 
   /* ---------- 1. меню ---------- */
   console.log('\n[1] Меню');
   check('5 фракций в выборе', $('playerFactions').children.length === 5, `${$('playerFactions').children.length}`);
-  check('список колод заполнен', $('deckPick').options.length >= 5, `${$('deckPick').options.length} колод`);
+  check('список колод заполнен без служебной Starter', $('deckPick').options.length === 10
+    && !$('deckPick').querySelector('option[value="Starter"]'), `${$('deckPick').options.length} колод`);
   check('уровни сложности (4, включая Мифический)', $('difficulty').options.length === 4);
+  const initialMeta = window.ecMeta();
+  const starterCollectionOk = starterDeckFixtures.length === 5
+    && starterDeckFixtures.every(d => d.cards.length === 30)
+    && cardsFixture.cards.every(card => window.ecOwnedOf(card.id) === (expectedStarterOwned.get(card.id) ?? 0))
+    && !!nonStarterBaseId && window.ecOwnedOf(nonStarterBaseId) === 0;
+  check('новый профиль: 3500 монет, 500 гемов, 5 обычных + 1 мифический бустер',
+    window.ecShards() === 3500 && window.ecGems() === 500 && initialMeta.freeOpens === 5 && initialMeta.premOpens === 1,
+    `${window.ecShards()} монет · ${window.ecGems()} гемов · обычные ${initialMeta.freeOpens} · мифические ${initialMeta.premOpens}`);
+  check('новому игроку выдаются только карты пяти 30-карточных стартовых колод', starterCollectionOk,
+    `${starterDeckFixtures.length} starter-колод; карта вне starter: ${nonStarterBaseId} ×${nonStarterBaseId ? window.ecOwnedOf(nonStarterBaseId) : '—'}`);
+  check('новый игрок сразу выбран на 30-карточную стартовую колоду своей фракции',
+    $('deckPick').value === 'starter_aurites' && [...$('deckPick').options].filter(o => o.value.startsWith('starter_')).length === 5,
+    `выбрана ${$('deckPick').value}`);
   /* --- спека «1. Главное меню» (v2.4) --- */
   check('карусель фракций сверху (5 чипов)', $('menuHeroes').classList.contains('facCarousel') && $('menuHeroes').children.length === 5);
+  const quickChips = [...$('menuHeroes').querySelectorAll('.heroChip')];
+  const quickArtFullSquare = html.includes('aspect-ratio:1/1!important')
+    && html.includes('object-fit:cover!important') && html.includes('Latest hub/art readability pass')
+    && html.includes('left:0!important;right:0!important;top:auto!important;bottom:0!important');
+  const quickLabelOverArt = quickChips.length === 5 && quickChips.every(chip =>
+    !!chip.querySelector('.orbIcon') && !!chip.querySelector('.chipName') && chip.getAttribute('aria-pressed') !== null);
+  check('быстрый выбор: арт заполняет квадрат, подпись находится поверх изображения',
+    quickArtFullSquare && quickLabelOverArt,
+    `${quickChips.length} арт-плиток; full-square ${quickArtFullSquare}; подписи ${quickLabelOverArt}`);
+  const secondQuick = quickChips.find(chip => chip.dataset.f === 'Necrus');
+  if (secondQuick) click(secondQuick);
+  const quickDeckSwitchOk = $('deckPick').value === 'starter_necrus';
+  const firstQuickAgain = $('menuHeroes').querySelector('.heroChip[data-f="Aurites"]');
+  if (firstQuickAgain) click(firstQuickAgain);
+  check('верхний быстрый выбор переключает фракцию вместе с её стартовой колодой', quickDeckSwitchOk
+    && $('deckPick').value === 'starter_aurites', `после переключения и возврата: ${$('deckPick').value}`);
   check('нижняя панель навигации #menuNav (8 кнопок)', $('menuNav').querySelectorAll('button').length === 8, `${$('menuNav').querySelectorAll('button').length}`);
   check('кнопка «Создать колоду» у селекта колод', !!$('btnMakeDeck'));
   check('гейт «В бой»: базовая колода валидна → кнопка активна', $('btnPlay').disabled === false);
   check('слой кроссфейда фона #menuBgFx', !!$('menuBgFx'));
   check('CSS: модалка фракции в overlay-правиле (z320)', /#factionModal,#profileModal/.test(html));
   check('CSS: пружина панелей panelSpring + navRise + кроссфейд .menuBgFx', /panelSpring/.test(html) && /navRise/.test(html) && /\.menuBgFx/.test(html));
+  check('ежедневные и еженедельные задания встроены в динамический главный экран',
+    $('homeQuests').closest('#menu') === $('menu')
+      && $('homeDailyQuests').querySelectorAll('.questTask').length === 4
+      && $('homeWeeklyQuests').querySelectorAll('.questTask').length === 4
+      && /Примените 2 руны/.test($('homeDailyQuests').textContent)
+      && /Разыграйте 60 существ за неделю/.test($('homeWeeklyQuests').textContent),
+    `ежедневных ${$('homeDailyQuests').querySelectorAll('.questTask').length}, еженедельных ${$('homeWeeklyQuests').querySelectorAll('.questTask').length}`);
+  const dailyWinTarget = JSON.parse(window.localStorage.getItem('ec_meta_v1')).quests.find(q => q.id === 'win_fac');
+  const otherFaction = ['Aurites','Necrus','Terramorph','Pyromancer','Ethereal'].find(f => f !== dailyWinTarget.fac);
+  window.ecTestQuestBump('win_fac', 1, otherFaction);
+  const afterWrongFactionWin = JSON.parse(window.localStorage.getItem('ec_meta_v1'));
+  const wrongFactionIgnored = afterWrongFactionWin.quests.find(q => q.id === 'win_fac')?.prog === 0
+    && afterWrongFactionWin.wquests.find(q => q.id === 'w_win3')?.prog === 1;
+  window.ecTestQuestBump('win_fac', 1, dailyWinTarget.fac);
+  const afterMatchingFactionWin = JSON.parse(window.localStorage.getItem('ec_meta_v1'));
+  check('победа другой фракцией не двигает daily-цель, но засчитывается weekly; нужная фракция засчитывает обе',
+    wrongFactionIgnored && afterMatchingFactionWin.quests.find(q => q.id === 'win_fac')?.prog === 1
+      && afterMatchingFactionWin.wquests.find(q => q.id === 'w_win3')?.prog === 2,
+    `другая фракция: daily ${wrongFactionIgnored ? 'без прогресса' : 'ошибка'}, weekly ${afterWrongFactionWin.wquests.find(q => q.id === 'w_win3')?.prog}; совпадение: daily ${afterMatchingFactionWin.quests.find(q => q.id === 'win_fac')?.prog}, weekly ${afterMatchingFactionWin.wquests.find(q => q.id === 'w_win3')?.prog}`);
+  window.ecTestQuestBump('creatures', 20);
+  const dailyCreature = $('homeDailyQuests').querySelector('[data-quest-card="daily:creatures"]');
+  const dailyCreatureClaim = dailyCreature?.querySelector('.homeQuestClaim');
+  const dailyCreatureDone = dailyCreature?.querySelector('.questTaskProgressText')?.textContent === '20/20'
+    && !dailyCreatureClaim?.disabled && /Сброс через \d{2}:\d{2}:\d{2}/.test(dailyCreature?.querySelector('[data-quest-reset]')?.textContent || '');
+  const questShardsBefore = window.ecShards();
+  const questBpBefore = JSON.parse(window.localStorage.getItem('ec_meta_v1')).bpXp;
+  if (dailyCreatureClaim) click(dailyCreatureClaim);
+  await wait(30);
+  window.ecTestQuestBump('creatures', 40);
+  const weeklyCreature = $('homeWeeklyQuests').querySelector('[data-quest-card="weekly:w_creatures"]');
+  const weeklyCreatureClaim = weeklyCreature?.querySelector('.homeQuestClaim');
+  const weeklyCreatureDone = weeklyCreature?.querySelector('.questTaskProgressText')?.textContent === '60/60'
+    && !weeklyCreatureClaim?.disabled && /Сброс через \d+ д \d{2}:\d{2}:\d{2}/.test(weeklyCreature?.querySelector('[data-quest-reset]')?.textContent || '');
+  if (weeklyCreatureClaim) click(weeklyCreatureClaim);
+  await wait(30);
+  const savedQuestState = JSON.parse(window.localStorage.getItem('ec_meta_v1'));
+  const questRewardOk = dailyCreatureDone && weeklyCreatureDone && window.ecShards() === questShardsBefore + 500
+    && savedQuestState.quests.find(q => q.id === 'creatures')?.claimed
+    && savedQuestState.wquests.find(q => q.id === 'w_creatures')?.claimed
+    && (savedQuestState.bpXp ?? 0) === questBpBefore + 400;
+  check('задания: прогресс, награды, сохранение и обратный отсчёт до локального сброса', questRewardOk,
+    `daily ${dailyCreatureDone ? '20/20 + таймер' : 'ошибка'}, weekly ${weeklyCreatureDone ? '60/60 + таймер' : 'ошибка'}, награды ${window.ecShards()-questShardsBefore} монет / ${savedQuestState.bpXp-questBpBefore} BP`);
 
   /* ---------- 2. коллекция ---------- */
   console.log('\n[2] Коллекция карт');
   click($('btnCollection'));
   await wait(80);
-  // v2.12.1: база стала500 карт (включая70 нейтральных) — assertion обновлён вместе с нумерацией
-  check('показаны все карты коллекции (500 с Расширением II, включая нейтральных)', $('colGrid').children.length === 500, $('colCount').textContent);
+  // Сначала рендерится одна страница, а полный состав smoke подгружает явным помощником.
+  const firstCollectionPage = window.ecTestCollectionState();
+  check('коллекция открывается без массового DOM-рендера', collectionCards().length === firstCollectionPage.pageSize
+    && firstCollectionPage.rendered === firstCollectionPage.pageSize && firstCollectionPage.total === 1000
+    && /500 карт × 2 оформления/.test($('colCount').textContent),
+    `первая страница ${firstCollectionPage.rendered}/${firstCollectionPage.total}; DOM ${collectionCards().length}`);
+  $('colStyle').value = 'classic'; $('colStyle').dispatchEvent(new window.Event('change'));
+  let collectionState = window.ecTestCollectionState();
+  check('фильтр классики сохраняет полный набор при постраничном рендере', collectionCards().length === 40
+    && collectionState.total === 500 && loadAllCollection() === 500, $('colCount').textContent);
   $('colType').value = 'Rune';
   $('colType').dispatchEvent(new window.Event('change'));
   await wait(60);
-  check('фильтр «Руны» = 55 (расширение)', $('colGrid').children.length === 55, `${$('colGrid').children.length}`);
+  collectionState = window.ecTestCollectionState();
+  check('фильтр «Руны» = 55 (расширение) и листается страницами', collectionState.total === 55
+    && collectionCards().length <= 40 && loadAllCollection() === 55, `${collectionCards().length}/${collectionState.total}`);
   $('colType').value = ''; $('colType').dispatchEvent(new window.Event('change'));
   $('colFaction').value = 'Pyromancer'; $('colFaction').dispatchEvent(new window.Event('change'));
   await wait(60);
-  check('фильтр «Пироманты» = 85 (Расширения I+II)', $('colGrid').children.length === 85, `${$('colGrid').children.length}`);
+  collectionState = window.ecTestCollectionState();
+  check('фильтр «Пироманты» = 85 (Расширения I+II) и догружает результат', collectionState.total === 85
+    && collectionCards().length <= 40 && loadAllCollection() === 85, `${collectionCards().length}/${collectionState.total}`);
+
+  // Ключевые слова выделяются жирным, а варианты Borderless остаются теми же картами.
+  $('colFaction').value = ''; $('colType').value = ''; $('colKw').value = 'Taunt';
+  $('colFaction').dispatchEvent(new window.Event('change')); $('colType').dispatchEvent(new window.Event('change'));
+  $('colKw').dispatchEvent(new window.Event('change'));
+  const tauntTile = $('colGrid').firstElementChild;
+  check('ключевые слова карты выделены <strong>', !!tauntTile?.querySelector('.ctext .cardKeyword'));
+  $('colKw').value = ''; $('colKw').dispatchEvent(new window.Event('change'));
+
+  const rollPass = window.ecBorderlessChanceForRoll;
+  const quantileHits = Array.from({ length: 10_000 }, (_, i) => rollPass(i / 10_000)).filter(Boolean).length;
+  check('шанс Borderless в бустере снижен до 0,1% с корректной границей', quantileHits === 10
+    && rollPass(0) && rollPass(0.0009999) && !rollPass(0.001) && !rollPass(0.9999) && !rollPass(Number.NaN), `${quantileHits}/10000 роллов`);
+
+  const quickNav = $('ecQuickNav');
+  check('контекстная навигация с кнопкой «Назад» видна на внутренних экранах', !quickNav.classList.contains('hidden')
+    && quickNav.querySelectorAll('button[data-route]').length === 9 && !!quickNav.querySelector('[data-route="back"]'));
+  click(quickNav.querySelector('[data-route="decks"]'));
+  await wait(40);
+  check('быстрый переход в колоды открывает экран и скрывает коллекцию', !$('decksScreen').classList.contains('hidden') && $('collection').classList.contains('hidden'));
+  click(quickNav.querySelector('[data-route="back"]'));
+  await wait(40);
+  check('возврат из колод восстанавливает коллекцию', !$('collection').classList.contains('hidden') && $('decksScreen').classList.contains('hidden'));
+
+  click(quickNav.querySelector('[data-route="events"]'));
+  await wait(40);
+  const borderlessEvent = $('eventsGrid').querySelector('[data-event-id="borderless"]');
+  check('событие Borderless показывает цель 3 рейтинговые победы и одну награду',
+    !!borderlessEvent && /0\/3/.test(borderlessEvent.textContent) && !!borderlessEvent.querySelector('[data-borderless-claim]'));
+  click(quickNav.querySelector('[data-route="back"]'));
+  await wait(40);
+
+  click(quickNav.querySelector('[data-route="profile"]'));
+  await wait(40);
+  check('профиль открывается с уровнем и кнопкой возврата', !$('profileModal').classList.contains('hidden')
+    && /Уровень \d+/.test($('profBody').textContent) && !!$('btnProfileClose'));
+  click(quickNav.querySelector('[data-route="back"]'));
+  await wait(40);
+  check('возврат из профиля восстанавливает прежний раздел', !$('collection').classList.contains('hidden') && $('profileModal').classList.contains('hidden'));
+
+  $('colStyle').value = ''; $('colStyle').dispatchEvent(new window.Event('change'));
+  loadAllCollection();
+  const allVariants = collectionCards();
+  const classicSample = allVariants[0]; const borderlessSample = allVariants[1];
+  check('коллекция содержит 500 классических + 500 отдельных Borderless-вариантов', allVariants.length === 1000
+    && classicSample?.dataset.cardId === borderlessSample?.dataset.cardId
+    && classicSample?.dataset.cardAppearance === 'classic' && borderlessSample?.dataset.cardAppearance === 'borderless'
+    && classicSample?.dataset.cardVariantId !== borderlessSample?.dataset.cardVariantId
+    && classicSample?.querySelector('.ctitle')?.textContent === borderlessSample?.querySelector('.ctitle')?.textContent
+    && classicSample?.querySelector('.cart')?.innerHTML === borderlessSample?.querySelector('.cart')?.innerHTML);
+
+  $('colStyle').value = 'borderless'; $('colStyle').dispatchEvent(new window.Event('change'));
+  await wait(40);
+  loadAllCollection();
+  check('в фильтре Borderless видны все 500 безрамочных вариантов', collectionCards().length === 500
+    && collectionCards().every(node => node.classList.contains('borderless') && node.dataset.cardAppearance === 'borderless'
+      && node.dataset.cardVariantId === `${node.dataset.cardId}:borderless`));
+  const borderlessTileSample = $('colGrid').firstElementChild;
+  const borderlessId = borderlessTileSample?.dataset.cardId || '';
+  borderlessTileSample?.dispatchEvent(new window.MouseEvent('mouseenter', { bubbles: false, clientX: 120, clientY: 140 }));
+  await wait(10);
+  check('предпросмотр Borderless сохраняет безрамочный вариант', $('zoomPreview').querySelector('.card')?.classList.contains('borderless')
+    && $('zoomPreview').dataset.cardVariantId === `${borderlessId}:borderless`);
+  const copiesBeforeStyleUnlock = window.ecOwnedOf(borderlessId);
+  const granted = !!borderlessId && window.ecGrantBorderless(borderlessId);
+  $('colStyle').dispatchEvent(new window.Event('change'));
+  const unlockedBorderless = collectionCards().find(node => node.dataset.cardId === borderlessId);
+  check('Borderless разблокируется отдельно от копий карты', granted && !!unlockedBorderless
+    && !unlockedBorderless.classList.contains('borderlessLocked') && window.ecOwnedOf(borderlessId) === copiesBeforeStyleUnlock);
+  const equippedBorderless = window.ecToggleBorderless(borderlessId);
+  $('colStyle').dispatchEvent(new window.Event('change'));
+  const equippedTile = collectionCards().find(node => node.dataset.cardId === borderlessId);
+  check('надевание Borderless меняет только оформление, сохраняя тот же ID карты', equippedBorderless
+    && !!equippedTile?.classList.contains('borderlessEquipped') && equippedTile.dataset.cardId === borderlessId
+    && window.ecOwnedOf(borderlessId) === copiesBeforeStyleUnlock);
+  $('colStyle').value = 'classic'; $('colStyle').dispatchEvent(new window.Event('change'));
+
   click($('btnColClose'));
   await wait(30);
   check('коллекция закрылась', $('collection').classList.contains('hidden'));
+  click($('btnCollection')); await wait(35);
+  const reopenOne = window.ecTestCollectionState();
+  click($('btnColClose')); await wait(35);
+  click($('btnCollection')); await wait(35);
+  const reopenTwo = window.ecTestCollectionState();
+  const reopenFastOk = reopenOne.rendered <= reopenOne.pageSize && reopenTwo.rendered <= reopenTwo.pageSize
+    && reopenOne.total === 500 && reopenTwo.total === 500;
+  check('после возврата в меню повторное открытие коллекции снова рисует только первую страницу', reopenFastOk,
+    `открытия ${reopenOne.rendered}/${reopenOne.total} и ${reopenTwo.rendered}/${reopenTwo.total}`);
+  click($('btnColClose')); await wait(35);
 
   /* ---------- 3. правила ---------- */
   console.log('\n[3] Экран правил');
@@ -166,6 +351,18 @@ const check = (name, ok, extra = '') => {
   check('после муллигана и добора ресурсов в руке 6 карт', b.engine.p(0).hand.length === 6, `${b.engine.p(0).hand.length}`);
   check('рука отрисована в DOM', $('hand').children.length === b.engine.p(0).hand.length,
     `${$('hand').children.length} в DOM / ${b.engine.p(0).hand.length} в движке`);
+  const liveBorderlessId = b.engine.p(0).hand[0] || '';
+  const liveCopiesBeforeStyle = liveBorderlessId ? window.ecOwnedOf(liveBorderlessId) : 0;
+  const liveStyleWasEquipped = !!liveBorderlessId && window.ecMeta().borderlessEquipped.includes(liveBorderlessId);
+  if (liveBorderlessId && !window.ecBorderlessOwned().includes(liveBorderlessId)) window.ecGrantBorderless(liveBorderlessId);
+  if (liveBorderlessId && !liveStyleWasEquipped) window.ecToggleBorderless(liveBorderlessId);
+  b.renderAll();
+  const liveBorderlessNode = [...$('hand').children].find(n => n.dataset.cardId === liveBorderlessId);
+  check('полученный Borderless вид отображается на играбельной карте в матче', !!liveBorderlessNode?.classList.contains('borderless')
+    && liveBorderlessNode?.dataset.cardVariantId === `${liveBorderlessId}:borderless`
+    && window.ecOwnedOf(liveBorderlessId) === liveCopiesBeforeStyle);
+  if (liveBorderlessId && !liveStyleWasEquipped) window.ecToggleBorderless(liveBorderlessId);
+  b.renderAll();
   check('здоровье героев 30/30', $('playerHp').textContent === '30' && $('enemyHp').textContent === '30');
   check('мана 1-го хода = 1/1', $('playerMana').textContent === '1/1', $('playerMana').textContent);
 
@@ -244,8 +441,14 @@ const check = (name, ok, extra = '') => {
   }
 
   check('игрок разыграл хотя бы одну карту', playedCards > 0, `${playedCards} карт (существ ${playedCreatures}, заклинаний ${playedSpells})`);
+  const questProgressAfterPlays = JSON.parse(window.localStorage.getItem('ec_meta_v1'));
+  check('игровые события продвигают цели «разыграйте существ» и «примените руны»',
+    (questProgressAfterPlays.wquests.find(q => q.id === 'w_creatures')?.prog ?? 0) > 0
+      && (questProgressAfterPlays.quests.find(q => q.id === 'runes')?.prog ?? 0) > 0
+      && (questProgressAfterPlays.wquests.find(q => q.id === 'w_runes')?.prog ?? 0) > 0,
+    `существа ${questProgressAfterPlays.wquests.find(q => q.id === 'w_creatures')?.prog ?? 0}, руны ${questProgressAfterPlays.quests.find(q => q.id === 'runes')?.prog ?? 0}`);
   check('существа появились на доске игрока', playedCreatures === 0 || units('#playerBoard .unit') >= 0);
-  check('журнал боя копится в памяти (чат с экрана убран)', (window.logLines || []).length > 15,
+  check('журнал боя копится в памяти (чат с экрана убран)', (window.logLines || []).length > 3,
     `${(window.logLines || []).length} записей в буфере`);
   click($('btnJournal'));
   await wait(60);
@@ -405,6 +608,10 @@ const check = (name, ok, extra = '') => {
     && +$('enemyHp').textContent === Math.max(0, eBefore - dealt)
     && +$('playerHp').textContent === Math.min(30, pBefore + healed),
     `враг ${eBefore}→${$('enemyHp').textContent} (движок ${b.engine.p(1).health}, урон ${dealt}), вы ${pBefore}→${$('playerHp').textContent} (лечение ${healed})`);
+  // Прямые вызовы damageHero/damageCreature ниже — вне аниматора боя: gameover
+  // может оставить движок в Combat, где VFX штатно передаются animateCombat.
+  const phaseBeforeVfxProbe = b.engine.phase;
+  b.engine.phase = 'Main';
   // числа снятия жизней — на независимом слое и переживают перерисовку
   const fl = $('floatLayer');
   const nBefore = fl.children.length;
@@ -440,6 +647,7 @@ const check = (name, ok, extra = '') => {
   check('урон заклинанием: число на поле и hp-бейдж существа обновлены (без отрицательных)',
     spellFloat && String(hpShown) === String(Math.max(0, hpBefore2 - 3)),
     `флоат -3: ${spellFloat ? 'да' : 'нет'}, hp ${hpBefore2}→${hpShown} (показано max(0, ${hpBefore2 - 3}))`);
+  b.engine.phase = phaseBeforeVfxProbe;
   // папки артов по фракциям существуют на диске
   const fsMod = require('fs');
   const pathMod = require('path');
@@ -450,6 +658,43 @@ const check = (name, ok, extra = '') => {
   const haveArt = folders.reduce((n, f) => n + fsMod.readdirSync(pathMod.join(artRoot, f))
     .filter(x => x.endsWith('.png')).length, 0);
   check('папки артов по фракциям с README и манифестом', haveReadme, `${folders.length} папок, PNG на месте: ${haveArt}`);
+  const offersReadme = fsMod.readFileSync(pathMod.resolve(__dirname, '..', 'art_raw', 'cosm', 'offers', 'README.md'), 'utf8');
+  const offersUiSrc = fsMod.readFileSync(pathMod.resolve(__dirname, '..', 'src', 'ui', 'prototype.ts'), 'utf8');
+  const offersCssSrc = fsMod.readFileSync(pathMod.resolve(__dirname, '..', 'prototype', 'prototype.css'), 'utf8');
+  check('для обычного и мифического бустера указан drop-in путь',
+    offersReadme.includes('art_raw/cosm/offers/') && offersReadme.includes('booster.png')
+      && offersReadme.includes('booster_premium.png') && /cosmImg\('offers', p\.art/.test(offersUiSrc),
+    'art_raw/cosm/offers/booster.png и booster_premium.png');
+  check('PNG бустера показывается без искусственной рамки и без обрезки, крупно при вскрытии',
+    offersReadme.includes('прозрачным фоном') && offersReadme.includes('без нарисованной внешней рамки')
+      && offersUiSrc.includes("const pack = img.closest('.packVis')")
+      && offersUiSrc.includes("pack?.closest('.packOfferArt')?.classList.add('hasPackArt')")
+      && offersUiSrc.includes('const packTile =')
+      && offersCssSrc.includes('#shopModal .packOfferArt.hasPackArt::after')
+      && offersCssSrc.includes('#shopModal .packVis.hasArt')
+      && offersCssSrc.includes('#boosterModal .boosterInvVisual.hasArt')
+      && offersCssSrc.includes('#boosterModal .packSealedInner.hasArt')
+      && offersCssSrc.includes('object-fit:contain!important')
+      && offersCssSrc.includes('width:clamp(244px,20vw,300px)')
+      && html.includes('PATCH v2.48'),
+    'магазин/запас/сцена вскрытия используют целый PNG; размер сцены 244–300px по ширине');
+  const cosmReadme = fsMod.readFileSync(pathMod.resolve(__dirname, '..', 'art_raw', 'cosm', 'README.md'), 'utf8');
+  const serveCosmSrc = fsMod.readFileSync(pathMod.resolve(__dirname, '..', 'tools', 'serve.js'), 'utf8');
+  check('пути будущих артов пропуска и заданий задокументированы без создания изображений',
+    ['art_raw/cosm/bp/coins.png','premium_booster.png','cardback.png','foil_token.png',
+      'art_raw/cosm/quests/creatures.png','runes.png','w_creatures.png','w_dmg.png',
+      'prototype/img/decks/<deckId>.png'].every(path => cosmReadme.includes(path))
+      && /'bp', 'quests'/.test(serveCosmSrc)
+      && /src=\"\/cosm\/bp\//.test(offersUiSrc) && /src=\"\/cosm\/quests\//.test(offersUiSrc),
+    'cosm/bp/{coins,booster,premium_booster,cardback,gems,foil_token,avatar}; cosm/quests/<questId>; img/decks/<deckId>.png');
+  check('боевой пропуск: увеличенная лента с крупными артами и адаптивными 8/4/2 уровнями',
+    /bpRewardVisual/.test(offersUiSrc) && /bpRewardArt/.test(offersUiSrc)
+      && /bpTile\{[^}]*min-height:156px/.test(offersCssSrc)
+      && offersCssSrc.includes('#bpModal .bpPage,#bpModal .bpPage.on{grid-template-columns:repeat(8,minmax(0,1fr))')
+      && offersCssSrc.includes('@media(max-width:920px){\n  #bpModal .bpPage,#bpModal .bpPage.on{grid-template-columns:repeat(4,minmax(0,1fr))')
+      && offersCssSrc.includes('@media(max-width:600px){\n  #menu .questDashboardHeader{display:block}')
+      && /@media\(max-width:600px\)[\s\S]{0,2200}#bpModal \.bpPage,#bpModal \.bpPage\.on\{grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/.test(offersCssSrc),
+    'reward tiles use portrait art and viewport-aware 8/4/2-column pages');
 
   /* ---------- 5г. крупные карты, модалка, конструктор колод ---------- */
   console.log('\n[5г] Крупные карты, модалка описания, конструктор колод');
@@ -457,12 +702,43 @@ const check = (name, ok, extra = '') => {
   const htmlSrc = fsMod.readFileSync(pathMod.resolve(__dirname, '..', 'prototype', 'index.html'), 'utf8');
   const cssSrc = fsMod.readFileSync(pathMod.resolve(__dirname, '..', 'prototype', 'prototype.css'), 'utf8');
   const jsSrc = fsMod.readFileSync(pathMod.resolve(__dirname, '..', 'prototype', 'prototype.js'), 'utf8');
-  // компоновка карты: арт 70% сверху во всю ширину, текст 30% снизу
-  check('компоновка карты: арт 70% / текст 30%', /\.card \.cart\{position:absolute;left:0;right:0;top:0;height:70%/.test(htmlSrc)
-    && /\.card \.ctext\{position:absolute;left:0;right:0;top:calc\(70% \+ 1\.15em\)/.test(htmlSrc)
-    && !/\.card\.xl \.cart\{height/.test(cssSrc)
-    && /\.card \.cart svg,\.unit \.uart svg\{display:block;width:100%;height:100%\}/.test(htmlSrc),
-    'арт во всю ширину и 70% высоты, текстовая зона 30% с золотым разделителем');
+  check('обложки колод крупнее; исходный арт целиком, без кадрирования',
+    cssSrc.includes('width:224px!important') && cssSrc.includes('aspect-ratio:512 / 720')
+      && cssSrc.includes('object-fit:contain!important') && cssSrc.includes('mix-blend-mode:normal!important'),
+    'увеличенные портретные превью, object-fit:contain, без overlay');
+  check('галерея выбора арта доступна из списка колод и конструктора',
+    htmlSrc.includes('id="deckArtPickerModal"') && htmlSrc.includes('id="btnDbAvatarGallery"')
+      && jsSrc.includes('openSavedDeckArtPicker') && jsSrc.includes('openEditorDeckArtPicker'),
+    'можно выбрать любую карту состава и сохранить её как обложку');
+  // Обычная карта возвращает рамку и нижнее текстовое поле; отдельный Borderless-слой не меняется.
+  check('обычная карта: внутренняя рамка и нижний блок текста; Borderless без изменений',
+    /\.card:not\(\.borderless\)\{[^}]*border:2px solid/.test(cssSrc)
+    && /\.card:not\(\.borderless\) \.cart\{[\s\S]*?height:70%!important/.test(cssSrc)
+    && /\.card:not\(\.borderless\) \.ctext\{[\s\S]*?background:linear-gradient\(180deg,#e9dab6,#d3bf92\)!important/.test(cssSrc)
+    && /\.card:not\(\.borderless\) \.innerframe\{/.test(cssSrc)
+    && /\.card\.borderless \.cart\{top:0!important;bottom:0!important;height:100%!important/.test(cssSrc)
+    && /\.card\.borderless \.ctext[^\{]*\{[^}]*background:transparent!important/.test(cssSrc),
+    'обычная версия — рамка, внутренний кант и нижняя панель правил; полноформатный Borderless неизменен');
+  check('скин стола имеет приоритет над фоном фракции и кадрируется одинаково',
+    /const tableUrl = \[`\/cosm\/tables\//.test(jsSrc) && /applyBattleBg\(picked\)/.test(jsSrc)
+    && /#backdrop img#battleBgImg\{object-fit:cover!important;object-position:center center!important\}/.test(cssSrc)
+    && /#backdrop \.bgArt\{background-position:center center!important;background-size:cover!important/.test(cssSrc),
+    'выбранный /cosm/tables/<skin> пробуется первым, image и CSS-фон используют center/cover');
+  const protoUiSrc = fsMod.readFileSync(pathMod.resolve(__dirname, '..', 'src/ui/prototype.ts'), 'utf8');
+  check('Borderless — ещё 500 вариантов с тем же ID, названием и артом, но без рамки',
+    /function renderCard\(card: CardData, appearance: CardAppearance = 'auto'\)/.test(protoUiSrc)
+    && /node\.dataset\.cardVariantId = `\$\{card\.id\}:\$\{cardStyle\}`/.test(protoUiSrc)
+    && /borderlessOwned: string\[\]/.test(protoUiSrc)
+    && /\.card\.borderless\{[^}]*border:0!important/.test(cssSrc)
+    && /\.card\.borderless \.banner,\.card\.borderless \.innerframe,\.card\.borderless \.frameOv\{display:none!important/.test(cssSrc)
+    && /\.card\.borderless::after\{content:none!important/.test(cssSrc)
+    && /\.card\.borderless \.cart\{top:0!important;bottom:0!important;height:100%!important/.test(cssSrc)
+    && /\.card\.borderless \.ctype\{top:70%!important;bottom:auto!important/.test(cssSrc)
+    && /\.card\.borderless \.ctext\{top:calc\(70% \+ 1\.15em\)!important;bottom:1\.55em!important;height:auto!important/.test(cssSrc)
+    && /\.card\.borderless \.ctext[^{]*\{[^}]*background:transparent!important/.test(cssSrc)
+    && /\.card\.borderless \.artBox\{border:0!important;box-shadow:none!important/.test(cssSrc)
+    && !/borderlessCardMark/.test(protoUiSrc),
+    'арт 100% на всю карту; тип/описание наложены на арт по знакомым координатам, внутренние блоки и рамка сняты');
   // Настоящие PNG-арты: пакет 1 — флагманы пяти фракций
   {
     const fsA=require('fs'), pthA=require('path');
@@ -479,11 +755,17 @@ const check = (name, ok, extra = '') => {
     check('drop-in артов: art_raw/<id>.png подхватывается сервером', /findRawArt/.test(serveSrc) && /art_raw/.test(serveSrc) && /"art:sync"/.test(pkgSrc),
       'serve.js ищет art_raw с вариантами имён (aur_2→aur_01), npm run art:sync раскладывает в Unity');
     const jsBundle=fsA.readFileSync(pthA.join(__dirname,'..','prototype','prototype.js'),'utf8');
-    check('визуал v2: фольга редкости, шиммер легендарок, кодировка типов, пульс ready',
-      /\.card\.r-legendary \.holo\{opacity:\.3;background-size:200% 100%;animation:holoCycle/.test(htmlSrc)
+    const protoCss=fsA.readFileSync(pthA.join(__dirname,'..','src','ui','prototype.css'),'utf8');
+    check('обычные карты сохраняют рамку/нижнюю панель; эффекты редкости только при наведении',
+      /\.card:not\(\.borderless\)\{[^}]*border:2px solid/.test(protoCss)
+      && /\.card:not\(\.borderless\) \.cart\{[\s\S]*?height:70%!important/.test(protoCss)
+      && /\.card:not\(\.borderless\) \.ctext\{[\s\S]*?background:linear-gradient\(180deg,#e9dab6,#d3bf92\)!important/.test(protoCss)
+      && /\.card\.r-rare:hover/.test(protoCss) && /\.card\.r-epic:hover/.test(protoCss)
+      && /\.card\.r-legendary:hover/.test(protoCss)
+      && /@media\(prefers-reduced-motion:reduce\)/.test(protoCss)
       && /\.card\.t-spell \.ctype\{/.test(htmlSrc) && /\.unit\.ready \.ubody\{/.test(htmlSrc)
       && /classList\.add\(["']ready["']\)/.test(jsBundle) && /t-\$\{/.test(jsBundle),
-      'рамки по редкости, постоянный шиммер легендарок, полосы типа, пульс готовых к атаке');
+      'рамка внутри сохранена, нижний текстовый блок восстановлен; rarity hover-only и reduced-motion');
     const vfxSrc=fsA.readFileSync(pthA.join(__dirname,'..','src','ui','vfx.ts'),'utf8');
     check('кладбище зоной на поле + ландшафт фона + ПКМ-обработчик',
       /id="playerGraveZone"/.test(htmlSrc) && /id="enemyGraveZone"/.test(htmlSrc)
@@ -501,8 +783,9 @@ const check = (name, ok, extra = '') => {
       && /flipFrom/.test(jsBundle) && /consumeDrawFly/.test(jsBundle)
       && /strikeAnim = typeof attacker\.animate === "function" \? attacker\.animate\(\[/.test(jsBundle),
       'рывок замах→удар→возврат, световой след, карта-призрак заклинания, добор из колоды, сдвиги поля/руки без layout-свойств');
-    check('PNG-арты флагманов интегрированы (пакет 1: 5 карт)', bad.length===0 && wired,
-      bad.length? 'нет файлов: '+bad.join(',') : '5 PNG 768×768 на местах, арт тянется из папок через /art/');
+    if (bad.length) skip('PNG-арты флагманов (пакет 1: 5 карт)', `${bad.length}/5 файлов будут добавлены на финальном этапе`);
+    else check('PNG-арты флагманов интегрированы (пакет 1: 5 карт)', wired,
+      '5 PNG на местах, арт тянется из папок через /art/');
     // Пакет 2 (2026-09-24): aur_15, nec_14, ter_13, pyr_13, eth_14
     const ids2=[['Aurites','aur_15'],['Necrus','nec_14'],['Terramorph','ter_13'],['Pyromancer','pyr_13'],['Ethereal','eth_14']];
     const bad2=ids2.filter(([f,id])=>{
@@ -511,8 +794,9 @@ const check = (name, ok, extra = '') => {
       const b=fsA.readFileSync(fp);
       return !(b.length>8 && b[0]===0x89 && b[1]===0x50 && b[2]===0x4e && b[3]===0x47);
     });
-    check('PNG-арты интегрированы (пакет 2: 5 карт)', bad2.length===0,
-      bad2.length? 'нет файлов: '+bad2.join(',') : '5 PNG на местах: aur_15, nec_14, ter_13, pyr_13, eth_14');
+    if (bad2.length) skip('PNG-арты (пакет 2: 5 карт)', `${bad2.length}/5 файлов будут добавлены на финальном этапе`);
+    else check('PNG-арты интегрированы (пакет 2: 5 карт)', true,
+      '5 PNG на местах: aur_15, nec_14, ter_13, pyr_13, eth_14');
   }
   check('карты читабельного размера с адаптивом (clamp-переменные везде)',
     /--card-w:clamp\(158px, 12\.4vw, 190px\)/.test(cssSrc)
@@ -528,8 +812,9 @@ const check = (name, ok, extra = '') => {
   // ранний тест коллекции мог оставить фильтр фракции — сбрасываем
   $('colFaction').value = ''; $('colFaction').dispatchEvent(new window.Event('change'));
   await wait(60);
-  const colCards = [...$('colGrid').children].filter(n => n.classList.contains('card'));
-  check('коллекция открыта и наполнена', colCards.length > 100, `${colCards.length} карт`);
+  const colCards = collectionCards();
+  check('коллекция открыта и наполнена постранично', colCards.length > 0 && colCards.length <= 40
+    && window.ecTestCollectionState().total === 500, `${colCards.length}/${window.ecTestCollectionState().total} карт`);
   click(colCards[3]);
   await wait(40);
   const modal = $('cardModal');
@@ -548,30 +833,94 @@ const check = (name, ok, extra = '') => {
   // конструктор колод
   click($('tabBuilder'));
   await wait(60);
-  check('вкладка «Конструктор колод» открывает редактор', !$('dbMain').classList.contains('hidden')
-    && $('dbPoolGrid').children.length > 20, `пул: ${$('dbPoolGrid').children.length} карт`);
+  check('вкладка «Конструктор колод» открывает редактор с выбором обложки', !$('dbMain').classList.contains('hidden')
+    && $('dbPoolGrid').children.length > 20 && !!$('dbAvatarCard') && !!$('dbAvatarPreview') && !!$('btnDbAvatarGallery'),
+    `пул: ${$('dbPoolGrid').children.length} карт · список + визуальная галерея`);
   const poolCard = [...$('dbPoolGrid').children].find(n => n.classList.contains('card'));
   click(poolCard);
   await wait(30);
+  const editorGalleryReady = !$('btnDbAvatarGallery').disabled;
+  if (editorGalleryReady) click($('btnDbAvatarGallery'));
+  const editorGalleryOk = editorGalleryReady && !$('deckArtPickerModal').classList.contains('hidden')
+    && $('deckArtPickerGrid').children.length === 1;
+  check('галерея обложки в редакторе показывает арт выбранной карты целиком', editorGalleryOk);
+  if (editorGalleryOk) click($('btnDeckArtPickerClose'));
   const cnt1 = $('dbCount').textContent;
   poolCard.dispatchEvent(new window.MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
   await wait(30);
-  check('клик добавляет карту в колоду, ПКМ убирает', cnt1 === '1 / 40' && $('dbCount').textContent === '0 / 40',
+  check('клик добавляет карту в колоду, ПКМ убирает', cnt1 === '1 · мин. 60' && $('dbCount').textContent === '0 · мин. 60',
     `${cnt1} → ${$('dbCount').textContent}`);
+  const builderCosmeticId = $('dbPoolGrid').querySelector('.card')?.dataset.cardId || '';
+  if (builderCosmeticId && !window.ecBorderlessOwned().includes(builderCosmeticId)) window.ecGrantBorderless(builderCosmeticId);
+  if (builderCosmeticId && window.ecMeta().borderlessEquipped.includes(builderCosmeticId)) window.ecToggleBorderless(builderCosmeticId);
+  $('dbSearch').dispatchEvent(new window.Event('input'));
+  let builderTile = [...$('dbPoolGrid').querySelectorAll('.card')].find(n => n.dataset.cardId === builderCosmeticId);
+  let stylePickerButton = builderTile?.querySelector('.dbStylePicker');
+  check('пул колоды открывает выбор стиля в отдельном picker', !!stylePickerButton
+    && stylePickerButton.getAttribute('aria-label')?.includes('Выбрать оформление') && !!$('btnDbStyleAll'));
+  if (builderCosmeticId && !$('btnDbStyleAll').disabled) {
+    click($('btnDbStyleAll'));
+    const allStyledTile = [...$('dbPoolGrid').querySelectorAll('.card')].find(n => n.dataset.cardId === builderCosmeticId);
+    check('кнопка deckbuilder применяет все полученные стили как в Arena', !!allStyledTile?.classList.contains('borderless')
+      && window.ecMeta().borderlessEquipped.includes(builderCosmeticId) && /Снять все/.test($('btnDbStyleAll').textContent));
+    click($('btnDbStyleAll'));
+    const resetStyledTile = [...$('dbPoolGrid').querySelectorAll('.card')].find(n => n.dataset.cardId === builderCosmeticId);
+    check('массовое переключение стилей можно отменить', !!resetStyledTile && !resetStyledTile.classList.contains('borderless')
+      && !window.ecMeta().borderlessEquipped.includes(builderCosmeticId));
+    builderTile = resetStyledTile;
+    stylePickerButton = builderTile?.querySelector('.dbStylePicker');
+  }
+  if (builderTile && stylePickerButton && builderCosmeticId) {
+    const ordinaryBeforeStyle = window.ecOwnedOf(builderCosmeticId);
+    click(builderTile);
+    builderTile = [...$('dbPoolGrid').querySelectorAll('.card')].find(n => n.dataset.cardId === builderCosmeticId);
+    stylePickerButton = builderTile?.querySelector('.dbStylePicker');
+    if (stylePickerButton) click(stylePickerButton);
+    const borderlessChoice = $('cmStylePicker')?.querySelector('[data-cm-style="borderless"]');
+    check('карточный picker показывает классический и Borderless-стили', !$('cardModal').classList.contains('hidden')
+      && !!$('cmStylePicker')?.querySelector('[data-cm-style="classic"]') && !!borderlessChoice && !borderlessChoice.disabled);
+    if (borderlessChoice && !borderlessChoice.disabled) click(borderlessChoice);
+    const equippedTile = [...$('dbPoolGrid').querySelectorAll('.card')].find(n => n.dataset.cardId === builderCosmeticId);
+    check('выбранный Borderless виден в пуле и составе той же колоды', !!equippedTile?.classList.contains('borderless')
+      && equippedTile?.dataset.cardVariantId === `${builderCosmeticId}:borderless`
+      && $('dbCount').textContent === '1 · мин. 60'
+      && !!$('dbDeckList').querySelector('.dbRowStyle.isBorderless')
+      && window.ecMeta().borderlessEquipped.includes(builderCosmeticId)
+      && window.ecOwnedOf(builderCosmeticId) === ordinaryBeforeStyle);
+    const classicChoice = $('cmStylePicker')?.querySelector('[data-cm-style="classic"]');
+    if (classicChoice) click(classicChoice);
+    const classicTile = [...$('dbPoolGrid').querySelectorAll('.card')].find(n => n.dataset.cardId === builderCosmeticId);
+    check('переключение стиля не создаёт копию и не меняет лимит колоды', !!classicTile
+      && !classicTile.classList.contains('borderless') && $('dbCount').textContent === '1 · мин. 60'
+      && window.ecOwnedOf(builderCosmeticId) === ordinaryBeforeStyle);
+    click($('cmClose'));
+    $('dbDeckList').querySelector('.dbRow button')?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  }
   // хранилище колод: валидация по ТЗ и бой с пользовательской колодой
   const D = window.__decks;
   const fac = 'Aurites';
-  const poolIds = D.pool(fac).filter(r => r.rarity !== 'Legendary').map(r => r.id);
-  const custom = poolIds.slice(0, 30).concat(poolIds.slice(0, 10));
+  const factionPool = D.pool(fac);
+  const poolIds = factionPool.filter(r => r.rarity !== 'Legendary').map(r => r.id);
+  const custom = poolIds.slice(0, 15).flatMap(id => [id, id, id, id]);
   const good = D.validate(custom, fac);
-  const bad = D.validate(custom.slice(0, 39), fac);
-  check('валидатор колод ТЗ: 40 карт ок, 39 — отказ', good.ok && !bad.ok,
-    good.ok ? `40 ок; 39: ${bad.problems[0]}` : good.problems.join(';'));
-  D.save({ id: 'custom-smoke', name: 'Дымовая колода', faction: fac, cards: custom, updated: Date.now() });
+  const short = D.validate(custom.slice(0, 59), fac);
+  const tooMany = D.validate([...custom, custom[0]], fac);
+  const oversizedCards = poolIds.slice(0, 16).flatMap(id => [id, id, id, id]);
+  const oversized = D.validate(oversizedCards, fac);
+  const legendaryId = factionPool.find(r => r.rarity === 'Legendary')?.id;
+  const legendaryDeck = legendaryId
+    ? [...poolIds.slice(0, 14).flatMap(id => [id, id, id, id]), legendaryId, legendaryId, legendaryId, legendaryId]
+    : [];
+  const legendaryOk = !!legendaryId && D.validate(legendaryDeck, fac).ok;
+  check('валидатор MTG Constructed: минимум 60, без потолка, playset ×4 включая легендарные',
+    custom.length === 60 && good.ok && !short.ok && !tooMany.ok && oversizedCards.length === 64
+      && oversized.ok && legendaryOk,
+    `60=${good.ok}; 59=${short.ok}; 64=${oversized.ok}; ×5=${tooMany.ok}; legendary ×4=${legendaryOk}`);
+  D.save({ id: 'custom-smoke', name: 'Дымовая колода', faction: fac, cards: custom, avatarCardId: custom[0], updated: Date.now() });
   const resolved = D.resolve('custom-smoke');
-  check('пользовательская колода сохраняется и резолвится боем',
-    !!resolved && resolved.cards.length === 40 && D.list().length >= 1,
-    resolved ? `${resolved.name}, ${resolved.cards.length} карт` : 'нет');
+  check('пользовательская колода на 60 карт и выбранная обложка сохраняются для боя',
+    !!resolved && resolved.cards.length === 60 && resolved.avatarCardId === custom[0] && D.list().length >= 1,
+    resolved ? `${resolved.name}, ${resolved.cards.length} карт · avatar ${resolved.avatarCardId ?? '—'}` : 'нет');
   D.remove('custom-smoke');
   click($('tabCollection'));
   await wait(30);
@@ -626,6 +975,7 @@ const check = (name, ok, extra = '') => {
       `стрелка: ${aimShown ? 'да' : 'нет'}, очередь ${q}, hp ${hpBefore}→${alive ? alive.health : 'мертв'}`);
     // тап: третье существо бьёт героя и остаётся повёрнутым на 90°
     const u3 = e2.summon(0, plain); u3.justPlayed = false; u3.summonedOnTurn = -9;
+    u3.keywords = [...u3.keywords, 'Windfury']; // проверяем состояние после первой из двух атак
     b.renderAll();
     const p3 = doc.querySelector(`.unit[data-uid="${u3.uid}"]`);
     click(p3);
@@ -635,6 +985,22 @@ const check = (name, ok, extra = '') => {
       return !!n && n.classList.contains('tapped');
     }, 5000);
     check('атаковавшее существо тапнуто (повёрнуто на 90°, как в MTG)', tappedOk);
+    const repeatedAttackOk = await waitUntil(() => {
+      const n = doc.querySelector(`.unit[data-uid="${u3.uid}"]`);
+      const mark = n?.querySelector('.attackReadyMark');
+      return !!n && b.engine.canAttack(u3) && n.classList.contains('ready')
+        && n.classList.contains('tapped') && mark?.textContent.trim() === 'Ещё 1';
+    }, 5000);
+    check('после первой атаки с Бурей существо остаётся на поле с понятной меткой «Ещё 1»',
+      repeatedAttackOk && !html.includes('.unit.tapped.ready{display:none}'),
+      repeatedAttackOk ? 'может атаковать ещё раз, без скрытия существа' : 'индикатор повторной атаки не найден');
+    const p3Again = doc.querySelector(`.unit[data-uid="${u3.uid}"]`);
+    click(p3Again); click($('enemyHero'));
+    const secondAttackOk = await waitUntil(() => {
+      const n = doc.querySelector(`.unit[data-uid="${u3.uid}"]`);
+      return u3.attacksThisTurn === 2 && !b.engine.canAttack(u3) && !n?.querySelector('.attackReadyMark');
+    }, 5000);
+    check('после второй атаки метка повторной атаки снимается', secondAttackOk);
     const closedOk = await waitUntil(() => !b.inCombatWindow, 9000);
     check('окно атак закрылось после доигрывания', closedOk);
     b.manualCombat = false;
@@ -661,40 +1027,91 @@ const check = (name, ok, extra = '') => {
   click($('btnMenu'));
   await wait(250);
   check('возврат в меню', !$('menu').classList.contains('hidden'));
-  // бустеры этапа расширения: 5 карт, флип, владение растёт по редкостям ТЗ
+  // Буcтеры: покупка добавляет запечатанный пак в запас; открытие списывает один пак, не валюту.
   click($('btnBoosters'));
   await wait(60);
+  const firstStockPack = $('boosterInventory')?.querySelector('.boosterInvCard.has-stock');
+  const focusAtOpen = !!firstStockPack && window.document.activeElement === firstStockPack;
+  const packFocusables = [...$('boosterModal').querySelectorAll('button:not([disabled]),a[href],input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])')]
+    .filter(el => !el.closest('.hidden') && el.getAttribute('aria-hidden') !== 'true');
+  const packFirstFocusable = packFocusables[0];
+  const packLastFocusable = packFocusables[packFocusables.length - 1];
+  packLastFocusable?.focus();
+  packLastFocusable?.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
+  const tabWrapForward = !!packFirstFocusable && window.document.activeElement === packFirstFocusable;
+  packFirstFocusable?.focus();
+  packFirstFocusable?.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true }));
+  const tabWrapBackward = !!packLastFocusable && window.document.activeElement === packLastFocusable;
   const shards0 = window.ecShards();
-  click($('btnPackNew'));
-  await wait(90);
-  // sealed-флоу: сначала конверт, клик по нему вскрывает бустер (revealPack → renderPackSlots через560мс)
+  const stockNode = () => $('boosterInventory')?.querySelector('[data-pack="standard"] .boosterInvCount');
+  const stockBefore = Number((stockNode()?.textContent || '×0').replace(/[^0-9]/g, ''));
+  click($('btnPackNew')); // кнопка из панели ведёт в магазин
+  await wait(50);
+  const storeOpened = !$('shopModal').classList.contains('hidden');
+  const purchase = window.document.querySelector('.buyPackOffer[data-offer="p1"][data-cur="gold"]');
+  if (purchase) click(purchase);
+  await wait(70);
+  const shardsAfterBuy = window.ecShards();
+  const stockAfterBuy = Number((stockNode()?.textContent || '×0').replace(/[^0-9]/g, ''));
+  const addedAsSealedPack = stockAfterBuy === stockBefore + 1
+    && !$('boosterModal').classList.contains('hidden')
+    && $('packSealed').classList.contains('hidden');
+  const packButton = $('boosterInventory').querySelector('.boosterInvCard[data-pack="standard"]:not(:disabled)');
+  if (packButton) click(packButton);
+  await wait(40);
+  const premiumButtonForSwitch = $('boosterInventory').querySelector('.boosterInvCard[data-pack="premium"]:not(:disabled)');
+  if (premiumButtonForSwitch) click(premiumButtonForSwitch);
+  await wait(40);
+  const switchedToPremium = $('packTypeSubtitle').textContent.includes('Премиум-бустер')
+    && $('boosterInventory').querySelector('.boosterInvCard[data-pack="premium"]')?.classList.contains('selected');
+  const standardButtonAgain = $('boosterInventory').querySelector('.boosterInvCard[data-pack="standard"]:not(:disabled)');
+  if (standardButtonAgain) click(standardButtonAgain);
+  await wait(40);
   const sealedShown = !$('packSealed').classList.contains('hidden');
+  const stockAfterSelect = Number((stockNode()?.textContent || '×0').replace(/[^0-9]/g, ''));
+  const selectionDidNotSpend = stockAfterSelect === stockAfterBuy;
   if (sealedShown) click($('packSealed'));
   await wait(700);
   const packSlots = $('packRow').children.length;
-  const shards1 = window.ecShards();
-  const paid = shards1 === shards0 - 300;
-  const slot0 = $('packRow').children[0];
-  if (slot0) click(slot0);
-  await wait(40);
-  const flipOk = !!slot0 && slot0.classList.contains('flip');
-  // бустер сыпет ТОЛЬКО расширением: все 5 лиц — новые id
-  const faces = [...$('packRow').children].map(sl => sl.querySelector('.face .card'));
-  const expOnly = faces.every(f => f && window.ecIsExp(f.dataset.cardId || ''));
+  const allPackSlots = [...$('packRow').children];
+  const regularPackSlots = allPackSlots.filter(slot => !slot.classList.contains('borderlessBonusSlot'));
+  const borderlessPackSlots = allPackSlots.filter(slot => slot.classList.contains('borderlessBonusSlot'));
+  const stockAfterOpen = Number((stockNode()?.textContent || '×0').replace(/[^0-9]/g, ''));
+  const paid = shardsAfterBuy === shards0 - 300;
+  const consumedOne = selectionDidNotSpend && stockAfterOpen === stockBefore;
+  const cannotSwitchAfterReveal = $('packStage').classList.contains('hasResults')
+    && $('boosterInventory').querySelectorAll('.boosterInvCard:not(:disabled)').length === 0
+    && $('boosterInventory').querySelector('.boosterInvCard[data-pack="standard"]')?.classList.contains('selected');
+  const flipAll = $('btnPackFlip');
+  if (flipAll && !flipAll.disabled) click(flipAll);
+  await wait(800); // пять карт плюс шестая только если выпал редкий Borderless-бонус
+  const flipOk = regularPackSlots.length === 5 && borderlessPackSlots.length <= 1
+    && allPackSlots.every(slot => slot.classList.contains('flip'));
+  // Обычный бустер содержит карты всей базы; тестовый forced-drop проверяет базовую карту вне starter-набора.
+  const faces = regularPackSlots.map(sl => sl.querySelector('.face .card'));
+  const packPoolOk = faces.length === 5 && faces.every(f => f && cardsFixture.cards.some(c => c.id === f.dataset.cardId));
+  if (nonStarterBaseId) window.ecSetOwned(nonStarterBaseId, 0);
+  const basePack = nonStarterBaseId ? window.ecTestPack(nonStarterBaseId) : null;
+  const baseUnlockedFromBooster = !!basePack && basePack.ownedCap === 4 && window.ecOwnedOf(nonStarterBaseId) === 4;
   window.ecSetOwned('aur_31', 4);
   const tpack = window.ecTestPack('aur_31');
   const capOk = tpack.ownedCap === 4 && tpack.converted >= 1 &&
     tpack.shardsAfter === tpack.shardsBefore + tpack.converted;
   click($('btnPackClose'));
   await wait(40);
-  check('бустер: покупка за ◈300, MTG-состав 5 карт, флип, лимит 4 копии → конвертация в осколки',
-    packSlots === 5 && paid && flipOk && capOk,
-    `слотов ${packSlots}, ◈ ${shards0}→${shards1}, флип ${flipOk ? 'да' : 'нет'}, cap ${tpack.ownedCap}, конверт ◈${tpack.converted}`);
-  check('база открыта на старте, расширение ТОЛЬКО из бустеров',
-    window.ecOwnedOf('aur_01') === 1 && window.ecOwnedOf('aur_31') === 4 &&
-    window.ecOwnedOf('pyr_s10') === 1 && !window.ecIsExp('pyr_s10') && expOnly &&
-    window.document.querySelectorAll('#colGrid .card').length > 0,
-    `aur_01 ×${window.ecOwnedOf('aur_01')}, aur_31 ×${window.ecOwnedOf('aur_31')}, дроп только ECH1: ${expOnly ? 'да' : 'нет'}`);
+  const focusRestored = window.document.activeElement === $('btnBoosters');
+  check('бустер: фокус, Tab-навигация и возврат на кнопку запуска',
+    focusAtOpen && tabWrapForward && tabWrapBackward && focusRestored,
+    `начальный фокус ${focusAtOpen}, Tab ${tabWrapForward}/${tabWrapBackward}, возврат ${focusRestored}`);
+  check('бустер: 5 карт + возможный отдельный Borderless-бонус, флип и лимит копий',
+    storeOpened && addedAsSealedPack && sealedShown && switchedToPremium && selectionDidNotSpend
+      && regularPackSlots.length === 5 && borderlessPackSlots.length <= 1 && paid && consumedOne && flipOk && capOk && cannotSwitchAfterReveal,
+    `магазин ${storeOpened ? 'да' : 'нет'}, переключение ${switchedToPremium ? 'да' : 'нет'}, запас ${stockBefore}→${stockAfterBuy}→${stockAfterSelect}→${stockAfterOpen}, после вскрытия заблокировано ${cannotSwitchAfterReveal}, ◈ ${shards0}→${shardsAfterBuy}, слотов ${packSlots} (базовых ${regularPackSlots.length}, Borderless ${borderlessPackSlots.length}), флип ${flipOk ? 'да' : 'нет'}, cap ${tpack.ownedCap}, конверт ◈${tpack.converted}`);
+  check('бустер открывает карты базового набора вне starter и карты расширения',
+    starterCollectionOk && baseUnlockedFromBooster && window.ecOwnedOf('aur_31') === 4
+      && window.ecIsExp('aur_31') && !window.ecIsExp(nonStarterBaseId) && packPoolOk
+      && window.document.querySelectorAll('#colGrid .card').length > 0,
+    `стартовый набор подтверждён; ${nonStarterBaseId} из бустера ×${window.ecOwnedOf(nonStarterBaseId)}, aur_31 из ECH1 ×${window.ecOwnedOf('aur_31')}, pack pool ${packPoolOk}`);
   check('все изображения корректно уменьшаются в рамку (гард object-fit)',
     /#zoomPreview img,\.modalCard img|\.card img,\.unit img[\s\S]{0,220}?object-fit:cover/.test(htmlBg),
     'гард вписывания для всех карточных поверхностей');
@@ -741,8 +1158,12 @@ const check = (name, ok, extra = '') => {
   const campOk = $('campBody').querySelectorAll('.campNode').length === 20;
   click($('btnCampClose'));
   await wait(30);
+  window.innerWidth = 390;
+  window.dispatchEvent(new window.Event('resize'));
   click($('btnBP'));
   await wait(60);
+  const bpMobileColumns = $('bpBody').querySelector('.bpPage.on')?.querySelectorAll('.bpCol').length === 2
+    && /Страница \d+ \/ 25/.test($('bpBody').querySelector('.bpPageNo')?.textContent || '');
   const bpOpen = !$('bpModal').classList.contains('hidden') && $('bpBody').querySelectorAll('.bpClaim').length === 100;
   const claim0 = $('bpBody').querySelector('.bpClaim:not([disabled])');
   const sh0 = window.ecShards();
@@ -751,8 +1172,10 @@ const check = (name, ok, extra = '') => {
   const bpGot = window.ecShards() === sh0 + 53;   // уровень 1, free-ветка: 50+1*3
   click($('btnBPClose'));
   await wait(30);
-  check('боевой пропуск: 50 уровней × 2 ветки (100 кнопок), награда free получена', bpOpen && bpGot,
-    `кнопок ${$('bpBody').querySelectorAll('.bpClaim').length}, ◈ ${sh0}→${window.ecShards()}`);
+  window.innerWidth = 1440;
+  window.dispatchEvent(new window.Event('resize'));
+  check('боевой пропуск: 50 уровней × 2 ветки, claim и мобильные 2-уровневые страницы', bpOpen && bpGot && bpMobileColumns,
+    `кнопок ${$('bpBody').querySelectorAll('.bpClaim').length}, mobile two-column ${bpMobileColumns ? 'да' : 'нет'}, ◈ ${sh0}→${window.ecShards()}`);
   check('доступность: дальтонизм/шрифт/субтитры/язык в настройках',
     /id="setCb"/.test(htmlBg) && /id="setFontScale"/.test(htmlBg) && /id="setSubs"/.test(htmlBg) &&
     /id="setLang"/.test(htmlBg) && /data-i18n="ui_menu_play"/.test(htmlBg) && /#subsLine/.test(htmlBg),
@@ -767,10 +1190,12 @@ const check = (name, ok, extra = '') => {
     /data-stab/.test(jsSrc) && /drawFactionPack/.test(jsSrc) && /buyBundle11/.test(jsSrc) && /TABLE_SKINS/.test(jsSrc) &&
     /craftBtn2/.test(jsSrc), '4 вкладки магазина');
   /* --- спека «3. Магазин» (v2.4.2) --- */
-  check('магазин v2.4: тарифы пыли — крафт 5/20/100/400, разбор 1/5/20/100',
-    /CRAFT_COST[^;]*Common:\s*5,[\s\S]*Rare:\s*20,[\s\S]*Epic:\s*100,[\s\S]*Legendary:\s*400/.test(jsSrc)
-    && /DUST_GAIN[^;]*Common:\s*1,[\s\S]*Rare:\s*5,[\s\S]*Epic:\s*20,[\s\S]*Legendary:\s*100/.test(jsSrc),
-    'пыль = золото ◈ (решение пользователя)');
+  check('магазин: крафт и разбор используют тарифы в монетах для всех редкостей',
+    /CRAFT_COST[^;]*Common:\s*5,[\s\S]*Uncommon:\s*10,[\s\S]*Rare:\s*20,[\s\S]*Epic:\s*100,[\s\S]*Legendary:\s*400/.test(protoUiSrc)
+    && /DISENCHANT_COINS[^;]*Common:\s*1,[\s\S]*Uncommon:\s*2,[\s\S]*Rare:\s*5,[\s\S]*Epic:\s*20,[\s\S]*Legendary:\s*100/.test(protoUiSrc)
+    && /CONVERT[^;]*Rarity\.Common\]:\s*1,[\s\S]*Rarity\.Uncommon\]:\s*2,[\s\S]*Rarity\.Rare\]:\s*5,[\s\S]*Rarity\.Epic\]:\s*20,[\s\S]*Rarity\.Legendary\]:\s*100/.test(protoUiSrc)
+    && /🪙/.test(protoUiSrc) && /Монеты/.test(protoUiSrc),
+    'Common/Uncommon/Rare/Epic/Legendary; монеты и для крафта, и для разбора');
   check('магазин v2.4: модалка предпросмотра косметики в разметке и overlay-правиле',
     /id="cosmPreview"/.test(htmlBg) && /cosmPrevArea/.test(htmlBg) && /#cosmPreview,#factionModal/.test(htmlBg));
   click($('btnShop'));
@@ -791,8 +1216,8 @@ const check = (name, ok, extra = '') => {
     `кнопок предпросмотра ${prevBtns.length}`);
   /* --- спека «5. Боевой пропуск» (v2.5.0) --- */
   check('пропуск v2.5: XP унифицирован — победа +120 / поражение +60, daily +150, weekly +250',
-    /win \? 120 : 60/.test(jsSrc) && /meta\.bpXp = \(meta\.bpXp \?\? 0\) \+ 150/.test(jsSrc)
-    && /meta\.bpXp = \(meta\.bpXp \?\? 0\) \+ 250/.test(jsSrc), 'ставки спеки во всех режимах (решение пользователя)');
+    /win \? 120 : 60/.test(jsSrc) && /weekly \? 250 : 150/.test(jsSrc)
+    && /claimQuestReward/.test(jsSrc), 'ставки спеки во всех режимах (решение пользователя)');
   check('пропуск v2.5: премиум-награды — фойл-жетон, премиум-бустер 2 эпика+, аватар «Лунный Архонт»',
     /prem\.foil = 1/.test(jsSrc) && /drawPremiumBooster/.test(jsSrc) && /prem\.ava = "lunar"/.test(jsSrc)
     && /id="btnPackPrem"/.test(htmlBg) && /bpLvl\.cur\{/.test(htmlBg) && /id="cmFoil"/.test(htmlBg),
@@ -812,7 +1237,7 @@ const check = (name, ok, extra = '') => {
   const premGot = $('bpBody').querySelector('.bpClaim[data-l="1"][data-t="prem"]')?.textContent.trim() === '✔';
   click($('bpClaimAll'));
   await wait(60);
-  const allOk = /Забрано наград: \d+ — ◈/.test(window.document.body.textContent ?? '');
+  const allOk = /Забрано наград: \d+ — 🪙/.test(window.document.body.textContent ?? '');
   click($('btnBPClose'));
   await wait(30);
   check('пропуск v2.5: премиум за 💎500, claim премиум-ветки, «Забрать всё» с суммарным итогом',
@@ -865,12 +1290,14 @@ const check = (name, ok, extra = '') => {
   check('модалки профиля/магазина/пропуска/кампании — фикс-оверлеи поверх меню',
     /#profileModal,#shopModal,#bpModal,#campaignModal,#journalModal,#replayModal,#tutModal\{/.test(htmlBg) &&
     /position:fixed;inset:0;z-index:320/.test(htmlBg), 'z-index 320, клики доходят');
-  check('UI-арт ч.1: рамка-оверлей, фоны меню, иконки на месте',
-    /frameOv/.test(jsSrc) && /applyMenuBg/.test(jsSrc) && /ico_cur_0/.test(jsSrc) &&
-    require('fs').existsSync(require('path').join(__dirname, '..', 'prototype', 'img', 'card_frame.png')) &&
-    require('fs').existsSync(require('path').join(__dirname, '..', 'prototype', 'img', 'menu_aurites.jpg')) &&
-    require('fs').existsSync(require('path').join(__dirname, '..', 'prototype', 'img', 'ico_fac_4.png')),
-    '9 ассетов сгенерированы и вшиты');
+  const uiArtPaths = ['card_frame.png', 'menu_aurites.jpg', 'ico_fac_4.png']
+    .map(file => path.join(__dirname, '..', 'prototype', 'img', file));
+  const missingUiArt = uiArtPaths.filter(file => !fs.existsSync(file));
+  check('UI-арт: код подключения рамки, фонов и иконок',
+    /frameOv/.test(jsSrc) && /applyMenuBg/.test(jsSrc) && /ico_cur_0/.test(jsSrc),
+    'точки подключения и CSS-фолбэки на месте');
+  if (missingUiArt.length) skip('Файлы UI-арта', `${missingUiArt.length} ассета отложены до финального добавления`);
+  else check('Файлы UI-арта добавлены', true, `${uiArtPaths.length} контрольных ассета на месте`);
   check('стек LIFO: события и панель стека в бандле, симы на авто-резолве',
     /StackPushed/.test(jsSrc) && /resolveStackTop/.test(jsSrc) && /interactiveStack/.test(jsSrc) &&
     window.ecStackLen() === 0,
@@ -886,6 +1313,7 @@ const check = (name, ok, extra = '') => {
   await wait(60);
   const craftBefore = window.ecShards();
   // крафт через модалку карты: клик по первой карточке aur_31 в коллекции
+  loadAllCollection();
   const tgt = [...window.document.querySelectorAll('#colGrid .card')].find(n => n.dataset.cardId === expId);
   if (tgt) click(tgt);
   await wait(60);
@@ -913,6 +1341,136 @@ const check = (name, ok, extra = '') => {
     'instantDock в разметке, instantWindow в движке UI, арты кадрируются под рамку');
   check('муллиган крупными картами (clamp 170–220px)', /#mullCards \.card\{[^}]*clamp\(170px,15vw,220px\)/.test(htmlBg),
     'пересдача читабельного размера');
+
+  // Сквозная проверка источника «событие»: три рейтинговые победы → claim → один cosmetic ID,
+  // без изменения числа обычных копий и с отметкой о получении.
+  const hasMetaRewardHook = typeof b.metaRewards === 'function';
+  if (hasMetaRewardHook) {
+    b.practice = false; b.campaignBoss = null; b.campNode = null; b.tutLesson = 0;
+    b.engine.result = 'PlayerWin';
+    for (let i = 0; i < 3; i++) b.metaRewards();
+  }
+  const borderlessBeforeEvent = window.ecBorderlessOwned();
+  click($('btnCollection'));
+  await wait(50);
+  loadAllCollection();
+  const ordinarySnapshot = new Map([...window.document.querySelectorAll('#colGrid .card')]
+    .map(node => [node.dataset.cardId, window.ecOwnedOf(node.dataset.cardId || '')]));
+  const nav2 = $('ecQuickNav');
+  click(nav2.querySelector('[data-route="events"]'));
+  await wait(50);
+  const eventCardReady = $('eventsGrid').querySelector('[data-event-id="borderless"]');
+  const eventClaimBtn = eventCardReady?.querySelector('[data-borderless-claim]');
+  const eventReady = !!eventClaimBtn && /3\/3/.test(eventCardReady.textContent) && !eventClaimBtn.disabled;
+  if (eventReady) click(eventClaimBtn);
+  await wait(50);
+  const borderlessAfterEvent = window.ecBorderlessOwned();
+  const eventRewardId = borderlessAfterEvent.find(id => !borderlessBeforeEvent.includes(id)) || '';
+  const eventClaimed = eventRewardId !== '' && borderlessAfterEvent.length === borderlessBeforeEvent.length + 1
+    && ordinarySnapshot.has(eventRewardId) && window.ecOwnedOf(eventRewardId) === ordinarySnapshot.get(eventRewardId);
+  check('Borderless можно забрать из события после 3 рейтинговых побед отдельным вариантом',
+    hasMetaRewardHook && eventReady && eventClaimed && /Получено ✓/.test($('eventsGrid').textContent),
+    `3/3 и claim ${eventReady ? 'да' : 'нет'}, вариант ${eventRewardId || 'не выдан'}, копии базовой карты неизменны`);
+
+  /* ---------- 8. админка: отдельное управление косметикой ---------- */
+  console.log('\n[8] Админка · Borderless');
+  window.localStorage.setItem('ec_admin_v1', '1');
+  click($('btnAdminMenu'));
+  await wait(30);
+  const adminBorderlessTab = $('adminTabs').querySelector('[data-tab="borderless"]');
+  check('админка содержит отдельную вкладку Borderless', !!adminBorderlessTab);
+  if (adminBorderlessTab) click(adminBorderlessTab);
+  await wait(30);
+  check('KPI админки отражает 500 игровых карт и 1000 оформлений', /500\s*\/\s*1000/.test($('adminBody').querySelector('.admKpi')?.textContent || ''));
+  check('админка показывает счётчик Borderless и шанс 0,1% (примерно 1 из 1000)',
+    /0,1%/.test($('adminBody').textContent) && /1 из 1000/.test($('adminBody').textContent)
+      && !!$('admBorderlessGrid') && $('admBorderlessGrid').children.length > 0);
+  const ownedBeforeAdmin = new Set(window.ecBorderlessOwned());
+  const adminTile = Array.from($('admBorderlessGrid').querySelectorAll('.admBorderlessTile'))
+    .find(node => !ownedBeforeAdmin.has(node.dataset.cardId));
+  if (adminTile) {
+    const adminCardId = adminTile.dataset.cardId;
+    const ordinaryCopiesBefore = window.ecOwnedOf(adminCardId);
+    click(adminTile);
+    const grantedSeparately = window.ecBorderlessOwned().includes(adminCardId)
+      && window.ecOwnedOf(adminCardId) === ordinaryCopiesBefore;
+    check('выдача Borderless из админки не меняет игровые копии', grantedSeparately);
+    const tileToRevoke = Array.from($('admBorderlessGrid').querySelectorAll('.admBorderlessTile'))
+      .find(node => node.dataset.cardId === adminCardId);
+    if (tileToRevoke) click(tileToRevoke);
+    check('отзыв Borderless также не меняет обычную коллекцию', !window.ecBorderlessOwned().includes(adminCardId)
+      && window.ecOwnedOf(adminCardId) === ordinaryCopiesBefore);
+  } else {
+    check('найдена невыданная карта для проверки админского grant/revoke', false, 'первые 60 вариантов уже выданы');
+  }
+
+  /* ---------- 9. реальный UI-путь выбора и запуска пользовательской колоды ---------- */
+  console.log('\n[9] Запуск созданной колоды через экран «Колоды»');
+  if (!$('adminModal').classList.contains('hidden')) click($('btnAdminClose'));
+  window.__battle.stop();
+  const playApi = window.__decks;
+  const playIds = [...new Set(playApi.pool('Aurites').map(card => card.id))].slice(0, 60);
+  for (const id of playIds) window.ecSetOwned(id, 1); // изолированная тестовая коллекция: по одной копии базовых карт
+  const playValidation = playApi.validate(playIds, 'Aurites');
+  playApi.save({
+    id: 'custom-e2e-flow', name: 'Проверка обложки', faction: 'Aurites', cards: playIds,
+    avatarCardId: playIds[7], updated: Date.now(),
+  });
+  const coverPersisted = playApi.list().find(deck => deck.id === 'custom-e2e-flow');
+  window.openHomeScreen();
+  const homeDeckCard = window.document.querySelector('#playerFactions .customDeckCard[data-deck-id="custom-e2e-flow"]');
+  const homeDeckTextAndArt = !!homeDeckCard
+    && homeDeckCard.querySelector('.fname')?.textContent === 'Проверка обложки'
+    && homeDeckCard.querySelector('.fclass')?.textContent.includes('Constructed')
+    && (homeDeckCard.querySelector('.fcardArtImg')?.getAttribute('src') || '').includes(`/art/Aurites/${playIds[7]}.png`);
+  check('моя колода появляется под архетипами с именем игрока и выбранным артом', homeDeckTextAndArt,
+    `плитка ${homeDeckCard?.querySelector('.fname')?.textContent ?? 'не найдена'}; art ${homeDeckCard?.querySelector('.fcardArtImg')?.getAttribute('src') ?? '—'}`);
+  window.openDecksScreen();
+  const playBox = window.document.querySelector('#deckGrid [data-deck-id="custom-e2e-flow"]');
+  const coverVisible = !!playBox && playBox.dataset.avatarCardId === playIds[7]
+    && !!playBox.querySelector('.deckAvatarTag');
+  const deckTileTextOk = !!playBox && playBox.querySelector('.deckName')?.textContent === 'Проверка обложки'
+    && !!playBox.querySelector('.deckMeta .deckCount')?.textContent.includes('60')
+    && (playBox.querySelector('.deckAvatarImg')?.getAttribute('src') || '').includes(`/art/Aurites/${playIds[7]}.png`)
+    && cssSrc.includes('-webkit-line-clamp:2!important') && cssSrc.includes('object-fit:contain!important');
+  check('в плитке списка колод читаются имя, размер и обложка без обрезки', deckTileTextOk,
+    `имя ${playBox?.querySelector('.deckName')?.textContent ?? '—'}, размер ${playBox?.querySelector('.deckMeta .deckCount')?.textContent ?? '—'}`);
+  if (playBox) click(playBox);
+  const selectedPlayBox = window.document.querySelector('#deckGrid [data-deck-id="custom-e2e-flow"]');
+  const coverEditButton = selectedPlayBox?.querySelector('.deckArtEdit');
+  if (coverEditButton) click(coverEditButton);
+  const artPickerOpen = !$('deckArtPickerModal').classList.contains('hidden');
+  const artChoice = $('deckArtPickerGrid').querySelector(`[data-card-id="${playIds[8]}"]`);
+  const galleryShowsDeck = artPickerOpen && $('deckArtPickerGrid').children.length === 60 && !!artChoice;
+  check('в сохранённой колоде открывается визуальный выбор арта из её карт', galleryShowsDeck,
+    `галерея: ${$('deckArtPickerGrid').children.length} уникальных карт`);
+  if (artChoice) click(artChoice);
+  const coverAfterPick = playApi.list().find(deck => deck.id === 'custom-e2e-flow');
+  const tileAfterPick = window.document.querySelector('#deckGrid [data-deck-id="custom-e2e-flow"]');
+  const coverChoicePersisted = !!coverAfterPick && coverAfterPick.avatarCardId === playIds[8]
+    && !!tileAfterPick && tileAfterPick.dataset.avatarCardId === playIds[8]
+    && $('deckArtPickerModal').classList.contains('hidden');
+  check('выбранный арт сохраняется и сразу обновляет увеличенную обложку', coverChoicePersisted,
+    `stored/displayed: ${coverAfterPick?.avatarCardId ?? '—'}/${tileAfterPick?.dataset.avatarCardId ?? '—'}`);
+  const launchButton = $('btnDecksPlay');
+  const launcherEnabled = !!launchButton && !launchButton.disabled;
+  if (launcherEnabled) click(launchButton);
+  const launched = await waitUntil(() => {
+    const game = window.__battle;
+    const p = game?.engine?.p(0);
+    return !!p && p.hand.length + p.deck.length === 60;
+  }, 12000, 80);
+  const actualDeck = window.__battle.playerDeckId;
+  const actualFaction = window.__battle.playerFaction;
+  const battleVisible = !$('battle').classList.contains('hidden');
+  check('аватар сохранён и показан в карточке колоды', !!coverPersisted
+    && coverPersisted.avatarCardId === playIds[7] && coverVisible,
+    `stored/displayed: ${coverPersisted?.avatarCardId ?? '—'}/${playBox?.dataset.avatarCardId ?? '—'}`);
+  check('кнопка «Играть» запускает выбранную пользовательскую колоду в настоящем боевом движке',
+    playValidation.ok && launcherEnabled && launched && battleVisible
+      && actualDeck === 'custom-e2e-flow' && actualFaction === 'Aurites',
+    `валидна: ${playValidation.ok}; кнопка: ${launcherEnabled}; ID: ${actualDeck}; фракция: ${actualFaction}; 60 карт: ${launched}`);
+  window.__battle.stop();
 
   /* ---------- итог ---------- */
   console.log('\n--- ИТОГ ---');

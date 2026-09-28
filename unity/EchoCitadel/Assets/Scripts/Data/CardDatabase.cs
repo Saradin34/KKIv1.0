@@ -119,24 +119,27 @@ namespace EchoCitadel.Data
         /* ------------------------- ВАЛИДАЦИЯ КОЛОДЫ ------------------------ */
 
         /// <summary>
-        /// Проверка колоды: размер, существование id, лимит копий
-        /// (обычные — 2, легендарные — 1; ТЗ п.3.3). Возвращает список ошибок.
+        /// Проверка колоды: минимум задаётся вызывающей стороной (Constructed=60,
+        /// только для встроенного starter-формата=30), без верхнего лимита, ID,
+        /// фракция/Neutral и playset ×4.
         /// </summary>
-        public List<string> ValidateDeck(IList<string> deck, int size = 40)
+        public List<string> ValidateDeck(IList<string> deck, int minSize = 60, Faction? faction = null)
         {
             var errs = new List<string>();
-            if (deck.Count != size) errs.Add($"Размер колоды {deck.Count}, требуется {size}");
+            if (deck.Count < minSize) errs.Add($"Размер колоды {deck.Count}, минимум {minSize}");
 
             var counts = new Dictionary<string, int>(StringComparer.Ordinal);
             foreach (var id in deck)
             {
                 var c = GetCard(id);
                 if (c == null) { errs.Add($"Неизвестная карта: {id}"); continue; }
+                if (faction.HasValue && c.Faction != faction.Value && c.Faction != Faction.Neutral)
+                    errs.Add($"Карта {c.Name} не принадлежит фракции {faction.Value}");
                 counts[id] = counts.TryGetValue(id, out var n) ? n + 1 : 1;
             }
             foreach (var kv in counts)
             {
-                int limit = GetCard(kv.Key)!.Rarity == Rarity.Legendary ? 1 : 2;
+                int limit = 4;
                 if (kv.Value > limit) errs.Add($"Превышен лимит копий {kv.Key}: {kv.Value} > {limit}");
             }
             return errs;

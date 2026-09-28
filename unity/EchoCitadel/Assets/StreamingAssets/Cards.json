@@ -1513,11 +1513,7 @@
      "op": "applyStatus",
      "status": "Poison",
      "value": 1,
-     "to": "EnemyCreature",
-     "filter": {
-      "random": true,
-      "count": 1
-     }
+     "to": "EnemyCreature"
     }
    ],
    "abilityText": "Боевой клич: Яд на 1 ход(а) (вражеское существо). Боевой клич.",
@@ -7616,15 +7612,11 @@
    "name": "Споровый голем",
    "faction": "Pyromancer",
    "type": "Spell",
+   "subtype": "Instant",
    "rarity": "Epic",
    "cost": 3,
-   "attack": 7,
-   "health": 7,
    "element": "Fire",
-   "keywords": [
-    "Rush",
-    "Trample"
-   ],
+   "keywords": [],
    "target": "None",
    "effects": [
     {
@@ -7632,17 +7624,14 @@
      "value": 3
     }
    ],
-   "abilityText": "Боевой клич: Нанесите 2 урона всем вражеским существам. Выжигание: входящее лечение противника снижено на 1. Рывок / Прорыв.",
+   "abilityText": "Наносит 3 урона всем вражеским существам.",
    "flavor": "«Цена силы — след, который она оставляет.»",
    "tags": [
-    "aoe",
-    "aggro",
-    "antiheal"
+    "aoe"
    ],
-   "healReduction": 1,
    "art": "Resources/Cards/Pyromancer/ter_s10.png",
    "artworkPath": "Resources/Cards/Pyromancer/ter_s10.png",
-   "artPrompt": "epic cinematic composition, volumetric light, dark fantasy trading card game illustration, a single heroic creature character: \"Вулканический колосс\", molten lava cracks, ember storm, scorched obsidian, orange-red fire magic, smoke and ash, glowing forge runes, fire element, centered composition, rich color grading, painterly brushwork, high detail --ar 3:4 --style raw --v 6",
+   "artPrompt": "epic cinematic composition, volumetric light, dark fantasy trading card game illustration, a burst of spore-infused fire magic: \"Споровый голем\", ember-red spores spreading across a dark fantasy battlefield, glowing fungal clusters, ash, heat distortion, fiery shockwave, Pyromancer energy, centered composition, rich color grading, painterly brushwork, high detail --ar 3:4 --style raw --v 6",
    "negativePrompt": "text, letters, watermark, signature, ui, frame, border, extra limbs, deformed hands, lowres, blurry, jpeg artifacts, modern clothing, photograph, 3d render plastic look",
    "artSize": "512x720",
    "subtype": "Instant"

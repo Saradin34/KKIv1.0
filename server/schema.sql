@@ -67,7 +67,7 @@ CREATE TABLE IF NOT EXISTS decks (
   faction    text NOT NULL REFERENCES factions_dict(id),
   is_base    boolean NOT NULL DEFAULT false,
   is_active  boolean NOT NULL DEFAULT false,
-  cards      jsonb NOT NULL,             -- [{id, copies}] — валидатор: 40 карт, ≤4 копии
+  cards      jsonb NOT NULL,             -- [{id, copies}] — валидатор: минимум 60 карт, без потолка, ≤4 копии
   created_at timestamptz NOT NULL DEFAULT now()
 );
 

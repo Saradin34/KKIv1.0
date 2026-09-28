@@ -19,7 +19,7 @@
 import { createServer } from 'http';
 import { randomUUID } from 'crypto';
 import { WebSocketServer, WebSocket } from 'ws';
-import { buildDatabase, CardsFile, DeckFile } from '../src/engine/db';
+import { buildDatabase, CardsFile, DeckFile, validateDeck } from '../src/engine/db';
 import { GameEngine } from '../src/engine/engine';
 import { GameEvent, Side } from '../src/engine/types';
 import cardsRaw from '../unity/EchoCitadel/Assets/StreamingAssets/Cards.json';
@@ -100,8 +100,18 @@ wss.on('connection', ws => {
       myRoom = roomOf(String(m.match || 'default'));
       mySeat = (m.seat === 1 ? Side.Opponent : Side.Player);
       myRoom.seats[mySeat] = ws;
-      const deck = Array.isArray(m.deck) ? m.deck : baseDecks.find(d => d.id === m.deckId)?.cards;
-      if (deck) myRoom.decks[mySeat] = deck;
+      const deck: unknown = Array.isArray(m.deck) ? m.deck : baseDecks.find(d => d.id === m.deckId)?.cards;
+      if (!Array.isArray(deck) || !deck.every((id: unknown) => typeof id === 'string')) {
+        ws.send(JSON.stringify({ t: 'err', msg: 'колода не найдена или имеет неверный формат' }));
+        return;
+      }
+      const deckIds = deck as string[];
+      const deckProblems = validateDeck(deckIds, db);
+      if (deckProblems.length) {
+        ws.send(JSON.stringify({ t: 'err', msg: `колода невалидна: ${deckProblems[0]}`, problems: deckProblems }));
+        return;
+      }
+      myRoom.decks[mySeat] = deckIds;
       const other = myRoom.decks[mySeat === Side.Player ? Side.Opponent : Side.Player];
       if (!myRoom.started && myRoom.decks[0] && myRoom.decks[1] && other) {
         myRoom.engine = new GameEngine(db, [myRoom.decks[0], myRoom.decks[1]], {

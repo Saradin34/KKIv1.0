@@ -240,7 +240,7 @@ internal static class Program
         Check("summonToken: встроенные токены прочитаны", tokenEffects == 57, $"{tokenEffects} эффектов");
     }
 
-    /// <summary>Колоды: 40 карт, лимиты копий, доминирующая фракция.</summary>
+    /// <summary>Колоды: минимум 60 карт, playset ×4, доминирующая фракция.</summary>
     private static void VerifyDecks(string root)
     {
         Console.WriteLine("\n[3] Колоды (Decks.json)");
@@ -252,7 +252,10 @@ internal static class Program
         var want = doc.RootElement.GetProperty("decks");
 
         Check("колод загружено", decks.Decks.Count == want.GetArrayLength(), $"{decks.Decks.Count}");
-        Check("размер колоды в meta = 40", decks.Meta.DeckSize == 40, decks.Meta.DeckSize.ToString());
+        Check("Constructed минимум в meta = 60", decks.Meta.DeckSize == 60, decks.Meta.DeckSize.ToString());
+        Check("только стартовый формат: минимум в meta = 30", decks.Meta.StarterDeckSize == 30, decks.Meta.StarterDeckSize.ToString());
+        Check("лимиты в meta = 4 для всех редкостей", decks.Meta.CopyLimit == 4 && decks.Meta.LegendaryCopyLimit == 4,
+            $"обычные {decks.Meta.CopyLimit}, легендарные {decks.Meta.LegendaryCopyLimit}");
 
         foreach (var w in want.EnumerateArray())
         {
@@ -261,21 +264,47 @@ internal static class Program
             Check($"колода {id}: найдена", d != null);
             if (d == null) continue;
             Check($"колода {id}: размер {w.GetProperty("size").GetInt32()}", d.Cards.Count == w.GetProperty("size").GetInt32(), d.Cards.Count.ToString());
-            var errs = db.ValidateDeck(d.Cards, 40);
-            Check($"колода {id}: валидна", errs.Count == 0, errs.Count == 0 ? "" : string.Join("; ", errs));
             string rawFaction = w.GetProperty("faction").GetString()!;
             bool factionOk = d.Faction.ToString() == rawFaction
-                             // служебная колода «Starter» не имеет фракции в JSON —
-                             // терпимый конвертер приводит её к Neutral (см. CardDatabase)
+                             // служебная смешанная колода `Starter` терпимо приводится к Neutral.
                              || (rawFaction == "Starter" && d.Faction == Faction.Neutral);
             Check($"колода {id}: фракция {rawFaction}", factionOk, d.Faction.ToString());
+            string expectedFormat = w.TryGetProperty("format", out var fmtEl) ? fmtEl.GetString() ?? "" : "";
+            Check($"колода {id}: формат {(expectedFormat.Length > 0 ? expectedFormat : "Constructed")}",
+                (d.Format ?? "") == expectedFormat, d.Format ?? "Constructed");
+            int minimum = d.Format == "starter" ? decks.Meta.StarterDeckSize : decks.Meta.DeckSize;
+            Faction? deckFaction = id == "Starter" ? (Faction?)null : d.Faction;
+            var errs = db.ValidateDeck(d.Cards, minimum, deckFaction);
+            Check($"колода {id}: валидна", errs.Count == 0, errs.Count == 0 ? "" : string.Join("; ", errs));
         }
 
-        // лимит копий действительно ловится
-        var bad = new List<string>(Enumerable.Repeat("aur_01", 3));
-        bad.AddRange(Enumerable.Range(0, 37).Select(_ => "aur_02"));
-        var badErrs = db.ValidateDeck(bad, 40);
-        Check("валидатор ловит превышение лимита копий", badErrs.Any(e => e.Contains("лимит копий")), string.Join("; ", badErrs));
+        var starterDecks = decks.Decks.Where(d => d.Format == "starter").ToArray();
+        Check("доступны 5 отдельных стартовых колод по 30 карт",
+            starterDecks.Length == 5 && starterDecks.All(d => d.Cards.Count == 30),
+            $"{starterDecks.Length} колод: {string.Join(", ", starterDecks.Select(d => d.Cards.Count))}");
+        if (starterDecks.Length > 0)
+        {
+            var sampleStarter = starterDecks[0];
+            Check("starter валиден при минимуме 30", db.ValidateDeck(sampleStarter.Cards, decks.Meta.StarterDeckSize, sampleStarter.Faction).Count == 0);
+            Check("30 карт остаются недопустимыми в Constructed", db.ValidateDeck(sampleStarter.Cards, decks.Meta.DeckSize, sampleStarter.Faction).Any(e => e.Contains("минимум 60")));
+        }
+
+        // MTG Constructed: 61+ допустимо, playset ×4 — включая легендарные.
+        var firstDeck = decks.Decks[0].Cards;
+        var extraId = db.All().First(c => firstDeck.Count(id => id == c.Id) < 4).Id;
+        var longerDeck = decks.Decks[0].Cards.Concat(new[] { extraId }).ToList();
+        Check("валидатор принимает размер выше минимума", longerDeck.Count == 61 && db.ValidateDeck(longerDeck).Count == 0);
+
+        var legendaryId = db.All().First(c => c.Rarity == Rarity.Legendary).Id;
+        var fourLegendary = Enumerable.Repeat(legendaryId, 4)
+            .Concat(db.All().Where(c => c.Id != legendaryId).Take(56).Select(c => c.Id)).ToList();
+        Check("4 копии легендарной карты допустимы", fourLegendary.Count == 60 && db.ValidateDeck(fourLegendary).Count == 0);
+
+        // Пятая копия любой карты действительно ловится.
+        var bad = Enumerable.Repeat("aur_01", 5)
+            .Concat(db.All().Where(c => c.Id != "aur_01").Take(55).Select(c => c.Id)).ToList();
+        var badErrs = db.ValidateDeck(bad);
+        Check("валидатор ловит пятую копию", badErrs.Any(e => e.Contains("лимит копий")), string.Join("; ", badErrs));
     }
 
     /// <summary>Коэффициенты пассивок из meta.factionCoefficients.</summary>

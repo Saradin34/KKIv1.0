@@ -11,7 +11,7 @@
   + 32 нейтральных карты-связки (по 8 на направление).
 Бюджет: docs/BALANCE_MODEL.md (power = 2*cost + 1.2, веса KW/OP). Детерминирован (SEED).
 Побочно: пересобирает Decks.json (5 фракционных колод получают ядра архетипов,
-40 карт, лимиты копий), дописывает meta.expansionIds (бустер-онли прогрессия).
+минимум 60 карт, не более 4 копий любой карты), дописывает meta.expansionIds (бустер-онли прогрессия).
 """
 import json, os, collections
 
@@ -395,7 +395,7 @@ def main():
     m['distribution']['rarities'] = dict(collections.Counter(c['rarity'] for c in d['cards']))
     json.dump(d, open(PATH, 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
 
-    # ---- ребилд фракционных колод: ядра архетипов + база (40 карт, лимиты)
+    # ---- ребилд фракционных колод: ядра архетипов + база (60+ карт, единый playset ×4)
     dk = json.load(open(DECKS, encoding='utf-8'))
     trib_by_fac = collections.defaultdict(list)
     for prefix, fac, direction, motif, lst in TRIBES:
@@ -415,9 +415,9 @@ def main():
     BROKEN = {'aur_r09', 'aur_r10', 'aur_r11', 'nec_r09', 'nec_r08', 'nec_r07', 'ter_r09'}
     CURVE_CAP = {0: 4, 1: 6, 2: 8, 3: 8, 4: 6, 5: 5, 6: 3, 7: 99}
     NEUT_Q = 4  # v7: симметрично всем фракциям
-    TYPE_QUOTA = {'Creature': 24, 'Spell': 10, 'Rune': 6}
+    TYPE_QUOTA = {'Creature': 36, 'Spell': 16, 'Rune': 8}
     for deck in dk['decks']:
-        if deck['id'] == 'Starter':
+        if deck['id'] == 'Starter' or deck.get('format') == 'starter':
             continue
         fac = deck.get('faction') or deck['id']
         mine = [c for c in added if c['faction'] == fac]
@@ -444,9 +444,9 @@ def main():
         neut_used = 0
         pool.sort(key=lambda c: (-(_power(c) - (2 * c['cost'] + 1.2)), c['cost'], c['id']))
         for c in pool + neut_pool:
-            if len(lst) >= 40:
+            if len(lst) >= 60:
                 break
-            lim = 1 if c['rarity'] == 'Legendary' else 2
+            lim = 4
             if used[c['id']] >= lim:
                 continue
             if tused[c['type']] >= TYPE_QUOTA.get(c['type'], 99):
@@ -463,24 +463,26 @@ def main():
         _fb += sorted([c for c in pool if c['type'] == 'Spell'], key=lambda c: (c['cost'], c['id']))
         _fb += sorted([c for c in pool if c['type'] == 'Rune'], key=lambda c: (c['cost'], c['id']))
         for c in _fb:
-            if len(lst) >= 40:
+            if len(lst) >= 60:
                 break
             if c['faction'] == 'Neutral' and neut_used >= NEUT_Q:
                 continue
-            lim = 1 if c['rarity'] == 'Legendary' else 2
+            lim = 4
             if used[c['id']] < lim:
                 lst.append(c['id']); used[c['id']] += 1
                 if c['faction'] == 'Neutral':
                     neut_used += 1
-        deck['cards'] = lst[:40]
+        deck['cards'] = lst[:60]
         cnt = collections.Counter(deck['cards'])
-        assert len(deck['cards']) == 40, (deck['id'], len(deck['cards']))
+        assert len(deck['cards']) == 60, (deck['id'], len(deck['cards']))
         for cid, n in cnt.items():
-            rar = next((c['rarity'] for c in d['cards'] if c['id'] == cid), 'Common')
-            assert n <= (1 if rar == 'Legendary' else 2), (deck['id'], cid, n)
+            assert n <= 4, (deck['id'], cid, n)
     dk['meta'] = dk.get('meta', {})
-    dk['meta']['updated'] = '2026-09-22'
-    dk['meta']['note'] = 'v6: свои пулы + добор по бюджетной модели + ядра ECH2'
+    dk['meta']['deckSize'] = 60
+    dk['meta']['copyLimit'] = 4
+    dk['meta']['legendaryCopyLimit'] = 4
+    dk['meta']['updated'] = '2026-09-28'
+    dk['meta']['note'] = 'v7: MTG Constructed — минимум 60 карт, до 4 копий любой карты'
     json.dump(dk, open(DECKS, 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
 
     if WARN:

@@ -26,7 +26,7 @@ import { Audio_ as Sfx, audioUnlock, audioSetEnabled, audioSetVolume, musicSetVo
 import { vfxSetReducedMotion } from './vfx';
 import {tableBackdrop, tableSurface, paletteOf} from './art';
 import {
-  CustomDeck, DeckLike, DECK_SIZE, MAX_COPIES, MAX_LEGENDARY_COPIES,
+  CustomDeck, DeckLike, MIN_DECK_SIZE, MAX_COPIES, MAX_LEGENDARY_COPIES,
   loadCustomDecks, saveCustomDecks, upsertCustomDeck, deleteCustomDeck, validateDeck, validateDeckSize, resolveDeck, deckSummary,
 } from './deckstore';
 
@@ -51,6 +51,63 @@ const el = (tag: string, cls?: string, html?: string): HTMLElement => {
   return n;
 };
 
+type AppRoute = 'home' | 'collection' | 'decks' | 'store' | 'profile' | 'events' | 'packs' | 'mastery' | 'battle';
+let appRoute: AppRoute = 'home';
+const routeHistory: AppRoute[] = [];
+let suppressRouteHistory = false;
+function setAppRoute(next: AppRoute): void {
+  if (next !== appRoute) {
+    if (next === 'home' && !suppressRouteHistory) routeHistory.length = 0;
+    else if (!suppressRouteHistory) routeHistory.push(appRoute);
+    if (routeHistory.length > 24) routeHistory.shift();
+    appRoute = next;
+  }
+  document.body.dataset.appRoute = next;
+  const dock = document.getElementById('ecQuickNav');
+  const show = next !== 'home' && next !== 'battle';
+  dock?.classList.toggle('hidden', !show);
+  dock?.setAttribute('aria-hidden', show ? 'false' : 'true');
+  dock?.querySelectorAll<HTMLElement>('[data-route]').forEach(item => {
+    const active = item.dataset.route === next;
+    item.classList.toggle('active', active);
+    if (active) item.setAttribute('aria-current', 'page'); else item.removeAttribute('aria-current');
+  });
+}
+function navigateApp(next: AppRoute | 'back'): void {
+  if (next === 'back') {
+    const previous = routeHistory.pop() ?? 'home';
+    if (previous === appRoute) return;
+    suppressRouteHistory = true;
+    navigateApp(previous);
+    suppressRouteHistory = false;
+    return;
+  }
+  switch (next) {
+    case 'home': openHomeScreen(); break;
+    case 'collection': openCollectionScreen(); break;
+    case 'decks': openDecksScreen(); break;
+    case 'store': openShop(); break;
+    case 'profile': openProfile(); break;
+    case 'events': openEventsScreen(); break;
+    case 'packs': openBoosterPanel(); break;
+    case 'mastery': openBP(); break;
+    case 'battle':
+      setAppRoute('battle');
+      $('menu').classList.add('hidden');
+      for (const id of ['collection','decksScreen','eventsScreen','profileModal','shopModal','bpModal','boosterModal','campaignModal'])
+        document.getElementById(id)?.classList.add('hidden');
+      $('battle').classList.remove('hidden');
+      break;
+  }
+}
+document.getElementById('ecQuickNav')?.addEventListener('click', ev => {
+  const route = (ev.target as HTMLElement | null)?.closest?.('[data-route]') as HTMLElement | null;
+  const value = route?.dataset.route;
+  if (value && ['back','home','collection','decks','store','profile','events','packs','mastery'].includes(value)) {
+    Sfx.uiClick();
+    navigateApp(value as AppRoute | 'back');
+  }
+});
 const FACTION_IDS: Faction[] = [Faction.Aurites, Faction.Necrus, Faction.Terramorph, Faction.Pyromancer, Faction.Ethereal];
 const FACTION_SIGIL: Record<string, string> = {
   Aurites: '✵', Necrus: '☠', Terramorph: '⛰', Pyromancer: '🜂', Ethereal: '☁', Neutral: '◈',
@@ -125,7 +182,7 @@ const PHASE_HINT: Record<string, string> = {
   End: 'Стадия конца: срабатывания «в конце хода», проверка размера руки',
 };
 const ELEM_RU: Record<string, string> = { None: '—', Fire: 'Огонь', Water: 'Вода', Earth: 'Земля', Air: 'Воздух', Chaos: 'Хаос' };
-const RARITY_RU: Record<string, string> = { Common: 'Обычная', Rare: 'Редкая', Epic: 'Эпическая', Legendary: 'Легендарная' };
+const RARITY_RU: Record<string, string> = { Common: 'Обычная', Uncommon: 'Необычная', Rare: 'Редкая', Epic: 'Эпическая', Legendary: 'Легендарная' };
 const KW_RU: Record<string, string> = {
   Taunt: 'Провокация', Lifesteal: 'Вампиризм', Deathrattle: 'Предсмертный хрип', Battlecry: 'Боевой клич',
   Rush: 'Рывок', Windfury: 'Буря', Unblockable: 'Неуловимость', Trample: 'Прорыв', SpellDamage: 'Урон заклинаний +1',
@@ -183,10 +240,14 @@ function artSvg(card: CardData, w: number, h: number): string {
 /* ---------------------------------------------------------------------- */
 
 const { db } = buildDatabase(cardsJson);
-const deckList = decksJson.decks;
-const deckById = new Map<string, { id: string; name: string; faction: string; cards: string[] }>(
-  deckList.map(d => [d.id, d as { id: string; name: string; faction: string; cards: string[] }]),
-);
+type BuiltinDeck = { id: string; name: string; faction: string; cards: string[]; format?: string };
+const deckList = decksJson.decks as BuiltinDeck[];
+const deckById = new Map<string, BuiltinDeck>(deckList.map(d => [d.id, d]));
+const STARTER_DECK_FORMAT = 'starter';
+const starterDeckForFaction = (faction: string): BuiltinDeck | undefined =>
+  deckList.find(d => d.format === STARTER_DECK_FORMAT && d.faction === faction);
+const isStarterDeckId = (id: string): boolean => deckById.get(id)?.format === STARTER_DECK_FORMAT;
+const STARTER_CARD_IDS = new Set(deckList.filter(d => d.format === STARTER_DECK_FORMAT).flatMap(d => d.cards));
 const ALL_CARDS: CardData[] = cardsJson.cards as CardData[]; // v2.12.1: все 500 карт, включая 70 нейтральных (раньше 430 без Neutral)
 
 /** Коэффициенты силы пассивок, подобранные решателем (вшиты генератором в Cards.json). */
@@ -219,19 +280,24 @@ function keywordsLine(card: CardData): string {
   const kws = (card.keywords ?? []).map(k => kwName(k));
   if (card.type === CardType.Spell && card.subtype === SpellSubtype.Ritual) kws.unshift(bi('◷ Ритуал', '◷ Ritual'));
   else if (card.type === CardType.Spell && card.subtype === SpellSubtype.Instant) kws.unshift(bi('⚡ Мгновенное', '⚡ Instant'));
-  return kws.length ? `<span class="kw">${kws.join(' · ')}</span><br>` : '';
+  return kws.length ? `<span class="kw">${kws.map(k => `<strong class="cardKeyword">${esc(k)}</strong>`).join(' · ')}</span><br>` : '';
 }
 
-function renderCard(card: CardData): HTMLElement {
+type CardAppearance = 'auto' | 'classic' | 'borderless';
+function resolvedAppearance(card: CardData, appearance: CardAppearance): 'classic' | 'borderless' {
+  return appearance === 'auto' ? (isBorderlessEquipped(card.id) ? 'borderless' : 'classic') : appearance;
+}
+function renderCard(card: CardData, appearance: CardAppearance = 'auto'): HTMLElement {
   const col = colorOf(card.faction);
   const rarCol = RARITY_COLORS[card.rarity as Rarity] ?? '#cfd6dd';
+  const cardStyle = resolvedAppearance(card, appearance);
   const FAC_ICO: Record<string, string> = { Aurites: '✦', Necrus: '☠', Terramorph: '⛰', Pyromancer: '♨', Ethereal: '☾', Neutral: '◈' };
-  const node = el('div', `card f-${card.faction} r-${(card.rarity as string).toLowerCase()} t-${(card.type as string).toLowerCase()}`);
+  const node = el('div', `card f-${card.faction} r-${(card.rarity as string).toLowerCase()} t-${(card.type as string).toLowerCase()}${cardStyle === 'borderless' ? ' borderless' : ''}`);
   node.insertAdjacentHTML('afterbegin', `<span class="facIco" title="${FACTION_RU[card.faction]}">${FAC_ICO[card.faction] ?? '◈'}</span>`);
   node.insertAdjacentHTML('afterbegin', '<img class="frameOv" src="img/card_frame.png" alt="" draggable="false" onerror="this.remove()">');
   node.dataset.cardId = card.id;
   node.dataset.rarity = card.rarity as string;
-  const ability = cardText(card);
+  const ability = highlightCardKeywords(cardText(card));
   node.innerHTML = `
     <div class="banner" style="background:linear-gradient(90deg,${col.primary},${col.accent})"></div>
     <div class="innerframe"></div>
@@ -253,6 +319,9 @@ function renderCard(card: CardData): HTMLElement {
           : `<span style="color:#767c8e">${FACTION_SIGIL[card.faction]}</span>`}</span>
       </div>
     </div>`;
+  node.dataset.cardAppearance = cardStyle;
+  // Отдельный коллекционный ID варианта; игровой cardId остаётся исходным.
+  node.dataset.cardVariantId = `${card.id}:${cardStyle}`;
   const ctNode = node.querySelector('.ctext') as HTMLElement | null;
   if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => fitText(ctNode)); // v2.6: автоподгон
   else fitText(ctNode);   // jsdom без rAF
@@ -270,7 +339,7 @@ function showTooltip(card: CardData, x: number, y: number): void {
     <div class="ttName" style="color:${col.primary}">${cardName(card)}</div>
     <div class="ttType">${typeName(card.type)} · ${factionName(card.faction)} · ${rarityName(card.rarity)} · ${card.cost} ${bi('маны', 'Mana')}${card.element !== Element.None ? ' · ' + elemName(card.element) : ''}</div>
     ${card.type === CardType.Creature ? `<div style="color:#ffd98a;font-size:.92rem">⚔ ${card.attack ?? 0} &nbsp; ❤ ${card.health ?? 0}</div>` : ''}
-    <div class="ttText">${cardText(card) || '—'}</div>
+    <div class="ttText">${highlightCardKeywords(cardText(card)) || '—'}</div>
     ${cardFlavor(card) ? `<div class="ttFlavor">${cardFlavor(card)}</div>` : ''}`;
   tooltip.classList.add('show');
   const w = 238;
@@ -331,7 +400,7 @@ async function applyCosmArt(): Promise<void> {
   if (b) rules.push(`#hand .cardback,#enemyBacks .cardback,.pbacks .cardback{background:url("${b}?t=${ts}") center/cover no-repeat !important;border-color:rgba(255,216,122,.35) !important}`);
   /* Стол — это полноэкранный #backdrop .bgArt, а не #board: иначе арт покрывал только
      верхние зоны и оставался шов на панели руки (репорт v2.5.4). */
-  if (tb) rules.push(`#backdrop .bgArt{background:url("${tb}?t=${ts}") center/cover no-repeat}`);
+  if (tb) rules.push(`#backdrop .bgArt{background-image:url("${tb}?t=${ts}")!important;background-position:center center!important;background-size:cover!important;background-repeat:no-repeat!important}`);
   if (r) rules.push(`.runeChip{background-image:url("${r}?t=${ts}");background-size:cover;background-position:center}`);
   st.textContent = rules.join('\n');
 }
@@ -404,11 +473,12 @@ const zoomPreview = $('zoomPreview');
 let zoomHideTimer: number | null = null;
 
 /** Карта целиком: арт, полный текст способности, flavor, тип/редкость/стоимость. */
-function renderCardLarge(card: CardData, size: 'xl' | 'xxl' = 'xl'): HTMLElement {
+function renderCardLarge(card: CardData, size: 'xl' | 'xxl' = 'xl', appearance: CardAppearance = 'auto'): HTMLElement {
   const col = colorOf(card.faction);
   const rarCol = RARITY_COLORS[card.rarity as Rarity] ?? '#cfd6dd';
+  const cardStyle = resolvedAppearance(card, appearance);
   const FAC_ICO2: Record<string, string> = { Aurites: '✦', Necrus: '☠', Terramorph: '⛰', Pyromancer: '♨', Ethereal: '☾', Neutral: '◈' };
-  const node = el('div', `card f-${card.faction} r-${(card.rarity as string).toLowerCase()} t-${(card.type as string).toLowerCase()} ${size}`);
+  const node = el('div', `card f-${card.faction} r-${(card.rarity as string).toLowerCase()} t-${(card.type as string).toLowerCase()} ${size}${cardStyle === 'borderless' ? ' borderless' : ''}`);
   node.insertAdjacentHTML('afterbegin', `<span class="facIco" title="${FACTION_RU[card.faction]}">${FAC_ICO2[card.faction] ?? '◈'}</span>`);
   node.insertAdjacentHTML('afterbegin', '<img class="frameOv" src="img/card_frame.png" alt="" draggable="false" onerror="this.remove()">');
   node.dataset.cardId = card.id;
@@ -422,7 +492,7 @@ function renderCardLarge(card: CardData, size: 'xl' | 'xxl' = 'xl'): HTMLElement
       </div>
       <div class="ctype">${typeName(card.type)}${card.element !== Element.None ? ' · ' + elemName(card.element) : ''}</div>
       <div class="cart">${artSvg(card, size === 'xxl' ? 340 : 300, size === 'xxl' ? 330 : 290)}</div>
-      <div class="ctext">${keywordsLine(card)}${cardText(card) || '—'}${
+      <div class="ctext">${keywordsLine(card)}${highlightCardKeywords(cardText(card)) || '—'}${
         card.flavor ? `<div class="zflavor">${card.flavor}</div>` : ''}</div>
       <div class="cfoot">
         <span class="rar" style="background:${rarCol};color:${rarCol}" title="${RARITY_RU[card.rarity]}"></span>
@@ -433,6 +503,8 @@ function renderCardLarge(card: CardData, size: 'xl' | 'xxl' = 'xl'): HTMLElement
       <div class="zmeta">${FACTION_RU[card.faction]} · ${RARITY_RU[card.rarity]}${
         card.type === CardType.Spell && card.subtype === SpellSubtype.Instant ? ' · ⚡ мгновенное' : card.type === CardType.Spell && card.subtype === SpellSubtype.Ritual ? ' · ◷ ритуал' : ''}</div>
     </div>`;
+  node.dataset.cardAppearance = cardStyle;
+  node.dataset.cardVariantId = `${card.id}:${cardStyle}`;
   return node;
 }
 
@@ -441,15 +513,18 @@ function renderCardLarge(card: CardData, size: 'xl' | 'xxl' = 'xl'): HTMLElement
  * Для карт в руке — справа (слева, если не влезает), чтобы не закрывать веер;
  * для существ на доске — со стороны курсора.
  */
-function showZoom(card: CardData, x: number, y: number, place: 'right' | 'left' | 'auto' = 'auto'): void {
+function showZoom(card: CardData, x: number, y: number, place: 'right' | 'left' | 'auto' = 'auto', appearance: CardAppearance = 'auto'): void {
   if (!settings.preview) return;
   if (zoomHideTimer !== null) { window.clearTimeout(zoomHideTimer); zoomHideTimer = null; }
-  const prevId = zoomPreview.dataset.cardId;
-  if (prevId !== card.id) {
+  const previewStyle = resolvedAppearance(card, appearance);
+  const prevVariantId = zoomPreview.dataset.cardVariantId;
+  if (prevVariantId !== `${card.id}:${previewStyle}`) {
     zoomPreview.innerHTML = '';
-    zoomPreview.appendChild(renderCardLarge(card));
+    zoomPreview.appendChild(renderCardLarge(card, 'xxl', appearance));
     fitText(zoomPreview.querySelector('.ctext') as HTMLElement | null, 8); // v2.6: и в превью ничего не ползёт
     zoomPreview.dataset.cardId = card.id;
+    zoomPreview.dataset.cardAppearance = previewStyle;
+    zoomPreview.dataset.cardVariantId = `${card.id}:${previewStyle}`;
   }
   zoomPreview.classList.add('show');
 
@@ -478,6 +553,8 @@ function hideZoom(): void {
   zoomHideTimer = window.setTimeout(() => {
     zoomPreview.classList.remove('show');
     delete zoomPreview.dataset.cardId;
+    delete zoomPreview.dataset.cardAppearance;
+    delete zoomPreview.dataset.cardVariantId;
     zoomHideTimer = null;
   }, 120);
 }
@@ -493,7 +570,9 @@ document.addEventListener('mousemove', ev => {
     const c = db.get(host.dataset.cardId);
     if (c) {
       const place = host.classList.contains('unit') ? 'right' : 'auto'; // v2.6: юниты — как рука, справа
-      showZoom(c, ev.clientX, ev.clientY, place);
+      const appearance = host.dataset.cardAppearance === 'borderless' || host.dataset.cardAppearance === 'classic'
+        ? host.dataset.cardAppearance as CardAppearance : 'auto';
+      showZoom(c, ev.clientX, ev.clientY, place, appearance);
     }
     if (battle.pendingTarget && battle.aimFrom) battle.updateAim(ev, host);
   } else {
@@ -613,6 +692,16 @@ function cardText(c: CardData): string {
   const ru = c.abilityText ?? '';
   return isEN() ? (localeCache?.[`card_${c.id}_text`] || ru) : ru;
 }
+function highlightCardKeywords(text: string): string {
+  let html = esc(text);
+  const terms = [...new Set(Object.values(isEN() ? KW_EN : KW_RU))].sort((a, b) => b.length - a.length);
+  for (const term of terms) {
+    const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp(`(^|[^\\p{L}\\p{N}_])(${escaped})(?=$|[^\\p{L}\\p{N}_])`, 'giu');
+    html = html.replace(re, '$1<strong class="cardKeyword">$2</strong>');
+  }
+  return html;
+}
 function cardFlavor(c: CardData): string {
   const ru = c.flavor ?? '';
   return isEN() ? (localeCache?.[`card_${c.id}_flavor`] || ru) : ru;
@@ -639,7 +728,7 @@ async function switchLang(lang: string): Promise<void> {
 
 const SUBS_RU: Array<[string, string]> = [
   ['melee', '⚔ звук удара существа'], ['spell', '✨ звук заклинания'], ['death', '☠ существо погибло'],
-  ['heal', '❤ лечение'], ['heroHit', '💥 урон герою'], ['summon', '⛺ призыв существа'],
+  ['heal', '❤ лечение'], ['heroHit', '💥 урон герою'], ['summon', '⛺ призыв существа'], ['status', '✦ статус наложен или снят'],
 ];
 let subsTimer = 0;
 function caption(text: string): void {
@@ -694,6 +783,10 @@ class Battle {
   private turnDone: (() => void) | null = null;
   /** Существа, призванные с прошлого рендера: им показываем анимацию выхода. */
   private summonedUids = new Set<number>();
+  /** VFX призыва ждут рендера: событие приходит раньше DOM-узла существа. */
+  private pendingSummonFx = new Map<number, { side: Side; faction: Faction }>();
+  /** Статусные события привязаны к узлу после рендера или к шагу соответствующей атаки. */
+  private pendingStatusFx: Array<{ uid: number; status: string; text?: string; expired?: boolean }> = [];
   /** было ли существо тапнутым в прошлом рендере — для волны антапа */
   private prevTapped = new Map<number, boolean>();
   private pendingDraw: { cardId: string | null; at: DOMRect | null } | null = null;
@@ -714,24 +807,29 @@ class Battle {
   async start(): Promise<void> {
     this.running = true; this.busy = false; this.overShown = false;
     this.combatBusy = false; this.combatSnap = null;
-    this.unitNodes.clear(); this.dyingUnits.clear(); logBuffer.length = 0;
+    this.unitNodes.clear(); this.dyingUnits.clear(); this.pendingSummonFx.clear(); this.pendingStatusFx = []; logBuffer.length = 0;
 
     // v2.6: преконстракт-колоды (Decks.json) играбельны всегда, как базовые колоды
     // в Hearthstone; гейт владения — только для пользовательских колод.
     const pDef = resolveDeck(this.playerDeckId, deckList as unknown as DeckLike[])
+      ?? starterDeckForFaction(this.playerFaction)
       ?? deckById.get(this.playerFaction)!;
     const pDeck = pDef.cards.slice();
-    if (!deckById.has(pDef.id)) {
+    if (!isStarterDeckId(pDef.id)) {
       const unowned = pDeck.filter(id => ownedCount(id) === 0);
       if (unowned.length > 0) {
         this.running = false;
-        pushLog(`⛔ В колоде ${unowned.length} карт расширения, которых нет в коллекции: они выпадают только из бустеров.`, 'big');
+        pushLog(`⛔ В колоде ${unowned.length} карт, которых пока нет в коллекции: откройте бустеры, события или боевой пропуск.`, 'big');
         this.setWho('Колода недоступна');
         this.renderAll();
         return;
       }
     }
-    const eDeck = deckById.get(this.enemyFaction)!.cards.slice();
+    // В учебном режиме используем зеркало стартовой колоды соперника — 30 против 30.
+    const enemyDef = isStarterDeckId(pDef.id)
+      ? starterDeckForFaction(this.enemyFaction) ?? deckById.get(this.enemyFaction)!
+      : deckById.get(this.enemyFaction)!;
+    const eDeck = enemyDef.cards.slice();
 
     this.engine = new GameEngine(db, [pDeck, eDeck], {
       factions: [this.playerFaction, this.enemyFaction],
@@ -772,6 +870,7 @@ class Battle {
       lookahead: this.difficulty >= 1,
     });
 
+    setAppRoute('battle');
     $('menu').classList.add('hidden');
     $('gameover').classList.add('hidden');
     $('battle').classList.remove('hidden');
@@ -855,7 +954,7 @@ class Battle {
       await this.combatWindow();
       if (!this.running) return;
     }
-    e.finishMainPhase();                           // оставшихся доигрывает авто-бой
+    await e.finishMainPhase();                     // бой полностью проигрывается до конца хода
     this.aiInstantResponse('в конец вашего хода');
     this.renderAll();
   }
@@ -944,8 +1043,11 @@ class Battle {
     const unranked = this.practice || !!this.campaignBoss || this.tutLesson > 0;
     const lvlBefore = Math.floor(meta.xp / 500) + 1;
     if (win) { meta.wins += 1; meta.facW[fac] = (meta.facW[fac] ?? 0) + 1;
-      if (!unranked) meta.mmr += 12;
-      meta.xp += 80 + e.turn * 2; questBump('win_fac'); }
+      if (!unranked) {
+        meta.mmr += 12;
+        if (!meta.borderlessEventClaimed) meta.borderlessEventWins = Math.min(BORDERLESS_EVENT_WINS, (meta.borderlessEventWins ?? 0) + 1);
+      }
+      meta.xp += 80 + e.turn * 2; questBump('win_fac', 1, fac); }
     else { meta.losses += 1; meta.facL[fac] = (meta.facL[fac] ?? 0) + 1;
       if (!unranked) meta.mmr = Math.max(800, meta.mmr - 10);
       meta.xp += 20 + e.turn; }
@@ -1006,7 +1108,7 @@ class Battle {
       line.style.cssText = 'margin-top:.5rem;color:#ffe9b0;font-family:Philosopher,serif;font-size:.9rem';
       line.textContent = `Награды: +${win ? 80 + e.turn * 2 : 20 + e.turn} опыта, +${win ? (unranked ? 60 : 120) : (unranked ? 25 : 60)} опыта пропуска` +
         (unranked ? ' (матч без рейтинга)' : `, рейтинг ${meta.mmr} — ${rankOf(meta.mmr).title}`) +
-        (reward ? `, ◈${reward}${gemReward ? ` и 💎${gemReward}` : ''} за кампанию` : '');
+        (reward ? `, 🪙${reward}${gemReward ? ` и 💎${gemReward}` : ''} за кампанию` : '');
       go.appendChild(line);
     }
     if (reward) shardsAdd(reward);
@@ -1115,7 +1217,7 @@ class Battle {
 
     await this.responseWindow('перед атакой противника');
     if (!this.running) return;
-    e.finishMainPhase();
+    await e.finishMainPhase();
     await this.responseWindow('конец хода противника');
     this.setBusy(false);
     this.renderAll();
@@ -1228,6 +1330,7 @@ class Battle {
       pushLog('Битва: атак не было', 'phase');
       await sleep(200);
       this.combatBusy = false; this.combatSnap = null;
+      this.flushPendingStatusFx();
       this.renderStats();
       return;
     }
@@ -1236,6 +1339,7 @@ class Battle {
     setTimeout(() => this.hideCombatSteps(), 900);
     this.combatBusy = false; this.combatSnap = null;
     this.renderAll();
+    this.flushPendingStatusFx();
     await sleep(160);
   }
 
@@ -1306,19 +1410,13 @@ class Battle {
           this.combatSnap.hp[target] = Math.max(0, this.combatSnap.hp[target] - rec.heroDamage);
         }
         // вампиризм: нанесённый урон лечит героя атакующего в тот же момент
-        const dealt = rec.defenderDamage > 0 ? rec.defenderDamage : rec.heroDamage;
-        if (dealt > 0) {
-          const anode = this.unitNodes.get(rec.attackerUid);
-          const aid = anode?.dataset.cardId
-            ?? this.engine!.p(rec.attackerSide).creatures.find(c => c.uid === rec.attackerUid)?.cardId;
-          const acard = aid ? db.get(aid) : undefined;
-          if (acard && (acard.keywords ?? []).includes(Keyword.Lifesteal)) {
-            const cap0 = DEFAULT_CONFIG.heroHealth;
-            this.combatSnap.hp[rec.attackerSide] = Math.min(cap0, this.combatSnap.hp[rec.attackerSide] + dealt);
-            this.floatHero(rec.attackerSide, `+${dealt}`, true);
-            Vfx.healFx(Vfx.centerOf(rec.attackerSide === Side.Player ? $('playerHero') : $('enemyHero'), 0.4));
-            Sfx.heal();
-          }
+        const healed = rec.lifestealAmount ?? 0;
+        if (rec.lifesteal && healed > 0) {
+          const cap0 = this.engine!.p(rec.attackerSide).maxHealth;
+          this.combatSnap.hp[rec.attackerSide] = Math.min(cap0, this.combatSnap.hp[rec.attackerSide] + healed);
+          this.floatHero(rec.attackerSide, `+${healed}`, true);
+          Vfx.healFx(Vfx.centerOf(rec.attackerSide === Side.Player ? $('playerHero') : $('enemyHero'), 0.4));
+          Sfx.heal();
         }
       }
       if (rec.attackerDamage > 0 && attacker) this.floatUnit(rec.attackerUid, `-${rec.attackerDamage}`, false);
@@ -1329,6 +1427,8 @@ class Battle {
         strikeAnim.cancel?.();
       } else await sleep(140);
       if (attacker) attacker.classList.remove('attacking');
+      if (rec.defenderUid !== undefined) this.flushPendingStatusFx(rec.defenderUid);
+      this.flushPendingStatusFx(rec.attackerUid);
       this.renderAll();
       await sleep(70);
     }
@@ -1507,15 +1607,40 @@ class Battle {
         Vfx.motes(Vfx.centerOf(this.unitNodes.get(e.uid!)), '#7fe0a0', 12, 70);
         Sfx.heal();
         break;
+      case GameEventType.StatusApplied: {
+        const status = String(e.data?.status ?? '');
+        if (e.uid !== undefined) {
+          this.pendingStatusFx.push({ uid: e.uid, status, text: e.text });
+          if (!this.combatBusy) this.flushPendingStatusFx(e.uid);
+        }
+        if (e.text) pushLog(e.text, 'status');
+        captionFor('status');
+        break;
+      }
+      case GameEventType.StatusExpired: {
+        const status = String(e.data?.status ?? '');
+        if (e.uid !== undefined) {
+          this.pendingStatusFx.push({ uid: e.uid, status, text: e.text, expired: true });
+          if (!this.combatBusy) this.flushPendingStatusFx(e.uid);
+        }
+        if (e.text) pushLog(e.text, 'status');
+        break;
+      }
       case GameEventType.CreatureDeath:
         this.killUnit(e.uid!, e.cardName);
         break;
-      case GameEventType.CreatureSummoned:
+      case GameEventType.CreatureSummoned: {
+        const side = e.side ?? Side.Player;
+        if (side === Side.Player) questBump('creatures');
         this.summonedUids.add(e.uid!);
-        Vfx.summonFx(Vfx.centerOf(this.unitNodes.get(e.uid!)), paletteOf(this.engine?.p(e.side ?? Side.Player).faction ?? Faction.Neutral).primary);
+        this.pendingSummonFx.set(e.uid!, {
+          side, faction: this.engine?.db.get(e.cardId ?? '')?.faction
+            ?? this.engine?.p(side).faction ?? Faction.Neutral,
+        });
         Sfx.summon();
         captionFor('summon');
         break;
+      }
       case GameEventType.StackPushed:
         this.renderStack();
         if (!this.stackBusy) {
@@ -1629,21 +1754,74 @@ class Battle {
     }
   }
 
+  private flushPendingSummonFx(): void {
+    for (const [uid, info] of this.pendingSummonFx) {
+      const node = this.unitNodes.get(uid);
+      const zone = info.side === Side.Player ? $('playerBoard') : $('enemyBoard');
+      Vfx.summonFx(Vfx.centerOf(node ?? zone), paletteOf(info.faction).primary);
+      this.pendingSummonFx.delete(uid);
+    }
+  }
+
+  private flushPendingStatusFx(onlyUid?: number): void {
+    const colors: Record<string, string> = {
+      Burn: '#ff793c', Poison: '#7be36c', Freeze: '#7bdcff', Shield: '#8ecbff',
+      Fury: '#ffd66e', Silence: '#c6a8ed',
+    };
+    const remain: typeof this.pendingStatusFx = [];
+    for (const info of this.pendingStatusFx) {
+      if (onlyUid !== undefined && info.uid !== onlyUid) { remain.push(info); continue; }
+      const node = this.unitNodes.get(info.uid) ?? this.dyingUnits.get(info.uid);
+      if (!node) {
+        if (this.engine?.findCreature(info.uid)) remain.push(info);
+        continue;
+      }
+      const at = Vfx.centerOf(node);
+      const color = info.expired ? '#b7b7c4' : (colors[info.status] ?? '#d8b45a');
+      Vfx.ripple(at, color, info.expired ? 1 : 2, 135);
+      if (!info.expired) Vfx.motes(at, color, 8, 42);
+      if (this.fxOk()) node.animate?.([
+        { filter: 'brightness(1) saturate(1)' },
+        { filter: `brightness(1.45) saturate(1.35) drop-shadow(0 0 9px ${color})` },
+        { filter: 'brightness(1) saturate(1)' },
+      ], { duration: 440, easing: 'ease-out' });
+    }
+    this.pendingStatusFx = remain;
+  }
+
   private killUnit(uid: number, name?: string): void {
     const node = this.unitNodes.get(uid) ?? this.dyingUnits.get(uid);
     pushLog(`✝ «${name ?? node?.querySelector('.uname')?.textContent ?? 'существо'}» погибает`, 'dmg');
-    if (!node || this.dyingUnits.has(uid)) return;
-    this.dyingUnits.set(uid, node);
+    if (!node) { this.pendingSummonFx.delete(uid); return; }
+    if (this.dyingUnits.has(uid)) return;
+
+    // Поле перерисовывается сразу после SBA, поэтому растворяем фиксированную
+    // копию карты на независимом слое, а не DOM-узел, который renderBoard удалит.
+    const rect = node.getBoundingClientRect();
+    const corpse = node.cloneNode(true) as HTMLElement;
+    corpse.classList.remove('attacking', 'targetable');
+    corpse.classList.add('deathGhost');
+    Object.assign(corpse.style, {
+      position: 'fixed', left: `${rect.left}px`, top: `${rect.top}px`,
+      width: `${rect.width}px`, height: `${rect.height}px`, margin: '0',
+      zIndex: '2', pointerEvents: 'none', transformOrigin: 'center center',
+    });
+    const layer = $('floatLayer') ?? document.body;
+    layer.appendChild(corpse);
+    node.style.visibility = 'hidden';
+    this.dyingUnits.set(uid, corpse);
+
     const c = this.engine?.findCreature(uid);
-    const at = Vfx.centerOf(node);
+    const card = this.engine?.db.get(node.dataset.cardId ?? '');
+    const at = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
     const ownerSide = node.dataset.side === String(Side.Player) ? Side.Player : Side.Opponent;
     const hero = Vfx.centerOf(ownerSide === Side.Player ? $('playerHero') : $('enemyHero'), 0.42);
     // «Кровавая жатва» Некрусов: душа летит к герою владельца (VISUAL_STACK №14–15)
-    Vfx.deathFx(at, hero, paletteOf((c?.faction as string) ?? Faction.Neutral).primary);
+    Vfx.deathFx(at, hero, paletteOf((c?.faction ?? card?.faction) ?? Faction.Neutral).primary);
     Sfx.death();
     captionFor('death');
-    Vfx.dissolve(node, 620);
-    setTimeout(() => { this.dyingUnits.delete(uid); }, 660);
+    Vfx.dissolve(corpse, 620);
+    setTimeout(() => { if (this.dyingUnits.get(uid) === corpse) this.dyingUnits.delete(uid); }, 700);
   }
 
   private flashHero(side: Side, echo: boolean): void {
@@ -1760,6 +1938,8 @@ class Battle {
       this.renderStats();
     this.renderBoard(Side.Opponent, $('enemyBoard'), 'войска противника');
     this.renderBoard(Side.Player, $('playerBoard'), 'ваши войска');
+    this.flushPendingSummonFx();
+    if (!this.combatBusy) this.flushPendingStatusFx();
     this.renderRunes(Side.Opponent, $('enemyRunes'));
     this.renderRunes(Side.Player, $('playerRunes'));
     this.renderHand();
@@ -1841,6 +2021,16 @@ class Battle {
     node.dataset.side = String(c.owner);
     const mine = c.owner === Side.Player;
     const canAtk = mine && this.engine!.canAttack(c);
+    const maxAttacks = c.keywords.includes(Keyword.Windfury) ? 2 : 1;
+    const attacksRemaining = Math.max(0, maxAttacks - c.attacksThisTurn);
+    const attackMarkTitle = c.attacksThisTurn > 0
+      ? `Буря: может атаковать ещё ${attacksRemaining} раз`
+      : 'Готово к атаке';
+    const attackMark = canAtk
+      ? `<span class="attackReadyMark${c.attacksThisTurn > 0 ? ' again' : ''}" title="${esc(attackMarkTitle)}" aria-label="${esc(attackMarkTitle)}">${
+        c.attacksThisTurn > 0 ? `Ещё ${attacksRemaining}` : '⚔'
+      }</span>`
+      : '';
     if (canAtk) node.classList.add('ready');
     if (mine && !canAtk) node.classList.add('exhausted');
     if (c.attacksThisTurn > 0) node.classList.add('tapped');   // как в MTG: атаковало — тапнуто
@@ -1867,7 +2057,8 @@ class Battle {
     for (const s of c.statuses) {
       const b = STATUS_BADGE[s.type as StatusType];
       if (!b) continue;
-      badges.push(`<span class="badge ${b.cls}" title="${b.title}">${b.ico}${s.value > 1 ? s.value : ''}</span>`);
+      const duration = s.turnsLeft < 0 ? 'постоянно' : `${s.turnsLeft} ход.`;
+      badges.push(`<span class="badge ${b.cls}" title="${b.title} · ${duration}">${b.ico}${s.value > 1 ? s.value : ''}</span>`);
     }
     for (const kw of c.keywords ?? []) {
       const b = KW_BADGE[kw as Keyword];
@@ -1880,7 +2071,7 @@ class Battle {
         <div class="uart">${artSvg(card, 104, 134)}</div>
         <div class="uname">${cardName(card)}</div>
         <div class="stats"><span class="atk">${c.attack}</span><span class="hp${c.health <= 0 ? ' lethal' : ''}">${Math.max(0, this.displayHpOf(c.uid, c.health))}</span></div>
-      </div>`;
+      </div>${attackMark}`;
     const ft = this.dmgFlash.get(c.uid);
     if (ft && Date.now() - ft < 500) {
       const hpEl = node.querySelector('.hp');
@@ -2425,7 +2616,7 @@ class Battle {
     }
     metaSave();
     tutGatePractice();
-    showToast(`🎓 ${LESSONS[n - 1].ru} выполнен!${first ? ` +◈${rw}` : ''}` +
+    showToast(`🎓 ${LESSONS[n - 1].ru} выполнен!${first ? ` +🪙${rw}` : ''}` +
       (n >= 4 && !meta.tutReward ? ' · Заберите награду в меню «🎓 Обучение»' : ''));
   }
 
@@ -2687,20 +2878,27 @@ function hurtKeys(): Keyframe[] {
 const battle = new Battle();
 /* Выбор фракции сохраняется между запусками (спека п.1.1; в Unity — PlayerPrefs "ec.faction"). */
 const PICK_KEY = 'ec.pickedFaction';
+const MENU_DECK_KEY = 'ec.menuSelectedDeckId';
 let picked: Faction = Faction.Aurites;
+let menuSelectedDeckId: string | null = null;
 try {
   const savedPick = window.localStorage?.getItem(PICK_KEY) as Faction | null;
   if (savedPick && (FACTION_IDS as string[]).includes(savedPick)) picked = savedPick;
+  menuSelectedDeckId = window.localStorage?.getItem(MENU_DECK_KEY) || null;
 } catch { /* приватный режим браузера */ }
 const savePicked = (): void => { try { window.localStorage?.setItem(PICK_KEY, picked); } catch { void 0; } };
+const saveMenuDeck = (): void => {
+  try { if (menuSelectedDeckId) window.localStorage?.setItem(MENU_DECK_KEY, menuSelectedDeckId); else window.localStorage?.removeItem(MENU_DECK_KEY); }
+  catch { void 0; }
+};
 let audioOn = true;
 // звук в браузере разрешён только после жеста пользователя
 const unlockAudio = (): void => { audioUnlock(); window.removeEventListener('pointerdown', unlockAudio); };
 window.addEventListener('pointerdown', unlockAudio);
 
 /* ---------------------------------------------------------------------- */
-/*  Этап расширения: владение картами и бустеры (v1)                       */
-/*  Базовый набор (150) считается полученным; бустеры добавляют копии.    */
+/*  Коллекция: новые игроки получают только копии карт пяти starter-колод; */
+/*  остальные карты открываются из бустеров, пропуска и событий.           */
 /* ---------------------------------------------------------------------- */
 /* ---------------------------------------------------------------------- */
 /*  Мета-игра: профиль, XP/лиги, дейлики, кампания, рубашки, история       */
@@ -2719,6 +2917,7 @@ interface MetaState {
   bpXp: number; bpClaimedP: number[]; bpPremium: boolean; seasonStart: number; bestMmr: number;
   foilTokens: number; premOpens: number;   // спека «5»: фойл-жетоны и премиум-бустеры из пропуска
   freeOpens: number; bundles: string[]; tableSkin: string; runeSkin: string; avatarsOwned: string[];
+  borderlessOwned: string[]; borderlessEquipped: string[]; borderlessEventWins: number; borderlessEventClaimed: boolean;
   tablesOwned: string[]; runesOwned: string[];
   friends: Array<{ nick: string; ts: number }>;
   campStars: Record<string, number>; loreRead: string[]; tutStage: number; tutReward: string; tutClaims: number[];
@@ -2726,71 +2925,129 @@ interface MetaState {
   replays: Array<{ ts: number; win: boolean; fac: string; turns: number; foe: string; lines: Array<[number, string]> }>;
 }
 const META_KEY = 'ec_meta_v1';
-const DAILY_REWARD: Record<string, number> = { win_fac: 200, runes: 120, pack: 80 };
+const DAILY_REWARD: Record<string, number> = { win_fac: 200, creatures: 200, runes: 120, pack: 80 };
 const QUEST_RU: Record<string, (q: Quest) => string> = {
   win_fac: q => `Выиграйте ${q.goal} матча фракцией ${FACTION_RU[(q.fac ?? 'Aurites') as Faction]}`,
-  runes: q => `Разыграйте ${q.goal} рун`,
+  creatures: q => `Разыграйте ${q.goal} существ`,
+  runes: q => `Примените ${q.goal} руны`,
   pack: q => `Откройте ${q.goal} бустер`,
 };
-function todayStr(): string { return new Date().toISOString().slice(0, 10); }
+function todayStr(date = new Date()): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
 function freshQuests(): Quest[] {
   const fac = FACTION_IDS[new Date().getDate() % FACTION_IDS.length];
   return [
     { id: 'win_fac', prog: 0, goal: 2, claimed: false, fac },
-    { id: 'runes', prog: 0, goal: 6, claimed: false },
+    { id: 'creatures', prog: 0, goal: 20, claimed: false },
+    { id: 'runes', prog: 0, goal: 2, claimed: false },
     { id: 'pack', prog: 0, goal: 1, claimed: false },
   ];
 }
 const SEASON_MS = 30 * 24 * 3600 * 1000;   // сезон боевого пропуска: 30 дней
-function weekStr(): string {
-  const d = new Date(); const jan1 = new Date(d.getFullYear(), 0, 1);
-  const wk = Math.ceil((((d.getTime() - jan1.getTime()) / 86400000) + jan1.getDay() + 1) / 7);
-  return `${d.getFullYear()}-W${wk}`;
+function weekStr(date = new Date()): string {
+  const monday = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7));
+  return todayStr(monday); // локальная неделя: понедельник 00:00 → понедельник 00:00
+}
+function nextDailyResetMs(now = new Date()): number {
+  const next = new Date(now);
+  next.setHours(24, 0, 0, 0);
+  return next.getTime();
+}
+function nextWeeklyResetMs(now = new Date()): number {
+  const next = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const days = ((8 - next.getDay()) % 7) || 7;
+  next.setDate(next.getDate() + days);
+  return next.getTime();
+}
+function formatQuestCountdown(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const days = Math.floor(total / 86400);
+  const hours = Math.floor((total % 86400) / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  const clock = `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  return days ? `${days} д ${clock}` : clock;
 }
 function freshWQuests(): Quest[] {
   return [
     { id: 'w_win3', prog: 0, goal: 3, claimed: false },
     { id: 'w_runes', prog: 0, goal: 15, claimed: false },
+    { id: 'w_creatures', prog: 0, goal: 60, claimed: false },
     { id: 'w_dmg', prog: 0, goal: 300, claimed: false },
   ];
 }
-const WEEK_REWARD: Record<string, number> = { w_win3: 300, w_runes: 250, w_dmg: 350 };
+const WEEK_REWARD: Record<string, number> = { w_win3: 300, w_runes: 250, w_creatures: 300, w_dmg: 350 };
 const WQUEST_RU: Record<string, string> = {
-  w_win3: 'Неделя: выиграйте 3 матча', w_runes: 'Неделя: разыграйте 15 рун', w_dmg: 'Неделя: нанесите 300 урона',
+  w_win3: 'Выиграйте 3 матча за неделю', w_runes: 'Разыграйте 15 рун за неделю',
+  w_creatures: 'Разыграйте 60 существ за неделю', w_dmg: 'Нанесите 300 урона за неделю',
 };
 
 const META_DEFAULT: MetaState = {
   xp: 0, wins: 0, losses: 0, mmr: 1000, packs: 0, facW: {}, facL: {}, history: [],
   tutDone: false, campaign: {}, starter: false, backsOwned: ['classic'], backEq: 'classic',
   questDate: todayStr(), quests: freshQuests(), ach: {}, bpClaimed: [],
-  nick: 'Гость', avatarFac: 'Aurites', frame: 'bronze', gems: 100, signedIn: false, pid: '',
+  nick: 'Гость', avatarFac: 'Aurites', frame: 'bronze', gems: 500, signedIn: false, pid: '',
   bpXp: 0, bpClaimedP: [], bpPremium: false, seasonStart: 0, bestMmr: 1000,
-  foilTokens: 0, premOpens: 0,
-  freeOpens: 0, bundles: [], tableSkin: 'classic', runeSkin: 'classic', avatarsOwned: [],
+  foilTokens: 0, premOpens: 1,
+  freeOpens: 5, bundles: [], tableSkin: 'classic', runeSkin: 'classic', avatarsOwned: [],
+  borderlessOwned: [], borderlessEquipped: [], borderlessEventWins: 0, borderlessEventClaimed: false,
   tablesOwned: [], runesOwned: [],
   friends: [], campStars: {}, loreRead: [], tutStage: 0, tutReward: '', tutClaims: [],
   wquestWeek: '', wquests: [], replays: [],
 };
 let meta: MetaState = META_DEFAULT;
+function normalizeQuestSet(existing: Quest[] | null | undefined, templates: Quest[]): Quest[] {
+  const previous = Array.isArray(existing) ? existing : [];
+  return templates.map(template => {
+    const saved = previous.find(q => q?.id === template.id);
+    if (!saved) return { ...template };
+    const prog = Number.isFinite(Number(saved.prog)) ? Number(saved.prog) : 0;
+    return {
+      ...template, ...saved, goal: template.goal,
+      prog: Math.max(0, Math.min(template.goal, prog)), claimed: !!saved.claimed,
+      fac: saved.fac ?? template.fac,
+    };
+  });
+}
 function metaLoad(): void {
+  const freshMeta = (): MetaState => JSON.parse(JSON.stringify(META_DEFAULT)) as MetaState;
   try {
     const raw = window.localStorage.getItem(META_KEY);
-    if (raw) meta = { ...META_DEFAULT, ...(JSON.parse(raw) as Partial<MetaState>) };
-  } catch { meta = META_DEFAULT; }
-  if (meta.questDate !== todayStr()) { meta.questDate = todayStr(); meta.quests = freshQuests(); }
-  if (!meta.quests?.length) meta.quests = freshQuests();
+    if (raw) {
+      const saved = JSON.parse(raw) as Partial<MetaState>;
+      meta = { ...freshMeta(), ...saved };
+      // Старые аккаунты не получают повторный стартовый грант из новых defaults.
+      if (saved.gems == null) meta.gems = 100;
+      if (saved.freeOpens == null) meta.freeOpens = 0;
+      if (saved.premOpens == null) meta.premOpens = 0;
+    } else {
+      // Только чистый профиль получает стартовый набор: 3500 монет, 500 гемов,
+      // 5 обычных и 1 мифический бустер.
+      meta = freshMeta();
+    }
+  } catch { meta = freshMeta(); }
+  const today = todayStr();
+  if (meta.questDate !== today) { meta.questDate = today; meta.quests = freshQuests(); }
+  else meta.quests = normalizeQuestSet(meta.quests, freshQuests());
   if (!meta.seasonStart) meta.seasonStart = Date.now();
   if (!meta.bestMmr) meta.bestMmr = meta.mmr;
   if (meta.bpXp == null) meta.bpXp = meta.xp ?? 0;
   if (meta.foilTokens == null) meta.foilTokens = 0;
   if (meta.premOpens == null) meta.premOpens = 0;
   if (!meta.tutClaims) meta.tutClaims = [];
+  if (!Array.isArray(meta.borderlessOwned)) meta.borderlessOwned = [];
+  if (!Array.isArray(meta.borderlessEquipped)) meta.borderlessEquipped = [];
+  if (!Number.isFinite(meta.borderlessEventWins)) meta.borderlessEventWins = 0;
+  if (typeof meta.borderlessEventClaimed !== 'boolean') meta.borderlessEventClaimed = false;
   if (Date.now() > meta.seasonStart + SEASON_MS) {
     // новый сезон: сброс веток пропуска (косметика и купленный премиум-статус сезона обнуляются)
     meta.seasonStart = Date.now(); meta.bpXp = 0; meta.bpClaimed = []; meta.bpClaimedP = []; meta.bpPremium = false;
   }
-  if (meta.wquestWeek !== weekStr()) { meta.wquestWeek = weekStr(); meta.wquests = freshWQuests(); }
-  if (!meta.wquests?.length) meta.wquests = freshWQuests();
+  const currentWeek = weekStr();
+  if (meta.wquestWeek !== currentWeek) { meta.wquestWeek = currentWeek; meta.wquests = freshWQuests(); }
+  else meta.wquests = normalizeQuestSet(meta.wquests, freshWQuests());
   if (!meta.pid) {
     // Постоянный id игрока для серверного профиля (спека «2. Профиль»: сохранение на сервере).
     meta.pid = `ec-${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`;
@@ -2798,7 +3055,60 @@ function metaLoad(): void {
   }
 }
 function metaSave(): void { try { window.localStorage.setItem(META_KEY, JSON.stringify(meta)); } catch { void 0; } scheduleSync(); }
+function syncQuestPeriods(): boolean {
+  let changed = false;
+  const today = todayStr();
+  const currentWeek = weekStr();
+  if (meta.questDate !== today) { meta.questDate = today; meta.quests = freshQuests(); changed = true; }
+  if (meta.wquestWeek !== currentWeek) { meta.wquestWeek = currentWeek; meta.wquests = freshWQuests(); changed = true; }
+  if (changed) metaSave();
+  return changed;
+}
 metaLoad();
+
+/* Borderless — только альтернативный внешний вид тех же карт: id, правила,
+   стоимость, владение обычной копией и колоды не меняются. */
+const BORDERLESS_BOOSTER_CHANCE = 0.001;
+const BORDERLESS_EVENT_WINS = 3;
+function hasBorderless(id: string): boolean { return (meta.borderlessOwned ?? []).includes(id); }
+function isBorderlessEquipped(id: string): boolean { return (meta.borderlessEquipped ?? []).includes(id); }
+function unlockBorderless(id: string): boolean {
+  if (!ALL_CARDS.some(card => card.id === id) || hasBorderless(id)) return false;
+  meta.borderlessOwned.push(id);
+  return true;
+}
+function grantRandomBorderless(): CardData | null {
+  const candidates = ALL_CARDS.filter(card => !hasBorderless(card.id));
+  if (!candidates.length) return null;
+  const card = candidates[Math.floor(Math.random() * candidates.length)];
+  return unlockBorderless(card.id) ? card : null;
+}
+function borderlessRollIsBonus(roll: number): boolean {
+  return Number.isFinite(roll) && roll >= 0 && roll < BORDERLESS_BOOSTER_CHANCE;
+}
+function maybeBorderlessPackBonus(): CardData | null {
+  if (!borderlessRollIsBonus(Math.random())) return null;
+  return grantRandomBorderless();
+}
+// Чистая граница ролла доступна smoke-тесту: интервал [0, 0.001) = ровно 0,1% Math.random().
+(window as any).ecBorderlessChanceForRoll = (roll: number): boolean => borderlessRollIsBonus(roll);
+function setBorderlessEquipped(id: string, equip: boolean): boolean {
+  if (!ALL_CARDS.some(card => card.id === id) || (equip && !hasBorderless(id))) return false;
+  const equipped = new Set(meta.borderlessEquipped ?? []);
+  const wasEquipped = equipped.has(id);
+  if (wasEquipped === equip) return equip;
+  if (equip) equipped.add(id); else equipped.delete(id);
+  meta.borderlessEquipped = [...equipped];
+  metaSave();
+  return equip;
+}
+function toggleBorderless(id: string): boolean {
+  if (!hasBorderless(id)) return false;
+  return setBorderlessEquipped(id, !isBorderlessEquipped(id));
+}
+(window as any).ecGrantBorderless = (id: string): boolean => { const ok = unlockBorderless(id); if (ok) metaSave(); return ok; };
+(window as any).ecToggleBorderless = (id: string): boolean => toggleBorderless(id);
+(window as any).ecBorderlessOwned = (): string[] => [...(meta.borderlessOwned ?? [])];
 
 /* ---- Синхронизация с сервером (спека «2. Профиль»): meta_server :8081, best-effort.
    localStorage остаётся источником истины (офлайн-игра); сервер — зеркало профиля,
@@ -2830,8 +3140,9 @@ function syncProfile(): void {
         tutReward: meta.tutReward ?? '', tutClaims: meta.tutClaims ?? [],
         cosmetics: { backs: meta.backsOwned ?? [], tables: meta.tablesOwned ?? [], runes: meta.runesOwned ?? [],
           backEq: meta.backEq ?? 'classic', tableSkin: meta.tableSkin ?? 'classic', runeSkin: meta.runeSkin ?? 'classic' },
+        questDate: meta.questDate, wquestWeek: meta.wquestWeek,
         quests: {
-          daily: (meta.quests ?? []).map(q => ({ id: q.id, prog: q.prog, goal: q.goal, claimed: q.claimed })),
+          daily: (meta.quests ?? []).map(q => ({ id: q.id, prog: q.prog, goal: q.goal, claimed: q.claimed, fac: q.fac })),
           weekly: (meta.wquests ?? []).map(q => ({ id: q.id, prog: q.prog, goal: q.goal, claimed: q.claimed })),
         },
         history: (meta.history ?? []).slice(0, 20),
@@ -2850,16 +3161,117 @@ function apiSend(path: string, body: unknown): void {
     }).then(() => window.clearTimeout(t), () => window.clearTimeout(t));
   } catch { void 0; }
 }
-function questBump(id: string, n = 1): void {
+function questBump(id: string, n = 1, faction?: string): void {
+  if (!(n > 0)) return;
+  let changed = false;
   const q = meta.quests.find(x => x.id === id);
-  if (q && !q.claimed) { q.prog = Math.min(q.goal, q.prog + n); metaSave(); }
-  const WMAP: Record<string, string> = { win_fac: 'w_win3', runes: 'w_runes', dmg: 'w_dmg' };
+  const matchesQuestFaction = id !== 'win_fac' || !faction || q?.fac === faction;
+  if (q && !q.claimed && matchesQuestFaction) { q.prog = Math.min(q.goal, q.prog + n); changed = true; }
+  const WMAP: Record<string, string> = {
+    win_fac: 'w_win3', runes: 'w_runes', creatures: 'w_creatures', dmg: 'w_dmg',
+  };
   const wid = WMAP[id];
   if (wid) {
     const wq = (meta.wquests ?? []).find(x => x.id === wid);
-    if (wq && !wq.claimed) { wq.prog = Math.min(wq.goal, wq.prog + n); metaSave(); }
+    if (wq && !wq.claimed) { wq.prog = Math.min(wq.goal, wq.prog + n); changed = true; }
+  }
+  if (changed) {
+    metaSave();
+    if (!document.getElementById('menu')?.classList.contains('hidden')) renderHomeQuests();
   }
 }
+(window as any).ecTestQuestBump = (id: string, n = 1, faction?: string): void => questBump(id, n, faction);
+
+function updateQuestCountdowns(): void {
+  const now = new Date();
+  document.querySelectorAll<HTMLElement>('[data-quest-reset="daily"],[data-quest-reset="weekly"]').forEach(node => {
+    const resetAt = node.dataset.questReset === 'weekly' ? nextWeeklyResetMs(now) : nextDailyResetMs(now);
+    const prefix = node.dataset.resetPrefix ?? 'Сброс через';
+    node.textContent = `${prefix} ${formatQuestCountdown(resetAt - now.getTime())}`;
+    node.setAttribute('aria-label', `${prefix} ${formatQuestCountdown(resetAt - now.getTime())}`);
+  });
+}
+function questGlyph(id: string): string {
+  if (id.includes('win')) return '⚔';
+  if (id.includes('creature')) return '♟';
+  if (id.includes('rune')) return '◇';
+  if (id.includes('pack')) return '▣';
+  if (id.includes('dmg')) return '✦';
+  return '◆';
+}
+function renderQuestTask(q: Quest, kind: 'daily' | 'weekly'): string {
+  const weekly = kind === 'weekly';
+  const done = q.prog >= q.goal;
+  const claimed = !!q.claimed;
+  const reward = weekly ? (WEEK_REWARD[q.id] ?? 0) : (DAILY_REWARD[q.id] ?? 0);
+  const bp = weekly ? 250 : 150;
+  const label = QUEST_RU[q.id]?.(q) ?? WQUEST_RU[q.id] ?? q.id;
+  const progress = Math.max(0, Math.min(q.goal || 0, Number(q.prog) || 0));
+  const percent = q.goal > 0 ? Math.round(progress / q.goal * 100) : 0;
+  const canClaim = done && !claimed;
+  const icon = questGlyph(q.id);
+  const artId = encodeURIComponent(q.id);
+  const status = claimed ? 'questTaskClaimed' : done ? 'questTaskDone' : '';
+  const reset = done
+    ? `<span class="questTaskReset questReset" data-quest-reset="${kind}" data-reset-prefix="Сброс через">—</span>`
+    : '';
+  const buttonLabel = claimed ? 'Получено ✓' : canClaim ? 'Забрать' : `🪙${reward}`;
+  return `<article class="questTask ${status}" data-quest-card="${kind}:${esc(q.id)}" role="listitem">
+    <span class="questTaskIcon" aria-hidden="true"><b>${icon}</b><img src="/cosm/quests/${artId}?t=${Date.now()}" alt="" loading="lazy" onload="this.closest('.questTaskIcon')?.classList.add('hasArt')" onerror="this.remove()"></span>
+    <div class="questTaskMain">
+      <strong class="questTaskTitle">${esc(label)}</strong>
+      <div class="questTaskProgressLine">
+        <span class="questTaskProgressText">${progress}/${q.goal}</span>
+        <div class="questTaskProgressBar" role="progressbar" aria-label="${esc(label)}" aria-valuemin="0" aria-valuemax="${q.goal}" aria-valuenow="${progress}"><i style="width:${percent}%"></i></div>
+      </div>
+      <span class="questTaskReward">Награда · 🪙${reward} <i>+${bp} BP</i></span>
+      ${reset}
+    </div>
+    <button type="button" class="btn homeQuestClaim" data-kind="${kind}" data-q="${esc(q.id)}" ${canClaim ? '' : 'disabled'} aria-label="${canClaim ? `Забрать награду за задание: ${esc(label)}` : claimed ? `Награда за задание получена: ${esc(label)}` : `Задание ${esc(label)}, ${progress} из ${q.goal}`}" title="${canClaim ? 'Забрать награду' : claimed ? 'Уже получено' : 'Выполняйте цель в матчах'}">${buttonLabel}</button>
+  </article>`;
+}
+function renderHomeQuests(): void {
+  const daily = document.getElementById('homeDailyQuests');
+  const weekly = document.getElementById('homeWeeklyQuests');
+  if (!daily || !weekly) return;
+  daily.innerHTML = (meta.quests ?? []).map(q => renderQuestTask(q, 'daily')).join('');
+  weekly.innerHTML = (meta.wquests ?? []).map(q => renderQuestTask(q, 'weekly')).join('');
+  updateQuestCountdowns();
+}
+function claimQuestReward(kind: 'daily' | 'weekly', id: string, keepHome = false): boolean {
+  const weekly = kind === 'weekly';
+  const q = (weekly ? meta.wquests : meta.quests).find(x => x.id === id);
+  if (!q || q.claimed || q.prog < q.goal) return false;
+  q.claimed = true;
+  const reward = weekly ? (WEEK_REWARD[q.id] ?? 0) : (DAILY_REWARD[q.id] ?? 0);
+  const bpReward = weekly ? 250 : 150;
+  shardsAdd(reward);
+  meta.bpXp = (meta.bpXp ?? 0) + bpReward;
+  metaSave(); renderShards();
+  apiSend('/api/quests/claim', { id: q.id, kind, prog: q.prog, goal: q.goal });
+  if (keepHome) {
+    renderHomeQuests();
+    [...document.querySelectorAll<HTMLButtonElement>('.homeQuestClaim')]
+      .find(button => button.dataset.kind === kind && button.dataset.q === id)?.focus();
+  } else if (!document.getElementById('profileModal')?.classList.contains('hidden')) openProfile();
+  else if (!document.getElementById('menu')?.classList.contains('hidden')) renderHomeQuests();
+  showToast(`${weekly ? 'Недельное задание' : 'Задание'}: 🪙${reward} и +${bpReward} опыта пропуска`);
+  return true;
+}
+document.addEventListener('click', ev => {
+  const button = (ev.target as HTMLElement | null)?.closest?.('.homeQuestClaim') as HTMLButtonElement | null;
+  if (!button || button.disabled) return;
+  const kind = button.dataset.kind === 'weekly' ? 'weekly' : 'daily';
+  if (button.dataset.q) claimQuestReward(kind, button.dataset.q, true);
+});
+window.setInterval(() => {
+  const reset = syncQuestPeriods();
+  if (reset) {
+    if (!document.getElementById('menu')?.classList.contains('hidden')) renderHomeQuests();
+    if (!document.getElementById('profileModal')?.classList.contains('hidden')) openProfile();
+  }
+  updateQuestCountdowns();
+}, 1000);
 function leagueOf(mmr: number): string {
   return mmr < 1050 ? 'Бронза' : mmr < 1200 ? 'Серебро' : mmr < 1400 ? 'Золото'
     : mmr < 1600 ? 'Платина' : 'Алмаз';
@@ -2897,19 +3309,17 @@ function showToast(text: string): void {
   if (toastTimer) window.clearTimeout(toastTimer);
   toastTimer = window.setTimeout(() => n.classList.remove('on'), 2400);
 }
-/* Тарифы спеки «3. Магазин» п.4.4 (решение пользователя: пыль = золото ◈, без новой валюты):
-   крафт 5/20/100/400, разбор 1/5/20/100; дубликаты свыше playset конвертируются по тарифу разбора. */
+/* Экономика в монетах: создание 5/10/20/100/400, разбор 1/2/5/20/100; дубликаты сверх playset конвертируются в монеты. */
 const CRAFT_COST: Record<string, number> = { Common: 5, Uncommon: 10, Rare: 20, Epic: 100, Legendary: 400 };
-const DUST_GAIN: Record<string, number> = { Common: 1, Uncommon: 2, Rare: 5, Epic: 20, Legendary: 100 };
+const DISENCHANT_COINS: Record<string, number> = { Common: 1, Uncommon: 2, Rare: 5, Epic: 20, Legendary: 100 };
 (window as unknown as { ecMeta: () => MetaState }).ecMeta = () => meta;
 (window as unknown as { ecSetShards: (n: number) => void }).ecSetShards = n => shardsSet(n);
 /* тестовые хуки спеки «5. Боевой пропуск» (смоук): гемы и опыт пропуска */
 (window as unknown as { ecSetGems: (n: number) => void }).ecSetGems = n => gemsAdd(n - gemsGet());
 (window as unknown as { ecSetBpXp: (n: number) => void }).ecSetBpXp = n => { meta.bpXp = n; metaSave(); };
 
-const OWNED_KEY = 'ec_owned_v2';   // v2: база открыта, расширение — только из бустеров
-/** Карты Расширения I (ECH1): доступны ТОЛЬКО дропом из бустеров.
-    Точный список — meta.expansionIds из Cards.json (регулярка ошибалась на base pyr_s10). */
+const OWNED_KEY = 'ec_owned_v2';   // сохранён прежний ключ; новые аккаунты получают только карты 5 стартовых колод
+/** Карты расширения: доступны через бустеры/пропуск/события, стартовые колоды состоят из базовых карт. */
 const EXPANSION_IDS: Set<string> = new Set(
   ((cardsJson as unknown as { meta?: { expansionIds?: string[] } }).meta?.expansionIds) ?? []);
 function isExpansionId(id: string): boolean {
@@ -2932,7 +3342,19 @@ function ownedLoad(): void {
     }
     if (raw) for (const [k, v] of Object.entries(JSON.parse(raw) as Record<string, number>)) owned.set(k, v);
   } catch { /* приватный режим — работаем в памяти */ }
-  if (owned.size === 0) for (const c of db.values()) if (!isExpansionId(c.id)) owned.set(c.id, 1);  // база открыта на старте
+  if (owned.size === 0) {
+    const starters = deckList.filter(d => d.format === STARTER_DECK_FORMAT);
+    if (starters.length) {
+      // Коллекция новичка = копии, реально входящие в 5 стартовых колод (общий playset capped at 4).
+      for (const deck of starters) for (const id of deck.cards) {
+        owned.set(id, Math.min(4, (owned.get(id) ?? 0) + 1));
+      }
+    } else {
+      // Совместимость со старым Decks.json: не блокируем запуск, пока данные не обновлены.
+      for (const c of db.values()) if (!isExpansionId(c.id)) owned.set(c.id, 1);
+    }
+    ownedSave();
+  }
 }
 function ownedSave(): void {
   try { window.localStorage.setItem(OWNED_KEY, JSON.stringify(Object.fromEntries(owned))); } catch { void 0; }
@@ -2964,8 +3386,8 @@ const FOIL_KEY = 'ec_foil_v1';
 const foils = new Map<string, number>();
 function shardsGet(): number {
   try { const v = window.localStorage.getItem(SHARD_KEY); if (v !== null) return Number(v) || 0; } catch { void 0; }
-  shardsSet(1200);                                   // стартовый грант: 4 бустера
-  return 1200;
+  shardsSet(3500);                                   // стартовый грант нового игрока: 3500 монет
+  return 3500;
 }
 function shardsSet(n: number): void { try { window.localStorage.setItem(SHARD_KEY, String(n)); } catch { void 0; } }
 function shardsAdd(n: number): void { shardsSet(shardsGet() + n); }
@@ -2979,12 +3401,13 @@ foilLoad();
 (window as unknown as { ecShards: () => number }).ecShards = () => shardsGet();
 (window as unknown as { ecSetOwned: (id: string, n: number) => void }).ecSetOwned = (id, n) => { owned.set(id, n); ownedSave(); };
 
-interface PackSlotData { card: CardData; foil: boolean; converted: number }
+interface PackSlotData { card: CardData; foil: boolean; converted: number; borderless?: boolean; bonus?: boolean }
 /** MTG-состав бустера: 3 обычных, 1 «редкая» (uncommon), 1 эпическая/легендарная (1/8).
- *  comp — переопределение состава (премиум-бустер спеки «5»: 2C+1R+2E/L). */
-function drawBooster(forcedId?: string, comp?: Rarity[]): PackSlotData[] {
-  // бустер = набор «Расширение I»: падают ТОЛЬКО карты расширения (база уже открыта)
-  const pool = forcedId ? [...db.values()] : [...db.values()].filter(c => isExpansionId(c.id));
+ *  comp — переопределение состава (премиум-бустер спеки «5»: 2C+1R+2E/L).
+ *  Дополнительно: отдельный косметический Borderless-дроп с шансом 0,1% на бустер. */
+function drawBooster(forcedId?: string, comp?: Rarity[], allowBorderless = true): PackSlotData[] {
+  // Бустеры открывают весь набор: нестартерные базовые карты и карты расширений.
+  const pool = [...db.values()];
   const compList: Rarity[] = comp ?? [Rarity.Common, Rarity.Common, Rarity.Common, Rarity.Rare,
     Math.random() < 0.125 ? Rarity.Legendary : Rarity.Epic];
   const foilIdx = Math.random() < 0.2 ? Math.floor(Math.random() * 5) : -1;
@@ -2995,7 +3418,7 @@ function drawBooster(forcedId?: string, comp?: Rarity[]): PackSlotData[] {
     let converted = 0;
     const have = owned.get(c.id) ?? 0;
     if (have < PLAYSET) owned.set(c.id, have + 1);
-    else converted += CONVERT[c.rarity] ?? 20;        // 5+ копия → осколки
+    else converted += CONVERT[c.rarity] ?? 20;        // копии сверх 4 → монеты
     let foil = i === foilIdx;
     if (foil) {
       const fh = foils.get(c.id) ?? 0;
@@ -3005,6 +3428,10 @@ function drawBooster(forcedId?: string, comp?: Rarity[]): PackSlotData[] {
     if (converted > 0) shardsAdd(converted);
     out.push({ card: c, foil, converted });
   });
+  if (allowBorderless) {
+    const bonus = maybeBorderlessPackBonus();
+    if (bonus) out.push({ card: bonus, foil: false, converted: 0, borderless: true, bonus: true });
+  }
   ownedSave(); foilSave();
   meta.packs += 1; questBump('pack'); checkAchs(); metaSave();
   return out;
@@ -3012,20 +3439,39 @@ function drawBooster(forcedId?: string, comp?: Rarity[]): PackSlotData[] {
 interface PackTestResult { converted: number; shardsBefore: number; shardsAfter: number; ownedCap: number }
 (window as unknown as { ecTestPack: (forcedId: string) => PackTestResult }).ecTestPack = (forcedId) => {
   const before = shardsGet();
-  const slots = drawBooster(forcedId);
+  const slots = drawBooster(forcedId, undefined, false);
   return { converted: slots.reduce((a, b) => a + b.converted, 0), shardsBefore: before,
     shardsAfter: shardsGet(), ownedCap: owned.get(forcedId) ?? 0 };
 };
 let pendingPack: PackSlotData[] | null = null;
+let pendingPackKind: string | null = null;
+let boosterReturnFocus: HTMLElement | null = null;
 
-function showSealedPack(slots: PackSlotData[], kind: string = 'booster'): void {
+function packTypeTitle(kind: string): string {
+  if (kind === 'booster_premium') return 'Премиум-бустер';
+  if (kind.startsWith('pack_')) return `Фракционный бустер · ${FACTION_RU[kind.slice(5) as Faction] ?? 'фракция'}`;
+  return 'Обычный бустер · Эхо-Цитадель';
+}
+function showSealedPack(slots: PackSlotData[] | null, kind: string = 'booster'): void {
   pendingPack = slots;
+  pendingPackKind = kind;
   const st = document.getElementById('packStage') as HTMLElement | null;
   const sealed = document.getElementById('packSealed') as HTMLElement | null;
   const row = document.getElementById('packRow') as HTMLElement | null;
-  if (!st || !sealed || !row) { renderPackSlots(slots); return; }
+  if (!st || !sealed || !row) { if (slots) renderPackSlots(slots); return; }
   row.innerHTML = '';
+  st.classList.remove('hasResults','opening');
   st.classList.add('hasSealed');
+  const title = packTypeTitle(kind);
+  const status = document.getElementById('packStageStatus');
+  if (status) status.textContent = `Выбрано · ${title} · запас не списан`;
+  const subtitle = document.getElementById('packTypeSubtitle');
+  if (subtitle) subtitle.textContent = `${title} · 5 карт в наборе`;
+  sealed.setAttribute('aria-label', `Вскрыть: ${title}`);
+  const top = sealed.querySelector('.psTop'); if (top) top.textContent = kind === 'booster_premium' ? 'MYTHIC' : kind.startsWith('pack_') ? 'FACTION' : 'ECH I';
+  const bottom = sealed.querySelector('.psBot'); if (bottom) bottom.textContent = kind === 'booster_premium' ? 'МИФИЧЕСКИЙ БУСТЕР' : kind.startsWith('pack_') ? (FACTION_RU[kind.slice(5) as Faction] ?? 'БУСТЕР ФРАКЦИИ') : 'ЭХО-ЦИТАДЕЛЬ';
+  const flipAll = document.getElementById('btnPackFlip') as HTMLButtonElement | null;
+  if (flipAll) flipAll.disabled = true;
   sealed.classList.remove('hidden','cracking');
   void sealed.offsetWidth;
   sealed.focus();
@@ -3037,6 +3483,12 @@ function showSealedPack(slots: PackSlotData[], kind: string = 'booster'): void {
 /** Арт пачки в окне вскрытия (v2.23): цепочка /cosm/offers/<kind> → booster → процедурный щиток */
 function setPackArt(img: HTMLImageElement | null, kind: string): void {
   if (!img) return;
+  const inner = img.closest('.packSealedInner') as HTMLElement | null;
+  if (inner) { inner.classList.remove('hasArt'); inner.style.removeProperty('--pack-art'); }
+  const procedural = img.parentElement?.querySelector('.packSealedArt');
+  procedural?.classList.remove('gone');
+  img.classList.remove('artOn');
+  img.style.removeProperty('display');
   const chain = [`/cosm/offers/${kind}?t=${Date.now()}`];
   if (kind !== 'booster') chain.push(`/cosm/offers/booster?t=${Date.now()}`);
   let i = 0;
@@ -3062,18 +3514,89 @@ function setPackArt(img: HTMLImageElement | null, kind: string): void {
 function hideSealedInstant(): void {
   const st = document.getElementById('packStage') as HTMLElement | null;
   const sealed = document.getElementById('packSealed') as HTMLElement | null;
-  if (st) st.classList.remove('hasSealed');
+  if (st) st.classList.remove('hasSealed','opening');
   if (sealed) { sealed.classList.add('hidden'); sealed.classList.remove('cracking'); }
   pendingPack = null;
+  pendingPackKind = null;
+}
+
+function openBoosterPanel(returnFocusTo?: HTMLElement): void {
+  if ($('battle').classList.contains('hidden')) setAppRoute('packs');
+  $('menu').classList.add('hidden');
+  for (const id of ['homeScreen','eventsScreen','decksScreen','collection','shopModal','bpModal','profileModal','campaignModal'])
+    document.getElementById(id)?.classList.add('hidden');
+  const modal = $('boosterModal');
+  if (modal.classList.contains('hidden')) {
+    const active = document.activeElement;
+    boosterReturnFocus = returnFocusTo ?? (active instanceof HTMLElement ? active : null);
+  }
+  $('shopModal').classList.add('hidden');
+  if (!pendingPack && !pendingPackKind) {
+    hideSealedInstant();
+    const row = document.getElementById('packRow');
+    if (row) row.innerHTML = '';
+    const stage = document.getElementById('packStage');
+    stage?.classList.remove('hasResults','hasSealed','opening');
+    const status = document.getElementById('packStageStatus');
+    if (status) status.textContent = 'Выберите бустер слева';
+    const flipAll = document.getElementById('btnPackFlip') as HTMLButtonElement | null;
+    if (flipAll) flipAll.disabled = true;
+  }
+  modal.classList.remove('hidden');
+  renderShards();
+  window.requestAnimationFrame(() => {
+    const first = document.querySelector<HTMLButtonElement>('.boosterInvCard.has-stock');
+    (first ?? document.getElementById('btnPackNew') as HTMLButtonElement | null)?.focus();
+  });
+}
+
+function closeBoosterPanel(renderCards = false): void {
+  const stage = document.getElementById('packStage');
+  if (!pendingPack && stage?.classList.contains('hasResults')) {
+    stage.classList.remove('hasResults','hasSealed','opening');
+    const row = document.getElementById('packRow'); if (row) row.innerHTML = '';
+    const status = document.getElementById('packStageStatus'); if (status) status.textContent = 'Выберите бустер слева';
+    const subtitle = document.getElementById('packTypeSubtitle'); if (subtitle) subtitle.textContent = 'Выберите тип · 5 карт в наборе';
+    pendingPackKind = null;
+    renderShards();
+  }
+  $('boosterModal').classList.add('hidden');
+  if (renderCards) renderCollection();
+  const target = boosterReturnFocus;
+  boosterReturnFocus = null;
+  if (target?.isConnected && !target.closest('.hidden')) target.focus();
+  else document.getElementById('btnBoosters')?.focus();
 }
 
 function revealPack(): void {
-  const slots = pendingPack;
-  if (!slots) return;
+  let slots = pendingPack;
+  if (!slots) {
+    const kind = pendingPackKind;
+    if (!kind) return;
+    if (kind === 'booster' || kind === 'booster_premium') {
+      const available = kind === 'booster' ? (meta.freeOpens ?? 0) : (meta.premOpens ?? 0);
+      if (available <= 0) {
+        showToast('Этот тип бустера закончился — выберите другой');
+        pendingPackKind = null;
+        hideSealedInstant();
+        renderShards();
+        return;
+      }
+      if (kind === 'booster') meta.freeOpens = available - 1;
+      else meta.premOpens = available - 1;
+      metaSave();
+      slots = kind === 'booster_premium' ? drawPremiumBooster() : drawBooster();
+      pendingPack = slots;
+      renderShards();
+    } else {
+      return;
+    }
+  }
   const st = document.getElementById('packStage') as HTMLElement | null;
   const sealed = document.getElementById('packSealed') as HTMLElement | null;
   if (!sealed || !st) { renderPackSlots(slots); pendingPack=null; return; }
   if (sealed.classList.contains('cracking')) return;
+  st.classList.add('opening');
   sealed.classList.add('cracking');
   // вспышка под пачкой + ударные волны от разрыва (MTG)
   const burst = document.createElement('div');
@@ -3093,7 +3616,7 @@ function revealPack(): void {
   window.setTimeout(() => {
     sealed.classList.add('hidden');
     sealed.classList.remove('cracking');
-    st.classList.remove('hasSealed');
+    st.classList.remove('hasSealed','opening');
     renderPackSlots(slots);
     pendingPack = null;
   }, 560);
@@ -3101,14 +3624,8 @@ function revealPack(): void {
 
 // ── объёмные объекты как в MTG: наклон от мыши + блик (рубашки, фоны, бустеры — art_raw вставишь сам) ──
 function attachVolumetric(root: ParentNode = document): void {
-  const els = (root as Element).querySelectorAll?.('.packOffer, .ofCard, .bpTile, .packSealedInner, .cardback, .packSlot .back, .packSlot .face .card, .ofArt') ?? [];
-  // fallback for document root
-  const list: HTMLElement[] = [];
-  if ((root as Element).querySelectorAll) {
-    (root as Element).querySelectorAll('.packOffer, .ofCard, .bpTile, .packSealedInner, .cardback, .packSlot .back, .packSlot .face .card, .ofArt').forEach(n=>list.push(n as HTMLElement));
-  } else {
-    document.querySelectorAll('.packOffer, .ofCard, .bpTile, .packSealedInner, .cardback, .packSlot .back, .packSlot .face .card, .ofArt').forEach(n=>list.push(n as HTMLElement));
-  }
+  const selector = '.boosterInvCard, .packOffer, .ofCard, .bpTile, .packSealedInner, .cardback, .packSlot .back, .packSlot .face .card, .ofArt';
+  const list = Array.from(root.querySelectorAll<HTMLElement>(selector));
   list.forEach(el => {
     if ((el as HTMLElement).dataset.volAttached) return;
     (el as HTMLElement).dataset.volAttached = '1';
@@ -3144,6 +3661,14 @@ function attachVolumetric(root: ParentNode = document): void {
 function renderPackSlots(slots: PackSlotData[]): void {
   const row = $('packRow');
   if (!row) return;
+  const stage = document.getElementById('packStage');
+  if (stage) { stage.classList.remove('hasSealed','opening'); stage.classList.add('hasResults'); }
+  const status = document.getElementById('packStageStatus');
+  if (status) status.textContent = slots.some(slot => slot.borderless)
+    ? '◇ Borderless-вариант получен · косметика, правила карты не меняются'
+    : 'Карты вскрыты · нажмите на каждую, чтобы перевернуть';
+  const flipAll = document.getElementById('btnPackFlip') as HTMLButtonElement | null;
+  if (flipAll) flipAll.disabled = slots.length === 0;
   row.innerHTML = '';
   // MTG-анимация: тряска при вскрытии
   row.classList.remove('crack'); void (row as HTMLElement).offsetWidth; row.classList.add('crack');
@@ -3172,8 +3697,10 @@ function renderPackSlots(slots: PackSlotData[]): void {
       }
     }
     const face = slot.querySelector('.face') as HTMLElement;
-    face.appendChild(renderCard(sl.card));
-    if (sl.converted > 0) face.appendChild(el('div', 'convNote', `дубликат → ◈${sl.converted}`));
+    if (sl.borderless) slot.classList.add('borderlessBonusSlot');
+    // Никаких дополнительных надписей на лице: тот же арт/текст, только Borderless-рамка снята.
+    face.appendChild(renderCard(sl.card, sl.borderless ? 'borderless' : 'auto'));
+    if (sl.converted > 0) face.appendChild(el('div', 'convNote', `дубликат → 🪙${sl.converted}`));
     if (sl.foil) face.appendChild(el('div', 'foilNote', '✦ фойл'));
     const doFlip = (): void => {
       if (slot.classList.contains('flip')) return;
@@ -3204,37 +3731,65 @@ function renderPackSlots(slots: PackSlotData[]): void {
   }
   try { attachVolumetric(row); } catch {}
 }
-function newPack(): boolean {
-  const row = $('packRow');
-  if (!row) return false;
-  if ((meta.freeOpens ?? 0) > 0) { meta.freeOpens = (meta.freeOpens ?? 0) - 1; metaSave(); }
-  else {
-    if (shardsGet() < PACK_PRICE) return false;
-    shardsAdd(-PACK_PRICE);
+function selectStoredBooster(kind: 'booster' | 'booster_premium'): boolean {
+  if (pendingPack || document.getElementById('packStage')?.classList.contains('hasResults')) {
+    showToast('Тип бустера нельзя менять после вскрытия карт'); return false;
   }
-  const slots = drawBooster();
-  renderShards();
-  showSealedPack(slots, 'booster');
+  const available = kind === 'booster' ? (meta.freeOpens ?? 0) : (meta.premOpens ?? 0);
+  if (available <= 0) { showToast('Этого типа бустера нет в запасе'); return false; }
+  if (pendingPackKind === kind && document.getElementById('packStage')?.classList.contains('hasSealed')) return true;
+  showSealedPack(null, kind);
+  renderPackInventory();
   return true;
 }
+function newPack(): boolean { return selectStoredBooster('booster'); }
 /** Премиум-бустер (награда пропуска 15 ур.; решение пользователя «редкий бустер»):
  *  5 карт = 2 обычных + 1 редкая + 2 эпических+, каждая с шансом 12.5% стать легендарной. */
 function drawPremiumBooster(): PackSlotData[] {
   const ep = (): Rarity => (Math.random() < 0.125 ? Rarity.Legendary : Rarity.Epic);
   return drawBooster(undefined, [Rarity.Common, Rarity.Common, Rarity.Rare, ep(), ep()]);
 }
-function newPremPack(): boolean {
-  const row = $('packRow');
-  if (!row || (meta.premOpens ?? 0) <= 0) return false;
-  meta.premOpens = (meta.premOpens ?? 0) - 1; metaSave();
-  const slots = drawPremiumBooster();
-  renderShards();
-  showSealedPack(slots, 'booster_premium');
-  return true;
+function newPremPack(): boolean { return selectStoredBooster('booster_premium'); }
+function renderPackInventory(): void {
+  const host = document.getElementById('boosterInventory');
+  if (!host) return;
+  const standard = Math.max(0, Number(meta.freeOpens ?? 0) || 0);
+  const premium = Math.max(0, Number(meta.premOpens ?? 0) || 0);
+  const packs = [
+    { kind: 'standard', packKind: 'booster', art: 'booster', title: 'Бустер «Эхо-Цитадель»', sub: '5 карт · 0,1% шанс на Borderless-бонус', count: standard, mark: 'ECH I', sigil: '✦' },
+    { kind: 'premium', packKind: 'booster_premium', art: 'booster_premium', title: 'Мифический бустер', sub: '5 карт · 0,1% шанс на Borderless-бонус', count: premium, mark: 'MYTHIC', sigil: '✦' },
+  ];
+  const total = standard + premium;
+  const packStage = document.getElementById('packStage');
+  const selectionLocked = !!pendingPack || !!packStage?.classList.contains('opening') || !!packStage?.classList.contains('hasResults');
+  const totalNode = document.getElementById('boosterCountTotal');
+  if (totalNode) totalNode.textContent = String(total);
+  host.innerHTML = packs.map(p => `<button type="button" class="boosterInvCard${p.count > 0 ? ' has-stock' : ''}${pendingPackKind === p.packKind ? ' selected' : ''}" data-pack="${p.kind}" ${p.count <= 0 || selectionLocked ? 'disabled' : ''}
+      aria-pressed="${pendingPackKind === p.packKind}" aria-label="${selectionLocked ? 'Сначала закройте просмотр уже вскрытых карт' : p.count > 0 ? `Выбрать ${p.title}, в запасе ${p.count}; списание при вскрытии` : `${p.title}, нет в запасе`}">
+      <span class="boosterInvVisual">
+        <span class="boosterInvFallback" aria-hidden="true"><b>${p.sigil}</b><small>${p.mark}</small></span>
+        ${cosmImg('offers', p.art, 'boosterInvArt')}
+        <span class="boosterInvCount">×${p.count}</span>
+      </span>
+      <span class="boosterInvCopy"><strong>${p.title}</strong><small>${p.sub}</small>
+        <span class="boosterInvOpen">${p.count > 0 ? (pendingPackKind === p.packKind ? 'Выбрано · нажмите пачку для вскрытия' : 'Выбрать · запас спишется при вскрытии →') : 'Нет в запасе'}</span></span>
+    </button>`).join('');
+  host.querySelectorAll<HTMLImageElement>('.boosterInvArt').forEach(img => {
+    const markArt = (): void => img.closest('.boosterInvVisual')?.classList.add('hasArt');
+    img.addEventListener('load', markArt, { once: true });
+    if (img.complete && img.naturalWidth > 0) markArt();
+  });
+  host.querySelectorAll<HTMLButtonElement>('.boosterInvCard').forEach(button => {
+    button.addEventListener('click', () => {
+      if (button.dataset.pack === 'standard') newPack();
+      else if (button.dataset.pack === 'premium') newPremPack();
+    });
+  });
+  try { attachVolumetric(host); } catch {}
 }
-/** Бустер конкретной фракции: пул — только карты расширения этой фракции. */
+/** Бустер фракции использует весь набор карт этой фракции, кроме Neutral как отдельного пула. */
 function drawFactionPack(fac: string): PackSlotData[] {
-  const all = [...db.values()].filter(c => isExpansionId(c.id));
+  const all = [...db.values()];
   let pool = all.filter(c => c.faction === fac);
   if (pool.length < 8) pool = all;
   const comp: Rarity[] = [Rarity.Common, Rarity.Common, Rarity.Common, Rarity.Rare,
@@ -3254,6 +3809,8 @@ function drawFactionPack(fac: string): PackSlotData[] {
     if (converted > 0) shardsAdd(converted);
     out.push({ card: c, foil, converted });
   });
+  const bonus = maybeBorderlessPackBonus();
+  if (bonus) out.push({ card: bonus, foil: false, converted: 0, borderless: true, bonus: true });
   meta.packs += 1; questBump('pack'); checkAchs(); metaSave();
   return out;
 }
@@ -3263,20 +3820,21 @@ function craftCard(id: string): string {
   const have = ownedCount(id);
   const cost = CRAFT_COST[c.rarity] ?? 100;
   if (have >= PLAYSET) return 'Достигнут предел 4 копий';
-  if (shardsGet() < cost) return `Нужно ◈${cost}`;
+  if (shardsGet() < cost) return `Нужно ${cost} монет`;
   shardsAdd(-cost);
   owned.set(id, have + 1); ownedSave(); renderShards();
-  return `Создано за ◈${cost}`;
+  return `Создано за ${cost} монет`;
 }
-function dustCard(id: string): string {
+function disenchantCard(id: string): string {
   const c = db.get(id);
   if (!c) return 'Карта не найдена';
   const have = ownedCount(id);
-  const min = isExpansionId(id) ? 0 : 1;          // база всегда остаётся открытой
-  if (have <= min) return min === 1 ? 'Базовую карту разобрать нельзя' : 'Нет копий';
+  const min = STARTER_CARD_IDS.has(id) ? 1 : 0; // оставить одну копию из бесплатного стартового набора
+  if (have <= min) return min === 1 ? 'Последнюю стартовую копию нельзя разобрать' : 'Нет копий';
   owned.set(id, have - 1); ownedSave();
-  shardsAdd(DUST_GAIN[c.rarity] ?? 20); renderShards();
-  return `Разобрано: +◈${DUST_GAIN[c.rarity] ?? 20}`;
+  const coins = DISENCHANT_COINS[c.rarity] ?? 20;
+  shardsAdd(coins); renderShards();
+  return `Разобрано: +${coins} монет`;
 }
 
 function renderShards(): void {
@@ -3284,16 +3842,18 @@ function renderShards(): void {
   if (b) b.textContent = String(shardsGet());
   const g = $('gemBal');
   if (g) g.textContent = String(gemsGet());
-  const bb = $('btnPackNew');
-  if (bb) {
-    (bb as HTMLButtonElement).disabled = shardsGet() < PACK_PRICE && (meta.freeOpens ?? 0) <= 0;
-    (bb as HTMLButtonElement).textContent = (meta.freeOpens ?? 0) > 0
-      ? `Открыть бустер (бесплатных: ${meta.freeOpens})` : `Открыть бустер · ◈${PACK_PRICE}`;
-  }
-  const bpr = $('btnPackPrem');
+  const boosterShards = document.getElementById('boosterShardBal');
+  if (boosterShards) boosterShards.textContent = String(shardsGet());
+  const boosterGems = document.getElementById('boosterGemBal');
+  if (boosterGems) boosterGems.textContent = String(gemsGet());
+  renderPackInventory();
+  const bb = $('btnPackNew') as HTMLButtonElement | null;
+  if (bb) { bb.disabled = false; bb.textContent = 'Магазин бустеров'; bb.title = 'Перейти к наборам и купить бустеры'; }
+  const bpr = $('btnPackPrem') as HTMLButtonElement | null;
   if (bpr) {
-    (bpr as HTMLButtonElement).disabled = (meta.premOpens ?? 0) <= 0;
-    (bpr as HTMLButtonElement).textContent = `🌟 Премиум-бустер (в запасе: ${meta.premOpens ?? 0})`;
+    const stage = document.getElementById('packStage');
+    bpr.disabled = (meta.premOpens ?? 0) <= 0 || !!pendingPack || !!stage?.classList.contains('opening') || !!stage?.classList.contains('hasResults');
+    bpr.textContent = `🌟 Премиум-бустер · ×${meta.premOpens ?? 0}`;
   }
   const bc = $('btnCollection');
   if (bc) {
@@ -3315,6 +3875,8 @@ function seasonDaysLeft(): number {
 function pickFaction(f: Faction): void {
   const changed = f !== picked;
   picked = f;
+  menuSelectedDeckId = starterDeckForFaction(f)?.id ?? f;
+  saveMenuDeck();
   savePicked();
   Sfx.uiClick();
   if (changed) Sfx.whoosh();
@@ -3346,16 +3908,38 @@ if (_origRenderShards) {
   // monkey patch after definition; we will redefine renderShards wrapper later
 }
 
-function getAllDecksForGrid(): Array<{id:string; name:string; faction:string; cards:string[]; updated:number; isPrecon:boolean}> {
-  const customs = loadCustomDecks() as any[];
-  const all: any[] = [];
-  for (const d of deckList as any[]) {
-    all.push({ id: d.id, name: d.name, faction: d.faction, cards: d.cards.slice(), updated: 0, isPrecon: true });
+function getAllDecksForGrid(): Array<{ id: string; name: string; faction: string; cards: string[]; format?: string; avatarCardId?: string; updated: number; isPrecon: boolean }> {
+  const all: Array<{ id: string; name: string; faction: string; cards: string[]; format?: string; avatarCardId?: string; updated: number; isPrecon: boolean }> = [];
+  for (const d of deckList) {
+    if (d.id === 'Starter') continue; // служебная смешанная колода не является выбором игрока
+    all.push({ id: d.id, name: d.name, faction: d.faction, cards: d.cards.slice(), format: d.format, updated: 0, isPrecon: true });
   }
-  for (const c of customs) {
-    all.push({ id: c.id, name: c.name, faction: c.faction, cards: c.cards.slice(), updated: c.updated ?? 0, isPrecon: false });
+  for (const c of loadCustomDecks()) {
+    all.push({
+      id: c.id, name: c.name, faction: c.faction, cards: c.cards.slice(),
+      avatarCardId: c.avatarCardId, updated: c.updated ?? 0, isPrecon: false,
+    });
   }
   return all;
+}
+
+/** Для обложки выбираем выразительную карту: сначала редкость, затем существо и стоимость. */
+function deckArtCards(cardIds: string[]): CardData[] {
+  const rarityRank: Record<string, number> = {
+    [Rarity.Legendary]: 4, [Rarity.Epic]: 3, [Rarity.Rare]: 2, [Rarity.Uncommon]: 1, [Rarity.Common]: 0,
+  };
+  return [...new Set(cardIds)]
+    .map(id => db.get(id))
+    .filter((card): card is CardData => !!card)
+    .sort((a, b) =>
+      (rarityRank[b.rarity] ?? 0) - (rarityRank[a.rarity] ?? 0)
+      || Number(b.type === CardType.Creature) - Number(a.type === CardType.Creature)
+      || b.cost - a.cost
+      || cardName(a).localeCompare(cardName(b), 'ru'));
+}
+
+function suggestedDeckArt(cardIds: string[]): CardData | undefined {
+  return deckArtCards(cardIds)[0];
 }
 
 function deckColorIcon(faction: string): string {
@@ -3406,18 +3990,19 @@ function renderDeckGrid(): void {
   }
   grid.innerHTML = '';
   // addBox first
-  const addBox = document.createElement('div');
+  const addBox = document.createElement('button');
+  addBox.type = 'button';
   addBox.className = 'deckBox addBox';
   addBox.title = 'Создать новую колоду';
+  addBox.setAttribute('aria-label', 'Создать новую колоду');
   addBox.innerHTML = `<div class="deckAddIcon">+</div><div class="deckAddLabel">Новая колода</div>`;
   addBox.addEventListener('click', () => {
     Sfx.uiClick();
     // create new deck flow: open builder with new editing
     const fac = (document.getElementById('dbFaction') as HTMLSelectElement | null)?.value as Faction || picked as Faction;
-    editing = { id: null, name: '', faction: fac, counts: new Map() };
+    editing = newEditing(fac);
     // open collection builder
-    closeDecksScreen();
-    $('collection').classList.remove('hidden');
+    openCollectionScreen();
     // switch to builder tab
     const tabB = document.getElementById('tabBuilder') as HTMLButtonElement | null;
     if (tabB) tabB.click();
@@ -3432,15 +4017,33 @@ function renderDeckGrid(): void {
     const box = document.createElement('div');
     box.className = 'deckBox' + (isSel ? ' sel' : '');
     box.dataset.deckId = d.id;
-    // art: try first card image, else hero
-    const firstId = d.cards[0];
-    const firstCard = firstId ? db.get(firstId) : null;
-    const artFaction = firstCard?.faction ?? d.faction;
-    const artId = firstCard?.id ?? d.id;
-    // Use card art
+    box.tabIndex = 0;
+    box.setAttribute('role', 'group');
+    box.setAttribute('aria-label', `Колода «${d.name}», ${FACTION_RU[d.faction as Faction] ?? d.faction}, ${d.cards.length} карт. Нажмите Enter, чтобы выбрать.`);
+    // Для пользовательской колоды используем выбранную карту; для старых колод
+    // подбираем выразительную обложку автоматически. Пути img/decks/<id>.png для
+    // ручных артов преконструктов сохраняются, а card-art служит их резервом.
+    const firstCard = d.cards[0] ? db.get(d.cards[0]) : null;
+    const chosenAvatar = d.avatarCardId && d.cards.includes(d.avatarCardId) ? db.get(d.avatarCardId) : null;
+    const suggestedAvatar = suggestedDeckArt(d.cards) ?? firstCard ?? null;
+    const avatarCard = chosenAvatar ?? (!d.isPrecon ? suggestedAvatar : null);
+    const artCard = avatarCard ?? suggestedAvatar;
+    const artFaction = artCard?.faction ?? d.faction;
+    const artId = artCard?.id ?? d.id;
+    const cardArtUrl = `/art/${encodeURIComponent(artFaction)}/${encodeURIComponent(artId)}.png`;
     const fallbackSig = FACTION_SIGIL[d.faction as Faction] ?? '✦';
     const deckArtUrl = `img/decks/${encodeURIComponent(d.id)}.png`;
-    const artHtml = `<img src="${deckArtUrl}" alt="" loading="lazy" onerror="this.style.display='none'"><img src="/art/${encodeURIComponent(artFaction)}/${encodeURIComponent(artId)}.png" alt="" loading="lazy" style="display:none" onerror="this.previousElementSibling && (this.previousElementSibling.style.display='none'); this.style.display='block'; this.style.mixBlendMode='normal'; this.style.opacity='1'">`;
+    const artHtml = avatarCard
+      ? `<img class="deckAvatarImg" src="${cardArtUrl}" alt="" loading="lazy" decoding="async" onerror="this.style.display='none'">`
+      : `<img class="deckPresetArt" src="${deckArtUrl}" alt="" loading="lazy" decoding="async" onerror="this.style.display='none';if(this.nextElementSibling)this.nextElementSibling.style.display='block'"><img class="deckCardArtFallback" src="${cardArtUrl}" alt="" loading="lazy" decoding="async" style="display:none" onerror="this.style.display='none'">`;
+    const avatarTag = avatarCard
+      ? `<span class="deckAvatarTag" title="Обложка: ${esc(cardName(avatarCard))}">🎴 ${esc(cardName(avatarCard))}</span>`
+      : '';
+    const artEdit = !d.isPrecon
+      ? `<button class="deckArtEdit" type="button" title="Выбрать арт из карт этой колоды" aria-label="Выбрать арт для колоды «${esc(d.name)}»" data-deck-art-edit="${esc(d.id)}"><span aria-hidden="true">✦</span> Изменить арт</button>`
+      : '';
+    box.dataset.avatarCardId = avatarCard?.id ?? '';
+    box.title = avatarCard ? `${d.name} · обложка: ${cardName(avatarCard)}` : d.name;
     const deckArtClass = `deckArt f-${d.faction}`;
     // deck colors: show faction icon(s) — for now single faction + minor splashes?
     // compute secondary factions from cards
@@ -3453,10 +4056,11 @@ function renderDeckGrid(): void {
     }
     const colorsHtml = Array.from(facSet).slice(0,3).map(f=> deckColorIcon(f)).join('');
     box.innerHTML = `
-      <div class="${deckArtClass}">${artHtml}<span class="deckArtFallback">${fallbackSig}</span></div>
+      <div class="${deckArtClass}">${artHtml}<span class="deckArtFallback" aria-hidden="true">${fallbackSig}</span>${avatarTag}</div>
       <div class="deckLabel">
-        <div class="deckColors">${colorsHtml}</div>
-        <div class="deckName" title="${d.name}">${d.name}</div>
+        <div class="deckName" title="${esc(d.name)}">${esc(d.name)}</div>
+        <div class="deckMeta"><div class="deckColors">${colorsHtml}</div><span class="deckCount">${d.format === STARTER_DECK_FORMAT ? 'Стартовая · 30 карт' : `${d.cards.length} карт`}</span></div>
+        ${artEdit}
       </div>
       <span class="selCheck">✓</span>
     `;
@@ -3465,6 +4069,21 @@ function renderDeckGrid(): void {
       decksSelectedId = d.id;
       renderDeckGrid();
       updateDecksFooter();
+    });
+    box.addEventListener('keydown', ev => {
+      if (ev.target !== box || (ev.key !== 'Enter' && ev.key !== ' ')) return;
+      ev.preventDefault(); box.click();
+    });
+    const artButton = box.querySelector('.deckArtEdit') as HTMLButtonElement | null;
+    artButton?.addEventListener('click', ev => {
+      ev.preventDefault(); ev.stopPropagation();
+      Sfx.uiClick();
+      decksSelectedId = d.id;
+      document.querySelectorAll<HTMLElement>('#deckGrid .deckBox[data-deck-id]').forEach(tile => {
+        tile.classList.toggle('sel', tile.dataset.deckId === d.id);
+      });
+      updateDecksFooter();
+      openSavedDeckArtPicker(d.id);
     });
     box.addEventListener('dblclick', () => {
       decksSelectedId = d.id;
@@ -3484,16 +4103,172 @@ function renderDeckGrid(): void {
   syncTopWallet();
 }
 
+let deckArtReturnFocus: HTMLElement | null = null;
+let deckArtReturnDeckId: string | null = null;
+
+function closeDeckArtPicker(): void {
+  const modal = document.getElementById('deckArtPickerModal');
+  modal?.classList.add('hidden');
+  const focus = deckArtReturnFocus;
+  const deckId = deckArtReturnDeckId;
+  deckArtReturnFocus = null;
+  deckArtReturnDeckId = null;
+  if (focus?.isConnected) focus.focus();
+  else if (deckId) {
+    const replacement = [...document.querySelectorAll<HTMLButtonElement>('.deckArtEdit')]
+      .find(button => button.dataset.deckArtEdit === deckId);
+    replacement?.focus();
+  }
+}
+
+function renderDeckArtPicker(
+  cardIds: string[], selectedId: string | null, deckName: string,
+  onPick: (card: CardData) => void, returnDeckId: string | null,
+): void {
+  const modal = document.getElementById('deckArtPickerModal');
+  const grid = document.getElementById('deckArtPickerGrid');
+  const title = document.getElementById('deckArtPickerTitle');
+  const hint = document.getElementById('deckArtPickerHint');
+  if (!modal || !grid || !title || !hint) return;
+
+  deckArtReturnFocus = document.activeElement as HTMLElement | null;
+  deckArtReturnDeckId = returnDeckId;
+  title.textContent = 'Выберите арт колоды';
+  hint.textContent = `${deckName ? `«${deckName}» · ` : ''}Выберите карту из состава. Арт будет показан целиком, без обрезки.`;
+  grid.replaceChildren();
+
+  const options = deckArtCards(cardIds);
+  if (!options.length) {
+    const empty = el('div', 'deckArtPickerEmpty');
+    empty.textContent = 'Добавьте карты в колоду, чтобы выбрать обложку.';
+    grid.appendChild(empty);
+  }
+  for (const card of options) {
+    const choice = document.createElement('button');
+    choice.type = 'button';
+    choice.className = 'deckArtChoice' + (card.id === selectedId ? ' isSelected' : '');
+    choice.dataset.cardId = card.id;
+    choice.setAttribute('aria-pressed', card.id === selectedId ? 'true' : 'false');
+    choice.setAttribute('aria-label', `Выбрать арт карты «${cardName(card)}»`);
+    choice.title = cardName(card);
+
+    const media = el('span', 'deckArtChoiceMedia');
+    media.setAttribute('aria-hidden', 'true');
+    const fallback = el('span', 'deckArtChoiceFallback', FACTION_SIGIL[card.faction] ?? '◇');
+    media.appendChild(fallback);
+    const image = document.createElement('img');
+    image.src = `/art/${encodeURIComponent(card.faction)}/${encodeURIComponent(card.id)}.png`;
+    image.alt = '';
+    image.loading = 'lazy';
+    image.decoding = 'async';
+    image.onerror = () => image.remove();
+    media.appendChild(image);
+
+    const info = el('span', 'deckArtChoiceInfo');
+    const name = el('span', 'deckArtChoiceName');
+    name.textContent = cardName(card);
+    const detail = el('span', 'deckArtChoiceDetail');
+    detail.textContent = `${RARITY_RU[card.rarity] ?? card.rarity} · ${card.cost} маны`;
+    const selected = el('span', 'deckArtChoiceSelected', '✓ На обложке');
+    info.append(name, detail, selected);
+    choice.append(media, info);
+    choice.addEventListener('click', () => { onPick(card); closeDeckArtPicker(); });
+    grid.appendChild(choice);
+  }
+  modal.classList.remove('hidden');
+  (document.getElementById('btnDeckArtPickerClose') as HTMLButtonElement | null)?.focus();
+}
+
+function openSavedDeckArtPicker(deckId: string): void {
+  const deck = loadCustomDecks().find(item => item.id === deckId);
+  if (!deck) { showToast('Сохранённая колода не найдена'); return; }
+  const current = deck.avatarCardId && deck.cards.includes(deck.avatarCardId)
+    ? deck.avatarCardId : suggestedDeckArt(deck.cards)?.id ?? null;
+  renderDeckArtPicker(deck.cards, current, deck.name, card => {
+    const latest = loadCustomDecks().find(item => item.id === deckId);
+    if (!latest || !latest.cards.includes(card.id)) { showToast('Карта больше не входит в эту колоду'); return; }
+    upsertCustomDeck({ ...latest, avatarCardId: card.id, updated: Date.now() });
+    renderDeckGrid();
+    showToast(`Обложка «${cardName(card)}» сохранена`);
+  }, deckId);
+}
+
+function openEditorDeckArtPicker(): void {
+  if (!editing) return;
+  renderDeckArtPicker(editingCards(), editing.avatarCardId, editing.name, card => {
+    if (!editing?.counts.has(card.id)) return;
+    editing.avatarCardId = card.id;
+    const avatarSelect = document.getElementById('dbAvatarCard') as HTMLSelectElement | null;
+    if (avatarSelect) avatarSelect.value = card.id;
+    renderDeckAvatarPreview();
+  }, null);
+}
+
+function deckPlayProblem(deck: DeckLike): string | null {
+  const minimum = isStarterDeckId(deck.id) ? 30 : 60;
+  const sizeCheck = validateDeckSize(deck.cards, dbLookup, minimum);
+  if (!sizeCheck.ok) return sizeCheck.problems[0] ?? 'колода не собрана';
+  if (!isStarterDeckId(deck.id)) {
+    if (!deckById.has(deck.id)) {
+      const factionCheck = validateDeck(deck.cards, deck.faction, dbLookup);
+      if (!factionCheck.ok) return factionCheck.problems[0] ?? 'состав колоды некорректен';
+    }
+    const counts = new Map<string, number>();
+    for (const id of deck.cards) counts.set(id, (counts.get(id) ?? 0) + 1);
+    for (const [id, count] of counts) {
+      const have = ownedCount(id);
+      if (count > have) return `«${dbLookup(id)?.name ?? id}»: в коллекции ${have} из ${count} нужных копий`;
+    }
+  }
+  return null;
+}
+
+function launchDeckForBattle(deckId: string): boolean {
+  const deck = resolveDeck(deckId, deckList as unknown as DeckLike[]);
+  if (!deck) { showToast('Колода не найдена'); return false; }
+  const problem = deckPlayProblem(deck);
+  if (problem) { showToast(`Нельзя начать бой: ${problem}`); return false; }
+
+  // Фракция пользовательской колоды определяет пассивку и сторону игрока.
+  if (FACTION_IDS.includes(deck.faction as Faction)) picked = deck.faction as Faction;
+  menuSelectedDeckId = deck.id;
+  saveMenuDeck();
+  savePicked();
+  buildMenu();
+  sel('deckPick').value = deck.id;
+  updatePlayGate();
+  if (btn('btnPlay').disabled) {
+    showToast(btn('btnPlay').title || 'Эта колода пока недоступна');
+    return false;
+  }
+  const enemySelect = sel('enemyFaction');
+  if (enemySelect.value === picked) {
+    enemySelect.value = FACTION_IDS.find(f => f !== picked) ?? '__random';
+  }
+  battle.playerDeckId = deck.id;
+  battle.playerFaction = picked;
+  battle.launchMode = 'menu';
+  openHomeScreen();
+  btn('btnPlay').click();
+  return true;
+}
+
 function updateDecksFooter(): void {
   const selId = decksSelectedId;
   const sel = selId ? getAllDecksForGrid().find(d=> d.id===selId) : null;
   const info = document.getElementById('decksSelInfo') as HTMLElement | null;
   const btnEdit = document.getElementById('btnDecksEdit') as HTMLButtonElement | null;
+  const btnPlayDeck = document.getElementById('btnDecksPlay') as HTMLButtonElement | null;
   const btnExp = document.getElementById('btnDecksExport') as HTMLButtonElement | null;
   const btnClone = document.getElementById('btnDecksClone') as HTMLButtonElement | null;
   const btnDel = document.getElementById('btnDecksDelete') as HTMLButtonElement | null;
   if (info) info.textContent = sel ? `${sel.name} · ${FACTION_RU[sel.faction as Faction] ?? sel.faction} · ${sel.cards.length} карт` : 'Выберите колоду';
   if (btnEdit) btnEdit.disabled = !sel;
+  if (btnPlayDeck) {
+    const problem = sel ? deckPlayProblem(sel) : null;
+    btnPlayDeck.disabled = !sel || !!problem;
+    btnPlayDeck.title = problem ? `Нельзя начать бой: ${problem}` : 'Начать бой выбранной колодой';
+  }
   if (btnExp) btnExp.disabled = !sel;
   if (btnClone) btnClone.disabled = !sel;
   if (btnDel) {
@@ -3504,11 +4279,18 @@ function updateDecksFooter(): void {
   // also update deckPick main menu
   if (sel) {
     const dp = document.getElementById('deckPick') as HTMLSelectElement | null;
-    if (dp) dp.value = sel.id;
+    if (dp) {
+      dp.value = sel.id;
+      updatePlayGate();
+    }
   }
 }
 
 function openDecksScreen(): void {
+  setAppRoute('decks');
+  $('menu').classList.add('hidden');
+  $('homeScreen')?.classList.add('hidden');
+  $('eventsScreen')?.classList.add('hidden');
   Sfx.uiClick();
   // hide other modals
   $('collection').classList.add('hidden');
@@ -3516,6 +4298,7 @@ function openDecksScreen(): void {
   $('bpModal').classList.add('hidden');
   $('profileModal').classList.add('hidden');
   $('campaignModal').classList.add('hidden');
+  $('boosterModal').classList.add('hidden');
   const ds = document.getElementById('decksScreen') as HTMLElement | null;
   if (ds) ds.classList.remove('hidden');
   // update top tabs
@@ -3595,23 +4378,29 @@ document.getElementById('decksFormat')?.addEventListener('change', (ev)=>{
   decksFormat = (ev.target as HTMLSelectElement).value;
   renderDeckGrid();
 });
-document.querySelectorAll('#decksColorFilters .colorDot').forEach(el=>{
-  (el as HTMLElement).addEventListener('click', ()=>{
-    (el as HTMLElement).classList.toggle('on');
+document.querySelectorAll<HTMLButtonElement>('#decksColorFilters .colorDot').forEach(el=>{
+  el.addEventListener('click', () => {
+    const on = el.classList.toggle('on');
+    el.setAttribute('aria-pressed', String(on));
     renderDeckGrid();
   });
 });
 
+// Deck-art picker: close on button or backdrop click; keyboard focus returns to the opener.
+document.getElementById('btnDeckArtPickerClose')?.addEventListener('click', closeDeckArtPicker);
+document.getElementById('btnDeckArtPickerDone')?.addEventListener('click', closeDeckArtPicker);
+document.getElementById('deckArtPickerModal')?.addEventListener('click', ev => {
+  if (ev.target === document.getElementById('deckArtPickerModal')) closeDeckArtPicker();
+});
+
 // decks footer buttons
-document.getElementById('btnDecksClose')?.addEventListener('click', ()=>{ Sfx.uiClick(); closeDecksScreen(); });
+document.getElementById('btnDecksClose')?.addEventListener('click', ()=>{ Sfx.uiClick(); navigateApp('back'); });
+document.getElementById('btnDecksPlay')?.addEventListener('click', ()=>{
+  if (decksSelectedId) launchDeckForBattle(decksSelectedId);
+});
 document.getElementById('btnDecksCollection')?.addEventListener('click', ()=>{
   Sfx.uiClick();
-  closeDecksScreen();
-  $('collection').classList.remove('hidden');
-  // ensure collection tab
-  const tabC = document.getElementById('tabCollection') as HTMLElement | null;
-  if (tabC) tabC.click();
-  renderCollection();
+  openCollectionScreen();
 });
 document.getElementById('btnDecksImport')?.addEventListener('click', ()=>{
   Sfx.uiClick();
@@ -3620,13 +4409,13 @@ document.getElementById('btnDecksImport')?.addEventListener('click', ()=>{
   try {
     const ids = window.atob(code.trim()).split(',').filter(Boolean);
     const fac = db.get(ids[0])?.faction ?? 'Aurites';
-    const check = validateDeck(ids, fac as Faction, (id=>db.get(id)) as any);
+    const check = validateDeck(ids, fac as Faction, ((id: string) => db.get(id)) as any);
     if (!check.ok) { showToast(`Импорт: ${check.problems.slice(0,2).join('; ')}`); return; }
     // check owned
     const unowned = ids.filter(id=> ownedCount(id)===0);
     if (unowned.length) { showToast(`Не получены карты (${unowned.length}) — сначала бустеры/крафт`); return; }
     const newId = `custom-${Date.now().toString(36)}`;
-    const deck = { id: newId, name: `Импорт ${new Date().toLocaleDateString('ru-RU')}`, faction: fac, cards: ids, updated: Date.now() } as any;
+    const deck = { id: newId, name: `Импорт ${new Date().toLocaleDateString('ru-RU')}`, faction: fac, cards: ids, avatarCardId: suggestedDeckArt(ids)?.id ?? ids[0], updated: Date.now() } as any;
     upsertCustomDeck(deck);
     decksSelectedId = newId;
     renderDeckGrid();
@@ -3648,7 +4437,7 @@ document.getElementById('btnDecksClone')?.addEventListener('click', ()=>{
   const src = getAllDecksForGrid().find(x=> x.id===decksSelectedId);
   if (!src) return;
   const newId = `custom-${Date.now().toString(36)}`;
-  const copy = { id: newId, name: `${src.name} (копия)`, faction: src.faction, cards: src.cards.slice(), updated: Date.now() } as any;
+  const copy = { id: newId, name: `${src.name} (копия)`, faction: src.faction, cards: src.cards.slice(), avatarCardId: src.avatarCardId ?? suggestedDeckArt(src.cards)?.id ?? src.cards[0], updated: Date.now() } as any;
   upsertCustomDeck(copy);
   decksSelectedId = newId;
   renderDeckGrid();
@@ -3671,9 +4460,14 @@ document.getElementById('btnDecksEdit')?.addEventListener('click', ()=>{
   // open builder with this deck
   const counts = new Map<string,number>();
   for (const id of sel.cards) counts.set(id, (counts.get(id)??0)+1);
-  editing = { id: sel.isPrecon ? null : sel.id, name: sel.name, faction: sel.faction as Faction, counts };
-  closeDecksScreen();
-  $('collection').classList.remove('hidden');
+  editing = {
+    id: sel.isPrecon ? null : sel.id,
+    name: sel.name,
+    faction: sel.faction as Faction,
+    counts,
+    avatarCardId: sel.avatarCardId ?? null,
+  };
+  openCollectionScreen();
   const tabB = document.getElementById('tabBuilder') as HTMLElement | null;
   if (tabB) tabB.click();
   // ensure deck faction selected
@@ -3696,8 +4490,18 @@ setInterval(syncTopWallet, 1500);
 
 /* ── PATCH v2.14.0: Home + Events + Store Featured (скрины 3,4,5,8) ── */
 function openHomeScreen(): void {
+  if (!$('battle').classList.contains('hidden')) {
+    battle.tutCleanup();
+    battle.stop();
+    $('battle').classList.add('hidden');
+  }
+  $('gameover').classList.add('hidden');
+  setAppRoute('home');
   Sfx.uiClick();
-  // Хаб — само главное меню (новый макет): закрываем все поверхности и возвращаемся на hub
+  // Хаб — само главное меню (новый макет): закрываем все поверхности и возвращаемся на hub.
+  // Перестраиваем витрину при каждом возврате, чтобы импортированные/сохранённые колоды
+  // сразу появлялись под карточками архетипов.
+  buildMenu(false);
   $('decksScreen')?.classList.add('hidden');
   $('collection').classList.add('hidden');
   $('shopModal').classList.add('hidden');
@@ -3716,6 +4520,9 @@ function closeHomeScreen(): void {
   document.querySelectorAll('.topTab').forEach(el=> el.classList.toggle('active', (el as HTMLElement).dataset.tab==='home'));
 }
 function openEventsScreen(): void {
+  setAppRoute('events');
+  $('menu').classList.add('hidden');
+  $('homeScreen')?.classList.add('hidden');
   Sfx.uiClick();
   $('decksScreen')?.classList.add('hidden');
   document.getElementById('homeScreen')?.classList.add('hidden');
@@ -3723,12 +4530,17 @@ function openEventsScreen(): void {
   $('shopModal').classList.add('hidden');
   $('bpModal').classList.add('hidden');
   $('profileModal').classList.add('hidden');
+  $('boosterModal').classList.add('hidden');
+  $('campaignModal')?.classList.add('hidden');
   const es = document.getElementById('eventsScreen') as HTMLElement | null;
   if (es) es.classList.remove('hidden');
   // render grid like Arena events (screenshot 4)
   const grid = document.getElementById('eventsGrid') as HTMLElement | null;
   if (grid) {
-    const events = [
+    const borderlessProgress = Math.min(BORDERLESS_EVENT_WINS, meta.borderlessEventWins ?? 0);
+    const canClaimBorderless = borderlessProgress >= BORDERLESS_EVENT_WINS && !meta.borderlessEventClaimed;
+    const events: Array<{ title: string; sub: string; art: string; borderless?: boolean }> = [
+      { title:'Галерея без границ', sub:'Событие · Borderless', art:'/art/Ethereal/eth_03.png', borderless:true },
       { title:'Премьер-драфт', sub:'Лимит', art:'/art/Pyromancer/pyr_01.png' },
       { title:'Быстрый старт', sub:'В быструю игру', art:'/art/Aurites/aur_01.png' },
       { title:'Испытание стихий', sub:'Обучение', art:'/art/Ethereal/eth_01.png' },
@@ -3741,14 +4553,41 @@ function openEventsScreen(): void {
       { title:'Классический турнир', sub:'Конструктед', art:'/art/Pyromancer/pyr_03.png' },
     ];
     grid.innerHTML = events.map(ev=> `
-      <div class="draftCard" style="height:118px;flex-direction:column;align-items:stretch;padding:0;border-radius:8px;overflow:hidden">
+      <div class="draftCard${ev.borderless ? ' borderlessEventCard' : ''}" data-event-id="${ev.borderless ? 'borderless' : ''}" style="height:${ev.borderless ? '172px' : '118px'};flex-direction:column;align-items:stretch;padding:0;border-radius:8px;overflow:hidden">
         <div class="draftArt" style="position:absolute;inset:0"><img src="${ev.art}" alt="" loading="lazy" onerror="this.style.display='none'"></div>
-        <div style="position:absolute;left:0;right:0;bottom:0;background:linear-gradient(180deg,transparent,rgba(0,0,0,.78));padding:.5rem .6rem .45rem;z-index:1">
-          <div style="font-family:Philosopher,serif;color:#ffe9b0;font-size:.78rem">${ev.title}</div>
-          <div style="font-size:.58rem;color:#cbb98a">${ev.sub}</div>
+        <div class="eventArtShade"></div>
+        <div class="eventCardCopy">
+          <div class="eventCardTitle">${ev.title}</div>
+          <div class="eventCardSub">${ev.sub}</div>
+          ${ev.borderless ? `<div class="eventRewardBox">
+            <div class="eventProgressLabel"><span>Рейтинговые победы</span><b>${borderlessProgress}/${BORDERLESS_EVENT_WINS}</b></div>
+            <div class="eventProgressTrack"><i style="width:${borderlessProgress / BORDERLESS_EVENT_WINS * 100}%"></i></div>
+            <button type="button" class="eventRewardClaim" data-borderless-claim ${canClaimBorderless ? '' : 'disabled'}>
+              ${meta.borderlessEventClaimed ? 'Получено ✓' : canClaimBorderless ? 'Забрать Borderless награду' : `Ещё ${BORDERLESS_EVENT_WINS - borderlessProgress} победы`}
+            </button>
+            <small>1 косметический вариант карты · баланс не меняется</small>
+          </div>` : ''}
         </div>
+        ${ev.borderless ? '<span class="eventBorderlessTag">◇ BORDERLESS</span>' : ''}
       </div>
     `).join('');
+    grid.onclick = (ev: MouseEvent) => {
+      const target = ev.target as HTMLElement | null;
+      const claim = target?.closest?.('[data-borderless-claim]') as HTMLButtonElement | null;
+      if (claim) {
+        ev.stopPropagation();
+        if (claim.disabled || meta.borderlessEventClaimed) return;
+        const reward = grantRandomBorderless();
+        if (!reward) { showToast('Все Borderless-варианты уже собраны'); return; }
+        meta.borderlessEventClaimed = true;
+        metaSave();
+        showToast(`◇ Получен Borderless-вариант: «${cardName(reward)}»`);
+        openEventsScreen();
+        return;
+      }
+      const tile = target?.closest?.('.draftCard') as HTMLElement | null;
+      if (tile && tile.dataset.eventId !== 'borderless') showToast('Событие скоро откроется');
+    };
     // сетка сама центрируется по max-width — мёртвый отступ справа не нужен
     (grid as any).style.marginRight = '';
   }
@@ -3773,8 +4612,7 @@ document.querySelectorAll('.draftCard').forEach(el=>{
 });
 document.getElementById('btnEventsClose')?.addEventListener('click', ()=>{
   Sfx.uiClick();
-  closeEventsScreen();
-  openHomeScreen();
+  navigateApp('back');
 });
 
 // patch topTab home/events handling: override previous listeners to route correctly
@@ -3791,7 +4629,7 @@ document.getElementById('btnEventsClose')?.addEventListener('click', ()=>{
       if (t==='home') openHomeScreen();
       else if (t==='profile') { Sfx.uiClick(); document.getElementById('homeScreen')?.classList.add('hidden'); document.getElementById('eventsScreen')?.classList.add('hidden'); $('decksScreen')?.classList.add('hidden'); openProfile(); document.querySelectorAll('.topTab').forEach(x=> x.classList.toggle('active', (x as HTMLElement).dataset.tab==='profile')); }
       else if (t==='decks') { document.getElementById('homeScreen')?.classList.add('hidden'); document.getElementById('eventsScreen')?.classList.add('hidden'); openDecksScreen(); }
-      else if (t==='packs') { Sfx.uiClick(); document.getElementById('homeScreen')?.classList.add('hidden'); document.getElementById('eventsScreen')?.classList.add('hidden'); $('decksScreen')?.classList.add('hidden'); $('boosterModal').classList.remove('hidden'); document.querySelectorAll('.topTab').forEach(x=> x.classList.toggle('active', (x as HTMLElement).dataset.tab==='packs')); }
+      else if (t==='packs') { openBoosterPanel(); document.querySelectorAll('.topTab').forEach(x=> x.classList.toggle('active', (x as HTMLElement).dataset.tab==='packs')); }
       else if (t==='store') { Sfx.uiClick(); document.getElementById('homeScreen')?.classList.add('hidden'); document.getElementById('eventsScreen')?.classList.add('hidden'); $('decksScreen')?.classList.add('hidden'); openShop(); document.querySelectorAll('.topTab').forEach(x=> x.classList.toggle('active', (x as HTMLElement).dataset.tab==='store')); }
       else if (t==='mastery') { Sfx.uiClick(); document.getElementById('homeScreen')?.classList.add('hidden'); document.getElementById('eventsScreen')?.classList.add('hidden'); $('decksScreen')?.classList.add('hidden'); openBP(); document.querySelectorAll('.topTab').forEach(x=> x.classList.toggle('active', (x as HTMLElement).dataset.tab==='mastery')); }
     });
@@ -3957,16 +4795,32 @@ function updateEcProfile(): void {
   }
 }
 
-function buildMenu(): void {
+function buildMenu(showTour = true): void {
+  const customs = loadCustomDecks();
+  const validSelected = menuSelectedDeckId
+    && (deckById.has(menuSelectedDeckId) || customs.some(d => d.id === menuSelectedDeckId));
+  if (!validSelected) {
+    menuSelectedDeckId = starterDeckForFaction(picked)?.id ?? picked;
+    saveMenuDeck();
+  }
+
   const mh = $('menuHeroes');
   if (mh) {
-    mh.innerHTML = FACTION_IDS.map((f, i) =>
+    mh.innerHTML = FACTION_IDS.map(f =>
       `<div class="heroChip${f === picked ? ' sel' : ''}" data-f="${f}" role="button" tabindex="0"
-        title="${FACTION_RU[f]} (${HUB_ELEM_RU[f] ?? ''}) — клик выбирает фракцию">
-        <span class="orbCore"><img class="orbIcon" src="img/ico_fac_${i}.png" alt="" onerror="this.style.display='none'"></span>
+        aria-label="Быстрый выбор фракции: ${FACTION_RU[f]}" aria-pressed="${f === picked}"
+        title="${FACTION_RU[f]} (${HUB_ELEM_RU[f] ?? ''}) — быстро выбрать фракцию">
+        <span class="orbCore"><img class="orbIcon" src="" alt="" loading="lazy" decoding="async"></span>
         <span class="chipName">${HUB_ELEM_RU[f] ?? FACTION_RU[f]}</span>
       </div>`).join('');
+    mh.querySelectorAll<HTMLElement>('.heroChip').forEach(chip => {
+      const f = chip.dataset.f as Faction | undefined;
+      const i = f ? FACTION_IDS.indexOf(f) : -1;
+      if (f && i >= 0) artChain(chip.querySelector('.orbIcon') as HTMLImageElement | null,
+        [`/heroes/${f}`, `img/ico_fac_${i}.png`]);
+    });
   }
+
   const host = $('playerFactions');
   host.innerHTML = '';
   for (let i = 0; i < FACTION_IDS.length; i++) {
@@ -3997,6 +4851,51 @@ function buildMenu(): void {
     host.appendChild(node);
     artChain(node.querySelector('.fcardArtImg') as HTMLImageElement | null, hubArtUrls(f));
   }
+
+  if (customs.length) {
+    const label = el('div', 'menuDeckSectionTitle', 'МОИ КОЛОДЫ · ВЫБЕРИТЕ СОХРАНЁННУЮ КОЛОДУ');
+    host.appendChild(label);
+    for (const deck of customs) {
+      const f = deck.faction;
+      const avatar = deck.avatarCardId && deck.cards.includes(deck.avatarCardId)
+        ? db.get(deck.avatarCardId) : undefined;
+      const artCard = avatar ?? suggestedDeckArt(deck.cards);
+      const artUrls = artCard
+        ? [`/art/${encodeURIComponent(artCard.faction)}/${encodeURIComponent(artCard.id)}.png`, `/heroes/${encodeURIComponent(f)}`]
+        : [`/heroes/${encodeURIComponent(f)}`, `img/menu_${f.toLowerCase()}.jpg`];
+      const node = el('div', 'fcard customDeckCard' + (deck.id === menuSelectedDeckId ? ' sel' : ''));
+      node.dataset.deckId = deck.id;
+      node.dataset.f = f;
+      node.dataset.faction = f;
+      node.dataset.format = 'constructed';
+      node.setAttribute('role', 'button');
+      node.setAttribute('tabindex', '0');
+      node.setAttribute('aria-label', `Выбрать колоду «${deck.name}», ${deck.cards.length} карт`);
+      node.innerHTML = `<div class="fcardArt">
+          <span class="fcardArtPh" aria-hidden="true"><img src="" alt=""></span>
+          <img class="fcardArtImg" src="" alt="" loading="lazy" decoding="async">
+          <div class="fcardArtGrad"></div>
+          <span class="fcardLvl customDeckRibbon">МОЯ КОЛОДА</span>
+        </div>
+        <div class="fcardBody">
+          <div class="fname" title="${esc(deck.name)}">${esc(deck.name)}</div>
+          <div class="fclass">${esc(FACTION_RU[f as Faction] ?? f)} · Constructed</div>
+        </div>
+        <div class="fcardStats customDeckStats"><span>${deck.cards.length} карт</span><span>ВЫБРАТЬ</span></div>
+        <span class="fcardCheck" title="Выбрана колода">✓</span>`;
+      const ph = node.querySelector('.fcardArtPh img') as HTMLImageElement | null;
+      artChain(ph, [`/heroes/${encodeURIComponent(f)}`, `img/ico_fac_${FACTION_IDS.indexOf(f as Faction)}.png`]);
+      artChain(node.querySelector('.fcardArtImg') as HTMLImageElement | null, artUrls);
+      node.title = `Выбрать колоду «${deck.name}» · ${deck.cards.length} карт`;
+      node.addEventListener('click', () => selectMainMenuDeck(deck.id));
+      node.addEventListener('keydown', ev => {
+        const key = (ev as KeyboardEvent).key;
+        if (key === 'Enter' || key === ' ') { ev.preventDefault(); node.click(); }
+      });
+      host.appendChild(node);
+    }
+  }
+
   sel('enemyFaction').innerHTML =
     FACTION_IDS.filter(f => f !== picked).map(f => `<option value="${f}">${FACTION_RU[f]}</option>`).join('') +
     '<option value="__random">Случайная фракция</option>';
@@ -4009,24 +4908,54 @@ function buildMenu(): void {
       if (!f) return;
       pickFaction(f as Faction);
     });
+    mh2.addEventListener('keydown', ev => {
+      const key = (ev as KeyboardEvent).key;
+      if (key !== 'Enter' && key !== ' ') return;
+      const chip = (ev.target as HTMLElement | null)?.closest?.('.heroChip') as HTMLElement | null;
+      if (!chip) return;
+      ev.preventDefault();
+      chip.click();
+    });
   }
-  const customs = loadCustomDecks();
-    renderShards();
-    tutGatePractice();   // спека 6.3: тренировка заблокирована до прохождения обучения
-    if (!meta.tutDone) window.setTimeout(() => tourShow(), 400);
-    const cnt = $('menuCardCount');
-    if (cnt) cnt.textContent = String(ALL_CARDS.length);
-    sel('deckPick').innerHTML = deckList
-    .map(d => `<option value="${d.id}">${esc(d.name)} · база (${d.cards.length})</option>`).join('') +
+  renderShards();
+  tutGatePractice();   // спека 6.3: тренировка заблокирована до прохождения обучения
+  if (showTour && !meta.tutDone) window.setTimeout(() => tourShow(), 400);
+  const cnt = $('menuCardCount');
+  if (cnt) cnt.textContent = String(ALL_CARDS.length);
+  sel('deckPick').innerHTML = deckList
+    .filter(d => d.id !== 'Starter') // служебная колода — только для тестов/совместимости
+    .map(d => `<option value="${esc(d.id)}">${esc(d.name)} · ${d.format === STARTER_DECK_FORMAT ? 'стартовая' : 'Constructed'} (${d.cards.length})</option>`).join('') +
     (customs.length
       ? `<optgroup label="Мои колоды">${customs
-        .map(d => `<option value="${d.id}">${esc(d.name)} (${d.cards.length} карт)</option>`).join('')}</optgroup>`
+        .map(d => `<option value="${esc(d.id)}">${esc(d.name)} (${d.cards.length} карт)</option>`).join('')}</optgroup>`
       : '');
-  if (deckById.has(picked)) sel('deckPick').value = picked;
+  sel('deckPick').value = menuSelectedDeckId ?? '';
+  if (!sel('deckPick').value) {
+    menuSelectedDeckId = starterDeckForFaction(picked)?.id ?? picked;
+    sel('deckPick').value = menuSelectedDeckId;
+  }
   applyMenuBg();
   updatePlayGate();
   updateChallengePanel();
   updateEcProfile();
+  renderHomeQuests();
+}
+
+function selectMainMenuDeck(deckId: string): void {
+  const deck = resolveDeck(deckId, deckList as unknown as DeckLike[]);
+  if (!deck) return;
+  menuSelectedDeckId = deckId;
+  saveMenuDeck();
+  if (FACTION_IDS.includes(deck.faction as Faction)) {
+    const changed = picked !== deck.faction;
+    picked = deck.faction as Faction;
+    savePicked();
+    if (changed) Sfx.whoosh();
+  }
+  Sfx.uiClick();
+  buildMenu();
+  sel('deckPick').value = deckId;
+  updatePlayGate();
 }
 
 /** Фон главного меню по фракции: кроссфейд 0.5с (спека п.1.1) + палитра UI в --fac/--fac2. */
@@ -4185,6 +5114,7 @@ function renderAdmin(): void {
   else if (adminTab === 'users') renderAdminUsers(body);
   else if (adminTab === 'economy') renderAdminEconomy(body);
   else if (adminTab === 'cards') renderAdminCards(body);
+  else if (adminTab === 'borderless') renderAdminBorderless(body);
   else if (adminTab === 'decks') renderAdminDecks(body);
   else if (adminTab === 'system') renderAdminSystem(body);
   // KPI-полоса сверху — ПОСЛЕ рендера вкладки (renderX переписывает innerHTML)
@@ -4193,7 +5123,7 @@ function renderAdmin(): void {
   body.insertAdjacentHTML('afterbegin', `<div class="admKpi" aria-label="Ключевые показатели">
     <div class="admKpiChip"><span class="k">🎯 Матчей</span><span class="v">${(meta.wins ?? 0) + (meta.losses ?? 0)}</span></div>
     <div class="admKpiChip"><span class="k">👥 Игроков</span><span class="v">${usersN}</span></div>
-    <div class="admKpiChip"><span class="k">🃏 Карт в базе</span><span class="v">${ALL_CARDS.length}</span></div>
+    <div class="admKpiChip" title="${ALL_CARDS.length} игровых карт, каждая может иметь классическое и Borderless-оформление"><span class="k">🎴 Карты / варианты</span><span class="v">${ALL_CARDS.length} / ${ALL_CARDS.length * 2}</span></div>
     <div class="admKpiChip"><span class="k">💎 Самоцветов</span><span class="v">${gemsGet()}</span></div>
   </div>`);
 }
@@ -4220,11 +5150,11 @@ function renderAdminMe(host:HTMLElement): void {
     </div>
     <div class="admCard">
       <h4>💰 Валюта</h4>
-      <div class="admField"><label>◈ Пыль</label><input id="admShards" type="number" min="0" value="${shardsGet()}"></div>
+      <div class="admField"><label>🪙 Монеты</label><input id="admShards" type="number" min="0" value="${shardsGet()}"></div>
       <div class="admField"><label>💎 Гемы</label><input id="admGems" type="number" min="0" value="${gemsGet()}"></div>
       <div class="admField"><label>Бустеров</label><input id="admPacks" type="number" min="0" value="${meta.freeOpens||0}"></div>
       <div class="admField"><label>BP XP</label><input id="admBpXp" type="number" min="0" value="${meta.bpXp||0}"></div>
-      <div style="display:flex;gap:.4rem;margin-top:.5rem;flex-wrap:wrap"><button class="btn" data-give="shard500">+500 ◈</button><button class="btn" data-give="shard2000">+2000 ◈</button><button class="btn" data-give="gem100">+100 💎</button><button class="btn" data-give="pack1">+1 бустер</button></div>
+      <div style="display:flex;gap:.4rem;margin-top:.5rem;flex-wrap:wrap"><button class="btn" data-give="shard500">+500 🪙</button><button class="btn" data-give="shard2000">+2000 🪙</button><button class="btn" data-give="gem100">+100 💎</button><button class="btn" data-give="pack1">+1 бустер</button></div>
     </div>
     <div class="admCard">
       <h4>🎯 Квесты и пропуск</h4>
@@ -4288,7 +5218,7 @@ function renderAdminUsers(host:HTMLElement): void {
     <button class="btn" id="admUserExport">Экспорт CSV</button>
   </div>
   <div style="overflow:auto;max-height:52vh;border:1px solid rgba(255,255,255,.06);border-radius:8px">
-    <table class="admTable"><thead><tr><th>Игрок</th><th>Ур / MMR</th><th>W-L</th><th>◈ / 💎</th><th>Статус</th><th>Действия</th></tr></thead><tbody id="admUserTbody"></tbody></table>
+    <table class="admTable"><thead><tr><th>Игрок</th><th>Ур / MMR</th><th>W-L</th><th>🪙 / 💎</th><th>Статус</th><th>Действия</th></tr></thead><tbody id="admUserTbody"></tbody></table>
   </div>
   <div style="font-size:.62rem;color:#8b93ab;margin-top:.4rem">Всего ${users.length} · в проде подмени localStorage на GET /api/admin/users?search=&filter=</div>`;
   const tbody = host.querySelector('#admUserTbody') as HTMLElement;
@@ -4304,9 +5234,9 @@ function renderAdminUsers(host:HTMLElement): void {
       <td><div style="display:flex;align-items:center;gap:.45rem"><span style="width:28px;height:28px;border-radius:50%;background:var(--panel);border:1px solid rgba(255,216,122,.18);display:flex;align-items:center;justify-content:center;font-size:.72rem">${FACTION_SIGIL[u.avatarFac as Faction]||'◈'}</span><div><div style="font-size:.78rem;color:#ffe9b0">${esc(u.nick)} ${u.pid===meta.pid?'<span class="admBadge">вы</span>':''}</div><div style="font-size:.62rem;color:#8b93ab">${esc(u.pid)} · ${esc(FACTION_RU[u.avatarFac as Faction]||u.avatarFac)} · ${u.frame}</div></div></div></td>
       <td><b>${u.level}</b> <span style="color:#8b93ab">/ ${u.mmr}</span></td>
       <td>${u.wins}-${u.losses} <span style="color:#8b93ab">${((u.wins/Math.max(1,u.wins+u.losses))*100).toFixed(0)}%</span></td>
-      <td>◈${u.shards} · 💎${u.gems}</td>
+      <td>🪙${u.shards} · 💎${u.gems}</td>
       <td>${u.banned?'<span class="admBadge" style="border-color:#7c3a34;background:rgba(124,58,52,.12);color:#ffb3a6">бан</span>':'<span class="admBadge">активен</span>'} · ${u.lastSeen}</td>
-      <td><div class="admActions"><button class="btn" data-act="edit" data-pid="${u.pid}">✎</button><button class="btn" data-act="give" data-pid="${u.pid}">◈</button><button class="btn" data-act="ban" data-pid="${u.pid}">${u.banned?'✓':'⛔'}</button><button class="btn danger" data-act="del" data-pid="${u.pid}">✕</button></div></td>
+      <td><div class="admActions"><button class="btn" data-act="edit" data-pid="${u.pid}">✎</button><button class="btn" data-act="give" data-pid="${u.pid}">🪙</button><button class="btn" data-act="ban" data-pid="${u.pid}">${u.banned?'✓':'⛔'}</button><button class="btn danger" data-act="del" data-pid="${u.pid}">✕</button></div></td>
     </tr>`).join('');
     tbody.querySelectorAll('[data-act]').forEach(b=>{
       b.addEventListener('click', ()=>{
@@ -4319,11 +5249,11 @@ function renderAdminUsers(host:HTMLElement): void {
           if(pid===meta.pid){ meta.nick=users[idx].nick; meta.mmr=nm; metaSave(); }
           saveAdminUsers(users); render(); showToast('Сохранено');
         } else if(act==='give'){
-          const sh=parseInt(prompt('Выдать ◈ (пыль)', '500')||'0')||0;
+          const sh=parseInt(prompt('Выдать монеты', '500')||'0')||0;
           const ge=parseInt(prompt('Выдать 💎', '50')||'0')||0;
           users[idx].shards+=sh; users[idx].gems+=ge;
           if(pid===meta.pid){ shardsAdd(sh); gemsAdd(ge); }
-          saveAdminUsers(users); render(); showToast('Выдано ◈'+sh+' 💎'+ge);
+          saveAdminUsers(users); render(); showToast('Выдано 🪙'+sh+' 💎'+ge);
         } else if(act==='ban'){
           users[idx].banned=!users[idx].banned;
           saveAdminUsers(users); render(); showToast(users[idx].banned?'Забанен':'Разбанен');
@@ -4353,7 +5283,7 @@ function renderAdminUsers(host:HTMLElement): void {
 function renderAdminEconomy(host:HTMLElement): void {
   host.innerHTML = `<div class="admGrid">
     <div class="admCard"><h4>💰 Баланс (мой)</h4>
-      <div class="admField"><label>◈ Пыль</label><input id="admEcoSh" type="number" value="${shardsGet()}"><button class="btn" data-eco="sh+500">+500</button></div>
+      <div class="admField"><label>🪙 Монеты</label><input id="admEcoSh" type="number" value="${shardsGet()}"><button class="btn" data-eco="sh+500">+500</button></div>
       <div class="admField"><label>💎 Гемы</label><input id="admEcoGe" type="number" value="${gemsGet()}"><button class="btn" data-eco="ge+100">+100</button></div>
       <div class="admField"><label>Бустеры</label><input id="admEcoPk" type="number" value="${meta.freeOpens||0}"><button class="btn" data-eco="pk+1">+1</button></div>
       <div class="admField"><label>BP XP</label><input id="admEcoBp" type="number" value="${meta.bpXp||0}"><button class="btn" data-eco="bp+260">+уровень</button></div>
@@ -4362,15 +5292,15 @@ function renderAdminEconomy(host:HTMLElement): void {
     <div class="admCard"><h4>🎁 Выдать набор</h4>
       <div style="display:flex;gap:.4rem;flex-wrap:wrap;margin:.4rem 0">
         <button class="btn" data-kit="starter">Стартовый: 5 паков + 2500 💎</button>
-        <button class="btn" data-kit="daily">Дейлик: 500 ◈</button>
+        <button class="btn" data-kit="daily">Дейлик: 500 🪙</button>
         <button class="btn" data-kit="bp">BP бустер</button>
         <button class="btn" data-kit="foil">1 фойл-жетон</button>
       </div>
       <div style="font-size:.62rem;color:#8b93ab">В проде: POST /api/admin/grant {pid, shards, gems, packs}</div>
-      <div class="admField" style="margin-top:.6rem"><label>Цена пака</label><span style="font-size:.74rem;color:#e6d6ac">300 ◈ · лимит 4 копии, излишек → ◈ (1/5/20/100)</span></div>
+      <div class="admField" style="margin-top:.6rem"><label>Цена пака</label><span style="font-size:.74rem;color:#e6d6ac">300 монет · лимит 4 копии, дубликаты → монеты (1/2/5/20/100)</span></div>
     </div>
     <div class="admCard"><h4>📈 Курсы</h4>
-      <div class="admField"><label>Крафт Common</label><span>5 ◈</span><label>Разбор 1 ◈</label></div>
+      <div class="admField"><label>Создание Common</label><span>5 монет</span><label>Разбор Common</label><span>+1 монета</span></div>
       <div class="admField"><label>Rare</label><span>20 / 5</span><label>Epic 100 / 20</label></div>
       <div class="admField"><label>Legendary</label><span>400 / 100</span></div>
       <div style="font-size:.62rem;color:#8b93ab;margin-top:.4rem">Меняется в src/balance.ts · админка только выдаёт валюту, не меняет курсы без деплоя</div>
@@ -4383,7 +5313,7 @@ function renderAdminEconomy(host:HTMLElement): void {
     const pk=parseInt((host.querySelector('#admEcoPk') as HTMLInputElement).value)||0;
     const bp=parseInt((host.querySelector('#admEcoBp') as HTMLInputElement).value)||0;
     shardsSet(sh); meta.gems=ge; meta.freeOpens=pk; meta.bpXp=bp; metaSave(); renderShards(); showToast('Сохранено');
-    const log=host.querySelector('#admEcoLog') as HTMLElement; if(log) log.textContent = '['+new Date().toLocaleTimeString()+'] set ◈'+sh+' 💎'+ge+' pk'+pk+' bp'+bp+'\n' + log.textContent;
+    const log=host.querySelector('#admEcoLog') as HTMLElement; if(log) log.textContent = '['+new Date().toLocaleTimeString()+'] set 🪙'+sh+' 💎'+ge+' pk'+pk+' bp'+bp+'\n' + log.textContent;
   });
   host.querySelectorAll('[data-eco]').forEach(b=>{
     b.addEventListener('click', ()=>{
@@ -4413,7 +5343,8 @@ function renderAdminEconomy(host:HTMLElement): void {
 }
 function renderAdminCards(host:HTMLElement): void {
   const q = (host as HTMLElement & { _q?:string })._q || '';
-  host.innerHTML = `<div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin-bottom:.5rem">
+  host.innerHTML = `<div class="admCollectionHint"><b>Игровая коллекция · ${ALL_CARDS.length} карт</b><span>Управляет только обычными копиями для колод. Borderless — косметический вид тех же карт, без изменений баланса; выдача отдельно во вкладке <b>Borderless</b>.</span><span class="admCollectionTotal">${ALL_CARDS.length} игровых карт · ${ALL_CARDS.length * 2} представлений</span></div>
+  <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin-bottom:.5rem">
     <input id="admCardSearch" placeholder="Поиск карты..." value="${esc(q)}" style="flex:1;min-width:180px;background:#14161f;border:1px solid var(--line);color:var(--text);padding:.42rem .5rem;border-radius:6px">
     <select id="admCardFac" style="background:#14161f;border:1px solid var(--line);color:var(--text);padding:.42rem;border-radius:6px"><option value="">Все фракции</option>${(['Aurites','Necrus','Terramorph','Pyromancer','Ethereal','Neutral'] as string[]).map(f=>`<option value="${f}">${FACTION_RU[f as Faction]||f}</option>`).join('')}</select>
     <button class="btn" id="admCardGive5">＋5 случайных</button>
@@ -4421,7 +5352,7 @@ function renderAdminCards(host:HTMLElement): void {
     <button class="btn danger" id="admCardWipe">♻ Сброс коллекции</button>
   </div>
   <div id="admCardGrid" style="display:flex;gap:.6rem;flex-wrap:wrap;max-height:52vh;overflow:auto;padding:.2rem"></div>
-  <div style="font-size:.62rem;color:#8b93ab;margin-top:.4rem">Клик по карте — выдать ×1 (до 4), правый клик — забрать, двойной клик — описание. Кнопка «Выдать все» — полный плейсет всех ${ALL_CARDS.length} карт. В проде: POST /api/admin/cards {pid, cardId, delta}</div>`;
+  <div style="font-size:.62rem;color:#8b93ab;margin-top:.4rem">Клик по карте — выдать ×1 (до 4), правый клик — забрать, двойной клик — описание. «Выдать все» назначает полный плейсет всех ${ALL_CARDS.length} игровых карт; Borderless-варианты не затрагиваются. В проде: POST /api/admin/cards {pid, cardId, delta}</div>`;
   const grid = host.querySelector('#admCardGrid') as HTMLElement;
   const facSel = host.querySelector('#admCardFac') as HTMLSelectElement;
   const search = host.querySelector('#admCardSearch') as HTMLInputElement;
@@ -4468,6 +5399,96 @@ function renderAdminCards(host:HTMLElement): void {
     if(!confirm(`Сбросить коллекцию до базы (${baseIds.length} карт)?`)) return;
     const nm=new Map<string,number>(); baseIds.forEach(id=>nm.set(id, 1));
     setOwnedMap(nm); showToast('Коллекция сброшена'); render();
+  });
+  render();
+}
+function renderAdminBorderless(host:HTMLElement): void {
+  const state = host as HTMLElement & { _borderlessQ?: string; _borderlessFac?: string };
+  const ownedIds = new Set((meta.borderlessOwned ?? []).filter(id => ALL_CARDS.some(card => card.id === id)));
+  const owned = ownedIds.size;
+  const chancePercent = (BORDERLESS_BOOSTER_CHANCE * 100).toLocaleString('ru-RU', { maximumFractionDigits: 3 });
+  const chanceOneIn = Math.max(1, Math.round(1 / BORDERLESS_BOOSTER_CHANCE));
+  host.innerHTML = `<div class="admCard admBorderlessOverview">
+    <div class="admBorderlessIntro"><div><div class="admBorderlessEyebrow">КОСМЕТИКА · ИГРОВОЙ БАЛАНС НЕ МЕНЯЕТСЯ</div>
+      <h3>Borderless · ${ALL_CARDS.length} вариантов</h3>
+      <p>Те же карты, названия и арт. Меняется только оформление: Borderless — без рамки, с полноформатным артом. Выдача здесь не добавляет игровые копии.</p></div>
+      <div class="admBorderlessMetrics"><div><span>Выдано</span><b>${owned} / ${ALL_CARDS.length}</b></div>
+        <div><span>Шанс из бустера</span><b>${chancePercent}%</b></div>
+        <div><span>Частота</span><b>≈ 1 из ${chanceOneIn}</b></div></div>
+    </div>
+    <div class="admBorderlessProgress" role="progressbar" aria-label="Выданные Borderless-варианты" aria-valuemin="0" aria-valuemax="${ALL_CARDS.length}" aria-valuenow="${owned}"><i style="width:${owned / Math.max(1, ALL_CARDS.length) * 100}%"></i></div>
+    <div class="admBorderlessChanceNote">Шанс относится к отдельному бонусу на бустер; игровая часть пака не меняется. Значение задано в коде: <code>BORDERLESS_BOOSTER_CHANCE</code>.</div>
+  </div>
+  <div class="admCard admBorderlessManage">
+    <div class="admBorderlessTools">
+      <input id="admBorderlessSearch" placeholder="Найти карту по названию или ID…" value="${esc(state._borderlessQ ?? '')}" aria-label="Поиск Borderless-карты">
+      <select id="admBorderlessFac" aria-label="Фильтр Borderless по фракции"><option value="">Все фракции</option>${(['Aurites','Necrus','Terramorph','Pyromancer','Ethereal','Neutral'] as string[]).map(f=>`<option value="${f}" ${f === state._borderlessFac ? 'selected' : ''}>${FACTION_RU[f as Faction] || f}</option>`).join('')}</select>
+      <button class="btn" id="admBorderlessRandom" ${owned >= ALL_CARDS.length ? 'disabled' : ''}>＋1 случайный</button>
+      <button class="btn primary" id="admBorderlessAll" ${owned >= ALL_CARDS.length ? 'disabled' : ''}>◇ Выдать все ${ALL_CARDS.length}</button>
+      <button class="btn danger" id="admBorderlessReset" ${owned === 0 ? 'disabled' : ''}>Сбросить Borderless</button>
+    </div>
+    <div id="admBorderlessResults" class="admBorderlessResults" aria-live="polite"></div>
+    <div id="admBorderlessGrid" class="admBorderlessGrid"></div>
+    <div class="admBorderlessHelp">Нажмите на карту, чтобы выдать или забрать только её Borderless-оформление. Снятие косметики также снимает её экипировку; обычные копии остаются без изменений. Поиск показывает до 60 совпадений.</div>
+  </div>`;
+  const search = host.querySelector('#admBorderlessSearch') as HTMLInputElement;
+  const faction = host.querySelector('#admBorderlessFac') as HTMLSelectElement;
+  const results = host.querySelector('#admBorderlessResults') as HTMLElement;
+  const grid = host.querySelector('#admBorderlessGrid') as HTMLElement;
+  const render = (): void => {
+    const qq = (search.value || '').trim().toLocaleLowerCase();
+    const fac = faction.value;
+    state._borderlessQ = search.value;
+    state._borderlessFac = fac;
+    let list = (ALL_CARDS as unknown as CardData[]).slice();
+    if (fac) list = list.filter(card => card.faction === fac);
+    if (qq) list = list.filter(card => cardName(card).toLocaleLowerCase().includes(qq) || card.id.toLocaleLowerCase().includes(qq));
+    const matches = list.length;
+    list = list.slice(0, 60);
+    results.textContent = `Показано ${list.length} из ${matches} совпадений · получено ${ownedIds.size} из ${ALL_CARDS.length}`;
+    grid.innerHTML = '';
+    for (const card of list) {
+      const unlocked = hasBorderless(card.id);
+      const node = renderCard(card, 'borderless');
+      node.classList.add('admBorderlessTile');
+      node.classList.toggle('admBorderlessLocked', !unlocked);
+      node.style.position = 'relative';
+      const badge = document.createElement('span');
+      badge.className = `admBorderlessBadge${unlocked ? ' isOwned' : ''}`;
+      badge.textContent = unlocked ? '◇ ЕСТЬ' : '＋ ВЫДАТЬ';
+      node.appendChild(badge);
+      node.title = `${cardName(card)} · ${unlocked ? 'Borderless получен — нажмите, чтобы забрать' : 'Borderless не получен — нажмите, чтобы выдать'}`;
+      node.addEventListener('click', () => {
+        if (hasBorderless(card.id)) {
+          meta.borderlessOwned = (meta.borderlessOwned ?? []).filter(id => id !== card.id);
+          meta.borderlessEquipped = (meta.borderlessEquipped ?? []).filter(id => id !== card.id);
+          showToast(`Borderless снят: ${cardName(card)}`);
+        } else {
+          unlockBorderless(card.id);
+          showToast(`Выдан Borderless: ${cardName(card)}`);
+        }
+        metaSave();
+        renderAdmin();
+      });
+      grid.appendChild(node);
+    }
+  };
+  search.addEventListener('input', render);
+  faction.addEventListener('change', render);
+  host.querySelector('#admBorderlessRandom')?.addEventListener('click', () => {
+    const card = grantRandomBorderless();
+    if (!card) { showToast('Все Borderless-варианты уже выданы'); return; }
+    metaSave(); showToast(`Выдан Borderless: ${cardName(card)}`); renderAdmin();
+  });
+  host.querySelector('#admBorderlessAll')?.addEventListener('click', () => {
+    if (!confirm(`Выдать все ${ALL_CARDS.length} Borderless-вариантов? Обычные копии карт не изменятся.`)) return;
+    meta.borderlessOwned = Array.from(new Set([...(meta.borderlessOwned ?? []), ...ALL_CARDS.map(card => card.id)]));
+    metaSave(); showToast(`Выданы все ${ALL_CARDS.length} Borderless-вариантов`); renderAdmin();
+  });
+  host.querySelector('#admBorderlessReset')?.addEventListener('click', () => {
+    if (!confirm('Забрать все Borderless-варианты и снять их экипировку? Обычные копии карт останутся.')) return;
+    meta.borderlessOwned = []; meta.borderlessEquipped = [];
+    metaSave(); showToast('Borderless-коллекция сброшена'); renderAdmin();
   });
   render();
 }
@@ -4601,12 +5622,13 @@ document.addEventListener('keydown', e=>{
   if((e.ctrlKey||e.metaKey) && e.shiftKey && e.key.toLowerCase()==='a'){ e.preventDefault(); openAdmin(); }
 });
 
-/* ---- Гейт «В БОЙ» (спека п.1.4): валидность колоды — ровно 40 карт, лимиты копий 4/1 ---- */
+/* ---- Гейт «В БОЙ»: минимум 60 карт, без верхнего лимита, до 4 копий любой карты ---- */
 function updatePlayGate(): void {
   const b = btn('btnPlay');
   const id = sel('deckPick').value;
   const deck = resolveDeck(id, deckList as unknown as DeckLike[]);
-  const problems = deck ? validateDeckSize(deck.cards, dbLookup).problems : ['колода не найдена'];
+  const problem = deck ? deckPlayProblem(deck) : 'колода не найдена';
+  const problems = problem ? [problem] : [];
   b.disabled = problems.length > 0;
   b.title = problems.length > 0 ? `Колода не собрана: ${problems[0]}` : 'Начать бой';
   // видимая подсказка гейта (не только title) — юзабилити главного экрана
@@ -4616,13 +5638,23 @@ function updatePlayGate(): void {
     else { ph.hidden = true; ph.textContent = ''; }
   }
 }
-sel('deckPick').addEventListener('change', () => { Sfx.uiClick(); updatePlayGate(); });
+sel('deckPick').addEventListener('change', () => {
+  Sfx.uiClick();
+  const id = sel('deckPick').value;
+  const deck = resolveDeck(id, deckList as unknown as DeckLike[]);
+  menuSelectedDeckId = id || null;
+  saveMenuDeck();
+  if (deck && FACTION_IDS.includes(deck.faction as Faction) && deck.faction !== picked) {
+    picked = deck.faction as Faction;
+    savePicked();
+  }
+  buildMenu();
+});
 
 /* «Создать колоду» → Коллекция · вкладка «Конструктор колод» (спека п.1.3). */
 btn('btnMakeDeck').addEventListener('click', () => {
   Sfx.uiClick();
-  $('collection').classList.remove('hidden');
-  renderCollection();
+  openCollectionScreen();
   btn('tabBuilder').click();
   if (loadCustomDecks().length === 0) btn('btnDbNew').click();
 });
@@ -4650,13 +5682,17 @@ async function requestMatchStart(): Promise<string | null> {
   } catch { return null; }
 }
 
-function applyBattleBg(): void {
-  const fac = String(battle.playerFaction ?? picked).toLowerCase();
+function applyBattleBg(playerFaction: Faction = picked): void {
+  // Получаем выбранную фракцию аргументом: вызывающий код не должен полагаться на
+  // battle.playerFaction, который до старта матча может содержать значение прошлого боя.
+  const fac = String(playerFaction || picked).toLowerCase();
   const imgEl = document.getElementById('battleBgImg') as HTMLImageElement | null;
   const vidEl = document.getElementById('battleBgVideo') as HTMLVideoElement | null;
   const backdrop = document.getElementById('backdrop') as HTMLElement | null;
   if (!backdrop) return;
-  const imgUrls = [`/bg/battle/battle_${fac}`, `/bg/battle/battle`, `img/board_arena.png`];
+  const tableSkin = String(meta.tableSkin || 'classic');
+  const tableUrl = [`/cosm/tables/${encodeURIComponent(tableSkin)}`];
+  const imgUrls = [...tableUrl, `/bg/battle/battle_${fac}`, `/bg/battle/battle`, `img/board_arena.png`];
   const vidUrls = [`/bg/animated/battle/battle_${fac}`, `/bg/animated/battle/battle`];
   const loadImg = (idx:number) => {
     if (idx >= imgUrls.length) {
@@ -4693,7 +5729,7 @@ function applyBattleBg(): void {
 }
 btn('btnPlay').addEventListener('click', () => {
   audioUnlock(); musicStart(); Sfx.uiClick();
-  applyBattleBg();
+  applyBattleBg(picked);
   battle.playerFaction = picked;
   battle.playerDeckId = sel('deckPick').value;
   const fromMenu = battle.launchMode === 'menu';
@@ -4740,22 +5776,32 @@ document.addEventListener('contextmenu', ev => {
 btn('btnSkip').addEventListener('click', () => battle.endTurnNow());
 btn('btnAutoBattle').addEventListener('click', () => battle.closeCombatWindow());
 btn('btnSkipCombat').addEventListener('click', () => battle.skipCombat());
-btn('btnBoosters').addEventListener('click', () => { hideSealedInstant(); $('boosterModal').classList.remove('hidden'); const pr = $('packRow'); if (pr) pr.innerHTML=''; const st=document.getElementById('packStage') as HTMLElement|null; if(st) st.classList.remove('hasSealed'); renderShards(); });
+btn('btnBoosters').addEventListener('click', () => openBoosterPanel(btn('btnBoosters')));
 btn('btnProfile').addEventListener('click', () => openProfile());
-btn('btnProfileClose').addEventListener('click', () => $('profileModal').classList.add('hidden'));
+btn('btnProfileClose').addEventListener('click', () => navigateApp('back'));
 btn('btnShop').addEventListener('click', () => openShop());
-btn('btnShopClose').addEventListener('click', () => $('shopModal').classList.add('hidden'));
+btn('btnShopClose').addEventListener('click', () => navigateApp('back'));
 btn('btnCampaign').addEventListener('click', () => openCampaign());
 btn('btnCampClose').addEventListener('click', () => $('campaignModal').classList.add('hidden'));
 btn('btnTour').addEventListener('click', () => openTut());
 btn('btnBP').addEventListener('click', () => openBP());
-btn('btnBPClose').addEventListener('click', () => $('bpModal').classList.add('hidden'));
-btn('btnPackNew').addEventListener('click', () => newPack());
-btn('btnPackPrem').addEventListener('click', () => {
-  if (!newPremPack()) showToast('Нет премиум-бустеров — награда пропуска (15 уровень)');
-});
-btn('btnPackClose').addEventListener('click', () => { hideSealedInstant(); $('boosterModal').classList.add('hidden'); renderCollection(); });
+btn('btnBPClose').addEventListener('click', () => navigateApp('back'));
+btn('btnPackNew').addEventListener('click', () => { shopTab = 'boosters'; openShop(); });
+btn('btnPackPrem').addEventListener('click', () => { newPremPack(); });
+btn('btnPackClose').addEventListener('click', () => { closeBoosterPanel(true); navigateApp('back'); });
 (() => {
+  const panel = document.getElementById('boosterModal');
+  panel?.addEventListener('keydown', (ev: KeyboardEvent) => {
+    if (ev.key !== 'Tab' || panel.classList.contains('hidden')) return;
+    const focusable = Array.from(panel.querySelectorAll<HTMLElement>(
+      'button:not([disabled]),a[href],input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])'
+    )).filter(el => !el.closest('.hidden') && el.getAttribute('aria-hidden') !== 'true');
+    if (!focusable.length) { ev.preventDefault(); return; }
+    const first = focusable[0], last = focusable[focusable.length - 1];
+    const active = document.activeElement;
+    if (ev.shiftKey && (active === first || !panel.contains(active))) { ev.preventDefault(); last.focus(); }
+    else if (!ev.shiftKey && (active === last || !panel.contains(active))) { ev.preventDefault(); first.focus(); }
+  });
   const sealed = document.getElementById('packSealed');
   if (sealed) {
     sealed.addEventListener('click', () => revealPack());
@@ -4772,7 +5818,7 @@ btn('cmCraft').addEventListener('click', () => {
 });
 btn('cmDust').addEventListener('click', () => {
   const c = modalList[modalIdx]; if (!c) return;
-  const msg = dustCard(c.id); renderCardModal(); renderCollection();
+  const msg = disenchantCard(c.id); renderCardModal(); renderCollection();
   btn('cmDust').title = msg;
 });
 btn('cmFoil').addEventListener('click', () => {
@@ -4784,6 +5830,17 @@ btn('cmFoil').addEventListener('click', () => {
   foilSave(); metaSave();
   showToast(`🌟 «${c.name}» — фойл-версия создана!`);
   renderCardModal(); renderCollection();
+});
+btn('cmBorderless').addEventListener('click', () => {
+  const c = modalList[modalIdx]; if (!c || !hasBorderless(c.id)) return;
+  const equipped = toggleBorderless(c.id);
+  modalStyles[modalIdx] = 'auto';
+  renderCardModal();
+  if (!$('collection').classList.contains('hidden')) {
+    if (!$('dbMain').classList.contains('hidden')) renderEditor();
+    else renderCollection();
+  }
+  showToast(equipped ? `◇ Borderless надет: «${cardName(c)}»` : `Классический стиль включён: «${cardName(c)}»`);
 });
 let profTab = 'gen';
 const FRAME_DEFS: Array<{ id: string; ru: string; req: () => boolean }> = [
@@ -4808,16 +5865,16 @@ interface AchDef {
   prog: () => [number, number]; check: () => boolean; grant: () => void;
 }
 const ACH_DEFS: AchDef[] = [
-  { id: 'first_win', ru: 'Первая победа', ico: 0, rewardRu: '◈100',
+  { id: 'first_win', ru: 'Первая победа', ico: 0, rewardRu: '🪙100',
     prog: () => [Math.min(meta.wins, 1), 1], check: () => meta.wins >= 1,
     grant: () => shardsAdd(100) },
-  { id: 'win10', ru: '10 побед', ico: 4, rewardRu: '◈200 + рамка «Серебро»',
+  { id: 'win10', ru: '10 побед', ico: 4, rewardRu: '🪙200 + рамка «Серебро»',
     prog: () => [Math.min(meta.wins, 10), 10], check: () => meta.wins >= 10,
     grant: () => shardsAdd(200) },
-  { id: 'packs10', ru: '10 бустеров открыто', ico: 2, rewardRu: '◈200 + аватар «Лич»',
+  { id: 'packs10', ru: '10 бустеров открыто', ico: 2, rewardRu: '🪙200 + аватар «Лич»',
     prog: () => [Math.min(meta.packs, 10), 10], check: () => meta.packs >= 10,
     grant: () => shardsAdd(200) },
-  { id: 'mythic', ru: 'Все боссы кампании побеждены', ico: 5, rewardRu: '◈500 + 💎50',
+  { id: 'mythic', ru: 'Все боссы кампании побеждены', ico: 5, rewardRu: '🪙500 + 💎50',
     prog: () => [FACTION_IDS.filter(f => meta.campaign[f]).length, FACTION_IDS.length],
     check: () => FACTION_IDS.every(f => meta.campaign[f]),
     grant: () => { shardsAdd(500); gemsAdd(50); } },
@@ -4937,30 +5994,42 @@ document.addEventListener('click', ev => {
 });
 
 function openProfile(): void {
+  setAppRoute('profile');
+  $('menu').classList.add('hidden');
+  for (const id of ['homeScreen','eventsScreen','decksScreen','collection','shopModal','bpModal','boosterModal','campaignModal'])
+    document.getElementById(id)?.classList.add('hidden');
   const lvl = Math.floor(meta.xp / 500) + 1;
   const into = meta.xp % 500;
   const rank = rankOf(meta.mmr);
   const best = rankOf(meta.bestMmr ?? meta.mmr);
+  const totalMatches = meta.wins + meta.losses;
+  const winRate = totalMatches ? Math.round(meta.wins / totalMatches * 100) : 0;
+  const ownedBorderless = meta.borderlessOwned?.length ?? 0;
   const head = `
-    <div class="prfHead">
-      <div class="fava avaBig frame-${meta.frame || 'bronze'}">${avaGlyph()}${
-        PREMIUM_AVATARS[meta.avatarFac] ? '' : `<img src="/heroes/${encodeURIComponent(meta.avatarFac)}" alt="" onerror="this.remove()">`}</div>
-      <div style="flex:1">
-        <div style="display:flex;align-items:center;gap:.5rem">
-          <input id="nickInput" maxlength="16" value="${esc(meta.nick ?? 'Гость')}" aria-label="Никнейм" title="3–16 символов; уникальность проверяется на сервере">
-          <span style="font-size:.66rem;color:#7a7264">${meta.signedIn ? '· в аккаунте' : '· гость'}</span>
+    <section class="profileHero">
+      <div class="prfHead">
+        <div class="fava avaBig frame-${meta.frame || 'bronze'}">${avaGlyph()}${
+          PREMIUM_AVATARS[meta.avatarFac] ? '' : `<img src="/heroes/${encodeURIComponent(meta.avatarFac)}" alt="" onerror="this.remove()">`}</div>
+        <div class="profileIdentity">
+          <div class="profileNameRow">
+            <input id="nickInput" maxlength="16" value="${esc(meta.nick ?? 'Гость')}" aria-label="Никнейм" title="3–16 символов; уникальность проверяется на сервере">
+            <span class="profileAccountTag">${meta.signedIn ? 'АККАУНТ' : 'ГОСТЬ'}</span>
+          </div>
+          <div class="profileRankLine"><span class="profileRankMark">✦</span><b>${rank.title}</b><span>Лучший ранг: ${best.title}</span></div>
+          <div class="profileMeterLabel"><span>Уровень ${lvl} · опыт</span><span>${into}/500</span></div>
+          <div class="profileMeter"><i class="xpMeter" style="width:${(into / 500) * 100}%"></i></div>
+          <div class="profileMeterLabel rankMeterLabel"><span>Прогресс к рангу ${rank.next}</span><span>${Math.round(rank.prog * 100)}%</span></div>
+          <div class="profileMeter rankMeter"><i class="rankMeterFill" style="width:${rank.prog * 100}%"></i></div>
         </div>
-        <div style="font-family:Philosopher,serif;color:#ffe9b0;font-size:.95rem;margin-top:.2rem">
-          Уровень ${lvl} · ранг <b>${rank.title}</b> <span style="color:#7a7264;font-size:.7rem">(лучший: ${best.title})</span></div>
-        <div style="font-size:.68rem;color:#cbb98a">Опыт: ${into}/500 · до ранга ${rank.next}: ${Math.round(rank.prog * 100)}%</div>
-        <div style="height:6px;border-radius:4px;background:rgba(255,255,255,.12);margin-top:.25rem">
-          <div style="height:100%;width:${(into / 500) * 100}%;border-radius:4px;background:linear-gradient(90deg,#b98f3e,#ffd87a)"></div></div>
-        <div style="height:5px;border-radius:4px;background:rgba(255,255,255,.08);margin-top:.2rem">
-          <div style="height:100%;width:${rank.prog * 100}%;border-radius:4px;background:linear-gradient(90deg,#4a7ab9,#8fd0ff)"></div></div>
       </div>
-    </div>
-    <div class="ptabs">
-      ${([['gen', 'Общая'], ['ranked', 'Ранг'], ['cosm', 'Стили'], ['facs', 'Фракции'], ['hist', 'История'], ['fr', 'Друзья']] as Array<[string, string]>).map(([id, ru]) =>
+      <div class="profileStatsRow">
+        <div class="profileStat"><small>РЕЙТИНГ</small><b>${fmtNum(meta.mmr)}</b><span>MMR</span></div>
+        <div class="profileStat"><small>ПОБЕДЫ</small><b>${fmtNum(meta.wins)}</b><span>${winRate}% побед</span></div>
+        <div class="profileStat"><small>КОЛЛЕКЦИЯ</small><b>${ownedBorderless}<em> / ${ALL_CARDS.length}</em></b><span>Borderless</span></div>
+      </div>
+    </section>
+    <div class="ptabs profileTabs">
+      ${([['gen', 'Обзор'], ['ranked', 'Ранг'], ['cosm', 'Косметика'], ['facs', 'Фракции'], ['hist', 'История'], ['fr', 'Друзья']] as Array<[string, string]>).map(([id, ru]) =>
         `<button class="btn ptab${profTab === id ? ' sel' : ''}" data-ptab="${id}">${ru}</button>`).join('')}
     </div>`;
   let bodyHtml = '';
@@ -4978,17 +6047,17 @@ function openProfile(): void {
       .map(([id, n]) => `${db.get(id)?.name ?? id} ×${n}`).join(', ') || '—';
     const qs = meta.quests.map(q => {
       const done = q.prog >= q.goal;
-      return `<div class="setRow" style="margin:0">
-        <div style="flex:1;font-size:.74rem;color:#e6d6ac">${esc(QUEST_RU[q.id]?.(q) ?? q.id)} — ${q.prog}/${q.goal}</div>
-        <button class="btn qClaim" data-q="${q.id}" ${done && !q.claimed ? '' : 'disabled'}>
-          ${q.claimed ? 'Получено' : `◈${DAILY_REWARD[q.id] ?? 0}`}</button></div>`;
+      return `<div class="setRow profileQuestRow" style="margin:0">
+        <div class="profileQuestText">${esc(QUEST_RU[q.id]?.(q) ?? q.id)} — ${q.prog}/${q.goal}${done ? '<small class="questInlineReset questReset" data-quest-reset="daily" data-reset-prefix="Сброс через">—</small>' : ''}</div>
+        <button class="btn qClaim" data-q="${esc(q.id)}" ${done && !q.claimed ? '' : 'disabled'}>
+          ${q.claimed ? 'Получено' : `🪙${DAILY_REWARD[q.id] ?? 0}`}</button></div>`;
     }).join('');
     const wqs = (meta.wquests ?? []).map(q => {
       const done = q.prog >= q.goal;
-      return `<div class="setRow" style="margin:0">
-        <div style="flex:1;font-size:.74rem;color:#c9b6e6">${esc(WQUEST_RU[q.id] ?? q.id)} — ${q.prog}/${q.goal}</div>
-        <button class="btn wqClaim" data-q="${q.id}" ${done && !q.claimed ? '' : 'disabled'}>
-          ${q.claimed ? 'Получено' : `◈${WEEK_REWARD[q.id] ?? 0} +250 BP`}</button></div>`;
+      return `<div class="setRow profileQuestRow" style="margin:0">
+        <div class="profileQuestText profileWeeklyQuestText">${esc(WQUEST_RU[q.id] ?? q.id)} — ${q.prog}/${q.goal}${done ? '<small class="questInlineReset questReset" data-quest-reset="weekly" data-reset-prefix="Сброс через">—</small>' : ''}</div>
+        <button class="btn wqClaim" data-q="${esc(q.id)}" ${done && !q.claimed ? '' : 'disabled'}>
+          ${q.claimed ? 'Получено' : `🪙${WEEK_REWARD[q.id] ?? 0} +250 BP`}</button></div>`;
     }).join('');
     const achs = ACH_DEFS.map(a => {
       const [p, g] = a.prog();
@@ -5002,14 +6071,27 @@ function openProfile(): void {
     const frames = FRAME_DEFS.map(fr =>
       `<button class="btn frameBtn${meta.frame === fr.id ? ' sel' : ''}" data-fr="${fr.id}" title="${fr.ru}">${fr.req() ? '◆' : '🔒'} ${fr.ru}</button>`).join('');
     bodyHtml = `
-      <div class="jl">Всего матчей: <b>${total}</b> · винрейт <b>${wrAll}%</b> · любимая фракция: <b>${fav}</b></div>
-      <div class="jl">Средняя длина матча: ${avgT ? `${avgT} ходов / ${avgS} с` : '—'} · чаще застревают: ${topStuck}</div>
-      <div class="jl">Валюты: ◈ ${shardsGet()} · 💎 ${gemsGet()} · бустеров в запасе: ${meta.freeOpens ?? 0} · рейтинг ${meta.mmr}</div>
-      <h4 class="shopH">Аватар (5 фракций + премиум)</h4><div class="ptabs">${avas}</div>
-      <h4 class="shopH">Рамка аватара (открывается за достижения)</h4><div class="ptabs">${frames}</div>
-      <h4 class="shopH">Задания дня</h4>${qs}
-      <h4 class="shopH">Задания недели</h4>${wqs}
-      <h4 class="shopH">Достижения</h4>${achs}`;
+      <div class="profileOverviewGrid">
+        <section class="profilePanel profileSummaryPanel">
+          <h3 class="profilePanelTitle">Статистика сезона</h3>
+          <div class="profileMetricGrid">
+            <div class="profileMetric"><small>МАТЧИ</small><b>${total}</b><span>всего</span></div>
+            <div class="profileMetric"><small>ВИНРЕЙТ</small><b>${wrAll}%</b><span>побед</span></div>
+            <div class="profileMetric"><small>ЛЮБИМАЯ ФРАКЦИЯ</small><b class="profileMetricText">${fav}</b><span>по победам</span></div>
+          </div>
+          <div class="profileDetailLine">Средняя длина: <b>${avgT ? `${avgT} ходов / ${avgS} с` : '—'}</b></div>
+          <div class="profileDetailLine">Чаще застревают: <b>${esc(topStuck)}</b></div>
+          <div class="profileCurrencyLine">🪙 <b>${shardsGet()}</b><span>монет</span> · 💎 <b>${gemsGet()}</b><span>гемов</span> · 🎁 <b>${meta.freeOpens ?? 0}</b><span>бустеров</span></div>
+        </section>
+        <section class="profilePanel profileCustomizationPanel">
+          <h3 class="profilePanelTitle">Персонализация</h3>
+          <h4 class="shopH">Аватар · 5 фракций + премиум</h4><div class="ptabs profileChoiceGrid">${avas}</div>
+          <h4 class="shopH">Рамка · награды достижений</h4><div class="ptabs profileChoiceGrid">${frames}</div>
+        </section>
+      </div>
+      <section class="profilePanel profileTasksPanel"><h3 class="profilePanelTitle">Задания дня</h3>${qs}</section>
+      <section class="profilePanel profileTasksPanel"><h3 class="profilePanelTitle">Задания недели</h3>${wqs}</section>
+      <section class="profilePanel profileTasksPanel"><h3 class="profilePanelTitle">Достижения</h3>${achs}</section>`;
   }
 
   if (profTab === 'ranked') {
@@ -5018,17 +6100,17 @@ function openProfile(): void {
     const best = rankOf(meta.bestMmr ?? meta.mmr);
     const rewards = [
       { name:'Награда Бронзы', sub:'1 бустер', packs:1, gold:0 },
-      { name:'Награда Серебра', sub:'1 бустер · ◈500', packs:1, gold:500 },
-      { name:'Награда Золота', sub:'2 бустера · ◈1000', packs:2, gold:1000 },
-      { name:'Награда Платины', sub:'3 бустера · ◈1000', packs:3, gold:1000 },
-      { name:'Награда Алмаза', sub:'4 бустера · ◈1000', packs:4, gold:1000 },
-      { name:'Награда Мифика', sub:'5 бустеров · ◈1000', packs:5, gold:1000 },
+      { name:'Награда Серебра', sub:'1 бустер · 🪙500', packs:1, gold:500 },
+      { name:'Награда Золота', sub:'2 бустера · 🪙1000', packs:2, gold:1000 },
+      { name:'Награда Платины', sub:'3 бустера · 🪙1000', packs:3, gold:1000 },
+      { name:'Награда Алмаза', sub:'4 бустера · 🪙1000', packs:4, gold:1000 },
+      { name:'Награда Мифика', sub:'5 бустеров · 🪙1000', packs:5, gold:1000 },
     ];
     const rows = rewards.map(rw=> `
       <div class="rewardRow">
         <div class="rewardName">${rw.name}<span>${rw.sub.replace('\n',' · ')}</span></div>
         <div class="rewardPacks">${Array.from({length:rw.packs}, (_,i)=> `<div class="rewardPack">◈</div>`).join('')}</div>
-        <div class="rewardGold">${rw.gold? `<i>◈</i> ${rw.gold}`:''}</div>
+        <div class="rewardGold">${rw.gold? `<i>🪙</i> ${rw.gold}`:''}</div>
       </div>
     `).join('');
     bodyHtml = `
@@ -5080,7 +6162,17 @@ function openProfile(): void {
         <div class="sleeveName">${s.name}</div>
       </div>
     `).join('');
-    bodyHtml = `
+    const borderlessProgress = Math.min(BORDERLESS_EVENT_WINS, meta.borderlessEventWins ?? 0);
+    const borderlessPanel = `<section class="borderlessProfilePanel">
+      <div class="borderlessProfileHead"><div><span class="profileEyebrow">ТЕ ЖЕ КАРТЫ · ТОЛЬКО БЕЗ РАМОК</span>
+        <h3>Borderless <b>${ownedBorderless}<i> / ${ALL_CARDS.length}</i></b></h3></div>
+        <span class="borderlessGem" aria-hidden="true">◇</span></div>
+      <div class="profileMeter borderlessMeter"><i style="width:${ownedBorderless / ALL_CARDS.length * 100}%"></i></div>
+      <p>Ещё ${ALL_CARDS.length} коллекционных вариантов: те же названия и арт, но без стандартной рамки. Правила и характеристики не меняются. Получение: событие или шанс <b>0,1% на бустер</b>.</p>
+      <div class="borderlessEventMini">Событие «Галерея без границ» · рейтинговые победы: <b>${borderlessProgress}/${BORDERLESS_EVENT_WINS}</b></div>
+      <button type="button" class="btn borderlessBrowse" id="btnProfileBorderlessCollection">Открыть Borderless в коллекции →</button>
+    </section>`;
+    bodyHtml = borderlessPanel + `
       <div style="display:flex;gap:1rem;align-items:flex-start;flex-wrap:wrap">
         <div class="sleeveGrid">${grid}</div>
         <div class="sleevePreview">
@@ -5147,13 +6239,21 @@ function openProfile(): void {
       <div class="jl" style="opacity:.7">Приглашение запускает товарищеский матч без влияния на рейтинг (лобби-сервер — roadmap match-server).</div>`;
   }
   $('profBody').innerHTML = head + bodyHtml;
+  updateQuestCountdowns();
   syncProfile();   // спека 2.1–2.4: профиль/задания сохраняются на сервере (best-effort)
   $('profileModal').classList.remove('hidden');
 }
 
 // sleeve selection in profile cosm tab
 document.addEventListener('click', ev=>{
-  const sc = (ev.target as HTMLElement | null)?.closest?.('.sleeveCard') as HTMLElement | null;
+  const target = ev.target as HTMLElement | null;
+  if (target?.closest?.('#btnProfileBorderlessCollection')) {
+    openCollectionScreen();
+    const style = document.getElementById('colStyle') as HTMLSelectElement | null;
+    if (style) { style.value = 'borderless'; style.dispatchEvent(new Event('change', { bubbles: true })); }
+    return;
+  }
+  const sc = target?.closest?.('.sleeveCard') as HTMLElement | null;
   if (sc?.dataset.sleeve && !sc.querySelector('.lock')) {
     Sfx.uiClick();
     meta.backEq = sc.dataset.sleeve;
@@ -5200,14 +6300,8 @@ function inviteFriend(nick: string): void {
 }
 document.addEventListener('click', ev => {
   const t = (ev.target as HTMLElement | null)?.closest?.('.qClaim') as HTMLElement | null;
-  if (!t || t.hasAttribute('disabled')) return;
-  const q = meta.quests.find(x => x.id === t.dataset.q);
-  if (!q || q.claimed || q.prog < q.goal) return;
-  q.claimed = true; shardsAdd(DAILY_REWARD[q.id] ?? 0);
-  meta.bpXp = (meta.bpXp ?? 0) + 150;
-  metaSave(); renderShards(); openProfile();
-  apiSend('/api/quests/claim', { id: q.id, kind: 'daily', prog: q.prog, goal: q.goal });
-  showToast(`Задание выполнено: ◈${DAILY_REWARD[q.id] ?? 0} и +150 опыта пропуска`);
+  if (!t || t.hasAttribute('disabled') || !t.dataset.q) return;
+  claimQuestReward('daily', t.dataset.q);
 });
 
 const SHOP_BACKS: Record<string, { ru: string; price: number; bpOnly?: boolean }> = {
@@ -5283,7 +6377,7 @@ btn('btnCosmPrevClose').addEventListener('click', () => { Sfx.uiClick(); $('cosm
 $('cosmPreview').addEventListener('click', ev => { if (ev.target === $('cosmPreview')) $('cosmPreview').classList.add('hidden'); });
 
 /* --- v2.5.2: магазин в манере магазина MTG Arena (скрин 2): заголовок-витрина,
-     горизонтальная лента оффер-карточек, градиентные цены (💎 синий / ◈ оранжевый),
+     горизонтальная лента оффер-карточек, градиентные цены (💎 гемы / 🪙 монеты),
      вкладки-табы внизу. Все id/классы покупок сохранены (buyPack/buyFacPack/buyBundle11/
      btnStarter/buyBundle/backBtn/tableBtn/runeBtn/craftBtn2/cosmPrev + data-stab). --- */
 function ofCard(artCls: string, artInner: string, name: string, sub: string, btnHtml: string): string {
@@ -5294,9 +6388,13 @@ function ofCard(artCls: string, artInner: string, name: string, sub: string, btn
 }
 const OF_FAN = '<span class="ofFan"><i></i><i></i><i></i></span>';
 function openShop(): void {
+  setAppRoute('store');
+  $('menu').classList.add('hidden');
+  for (const id of ['homeScreen','eventsScreen','decksScreen','collection','profileModal','bpModal','boosterModal','campaignModal'])
+    document.getElementById(id)?.classList.add('hidden');
   void applyCosmArt(); // v2.5.4: свежий дроп арта подхватывается при каждом открытии магазина
   const wallet = `
-    <span class="shardPill" title="Пыль ◈ (золото): бустеры, крафт (5/20/100/400) и разбор (1/5/20/100)"><img class="curIco" src="img/ico_cur_0.png" alt="◈" onerror="this.outerHTML='◈ '"> <b>${shardsGet()}</b></span>
+    <span class="shardPill" title="Монеты: бустеры, создание и разбор карт; дубликаты сверх 4 копий дают монеты"><img class="curIco" src="img/ico_cur_0.png" alt="🪙" onerror="this.outerHTML='🪙 '"> <b>${shardsGet()}</b></span>
     <span class="shardPill" title="Гемы: премиум-валюта (достижения, пропуск, кампания)"><img class="curIco" src="img/ico_cur_1.png" alt="💎" onerror="this.outerHTML='💎 '"> <b>${gemsGet()}</b></span>
     ${(meta.freeOpens ?? 0) > 0 ? `<span class="shardPill" title="Бесплатные бустеры из наборов и пропуска">🎁 <b>${meta.freeOpens}</b></span>` : ''}`;
   const TABS: Array<[string, string]> = [['boosters', 'Предложения'], ['bundles', 'Наборы'], ['cosm', 'Косметика'], ['craft', 'Крафт']];
@@ -5314,13 +6412,15 @@ function openShop(): void {
     ];
     const packVisHtml = (kind:string, qty:number): string => {
       // art_raw/cosm/offers/<id> — если вставишь PNG, он покажется объёмно поверх фолбэка
-      const artMyth = cosmImg('offers', 'mythic', 'packOfferArtImg');
+      const artMyth = cosmImg('offers', 'booster_premium', 'packOfferArtImg');
       const artBooster = cosmImg('offers', 'booster', 'packOfferArtImg');
+      const packTile = (packArt: string, theme: 'standard' | 'mythic', layer: 'v1' | 'v2' | 'v3', label: string): string =>
+        `<div class="packVis ${theme === 'mythic' ? 'mythic ' : ''}${layer}">${packArt}<span class="pvSig">✦</span><span class="pvLbl">${label}</span></div>`;
       if (kind === 'mythic') {
-        if (qty >= 10) return `<div class="packVisWrap"><div class="packVis mythic v1"><span class="pvSig">◈</span></div><div class="packVis mythic v2">${artMyth}<span class="pvSig">✦</span><span class="pvLbl">Mythic</span></div><div class="packVis mythic v3"><span class="pvSig">◈</span></div></div>`;
+        if (qty >= 10) return `<div class="packVisWrap">${packTile(cosmImg('offers', 'booster_premium', 'packOfferArtImg'), 'mythic', 'v1', 'Mythic')}${packTile(artMyth, 'mythic', 'v2', 'Mythic')}${packTile(cosmImg('offers', 'booster_premium', 'packOfferArtImg'), 'mythic', 'v3', 'Mythic')}</div>`;
         return `<div class="packVisWrap"><div class="packVis mythic v2" style="position:relative;left:auto;transform:none">${artMyth}<span class="pvSig" style="font-size:28px">✦</span><span class="pvLbl">Mythic</span></div></div>`;
       }
-      if (qty >= 15) return `<div class="packVisWrap"><div class="packVis v1"><span class="pvSig">◈</span></div><div class="packVis v2">${artBooster}<span class="pvSig">✦</span><span class="pvLbl">ECH I</span></div><div class="packVis v3"><span class="pvSig">◈</span></div></div>`;
+      if (qty >= 15) return `<div class="packVisWrap">${packTile(cosmImg('offers', 'booster', 'packOfferArtImg'), 'standard', 'v1', 'ECH I')}${packTile(artBooster, 'standard', 'v2', 'ECH I')}${packTile(cosmImg('offers', 'booster', 'packOfferArtImg'), 'standard', 'v3', 'ECH I')}</div>`;
       return `<div class="packVisWrap"><div class="packVis v2" style="position:relative;left:auto;transform:none">${artBooster}<span class="pvSig" style="font-size:26px">✦</span><span class="pvLbl">ECH I</span></div></div>`;
     };
     const freeInfo = (meta.freeOpens ?? 0) > 0 ? `<span style="color:#ffd87a;font-weight:700"> · бесплатных: ${meta.freeOpens}</span>` : '';
@@ -5331,27 +6431,27 @@ function openShop(): void {
         <div class="packOfferTitle">${o.ru}${o.qty>1?` · ${o.qty}×`:''}${freeInfo && o.id==='p1' ? freeInfo : ''}</div>
         <div class="packOfferPrices">
           <button class="priceBtn gem buyPackOffer" data-offer="${o.id}" data-cur="gem"><span class="ico">💎</span> ${o.gem.toLocaleString('ru-RU')}</button>
-          <button class="priceBtn gold buyPackOffer" data-offer="${o.id}" data-cur="gold"><span class="ico">◈</span> ${o.gold.toLocaleString('ru-RU')}</button>
+          <button class="priceBtn gold buyPackOffer" data-offer="${o.id}" data-cur="gold"><span class="ico">🪙</span> ${o.gold.toLocaleString('ru-RU')}</button>
         </div>
       </div>`).join('') + `</div>`;
     // сохраняем старые быстрые покупки фракционных как скрытый ряд (для совместимости)
-    h += `<details style="margin:.4rem 0 0"><summary style="cursor:pointer;font-size:.68rem;color:#a99a7a;letter-spacing:.04em">Фракционные наборы · ◈350</summary><div class="ofRow" style="padding-top:.5rem">` +
+    h += `<details style="margin:.4rem 0 0"><summary style="cursor:pointer;font-size:.68rem;color:#a99a7a;letter-spacing:.04em">Фракционные наборы · 🪙350</summary><div class="ofRow" style="padding-top:.5rem">` +
       FACTION_IDS.map(f => ofCard(`a-fac f-${f}`, cosmImg('offers', 'pack_' + f, 'ofArtImg') + `<span class="ofSig">${FACTION_SIGIL[f]}</span>`,
         `Набор ${FACTION_RU[f as Faction]}`, '5 карт одной фракции',
-        `<button class="btn price gold buyFacPack" data-f="${f}">◈350</button>`)).join('') + `</div></details>`;
+        `<button class="btn price gold buyFacPack" data-f="${f}">🪙350</button>`)).join('') + `</div></details>`;
     h += `<div class="shopNavBottom"><span class="navItem">Featured</span><span class="navItem">Gems</span><span class="navItem sel">Packs</span><span class="navItem">Daily Deals</span><span class="navItem" data-goto="bundles">Bundles</span><span class="navItem">Avatars</span><span class="navItem">Sleeves</span><span class="navItem">Pets</span></div>`;
-    h += `<div class="packStoreFoot">Дубликаты сверх 4 копий → ◈ (1/5/20/100). Оплата 💎 — гемы, ◈ — пыль. Паки копятся и открываются в меню «◈ Бустеры».</div>`;
+    h += `<div class="packStoreFoot">Дубликаты сверх 4 копий превращаются в монеты (1/2/5/20/100). Оплата 💎 — гемы, 🪙 — монеты. Бустеры копятся и открываются в разделе «Бустеры».</div>`;
   }
   if (shopTab === 'bundles') {
     h += `<div class="ofRow">` +
       ofCard('a-starter', cosmImg('bundles', 'starter', 'ofArtImg') + '<span class="ofBig">🃏</span>', 'Набор новичка',
         '10 карт базы (кривая 1–3, по 2 на фракцию) · одна покупка на аккаунт',
-        `<button class="btn price gold" id="btnStarter" ${meta.starter ? 'disabled' : ''}>${meta.starter ? 'Куплен' : '◈800'}</button>`) +
+        `<button class="btn price gold" id="btnStarter" ${meta.starter ? 'disabled' : ''}>${meta.starter ? 'Куплен' : '🪙800'}</button>`) +
       BUNDLES.map(b => {
         const bought = (meta.bundles ?? []).includes(b.fac);
         return ofCard(`a-fac f-${b.fac}`, cosmImg('bundles', b.fac, 'ofArtImg') + `<span class="ofSig">${FACTION_SIGIL[b.fac as Faction]}</span>`,
           `Набор «${FACTION_RU[b.fac as Faction]}»`,
-          '10 бустеров + ◈500 + эксклюзивный аватар «Архонт» ✧ · разовая покупка',
+          '10 бустеров + 🪙500 + эксклюзивный аватар «Архонт» ✧ · разовая покупка',
           `<button class="btn price gem buyBundle" data-f="${b.fac}" ${bought ? 'disabled' : ''}>${bought ? 'Куплен' : `💎${b.price}`}</button>`);
       }).join('') +
       `</div><div class="jl" style="opacity:.75">В релизе стартовые наборы покупаются за реальные деньги; в прототипе — за гемы 💎.</div>`;
@@ -5367,25 +6467,25 @@ function openShop(): void {
       const eq = meta.backEq === id;
       const locked = !!b.bpOnly && !ownedB;
       return tile(`<i class="cardback mini back-${id}">${cosmImg('backs', id, 'cbArt')}</i>`, `Рубашка «${b.ru}»`,
-        locked ? 'награда боевого пропуска' : ownedB ? (eq ? 'надета' : 'в коллекции') : `◈${b.price}`,
+        locked ? 'награда боевого пропуска' : ownedB ? (eq ? 'надета' : 'в коллекции') : `🪙${b.price}`,
         prevBtn('back', id, 'Предпросмотр: как рубашка выглядит на карте'),
-        `<button class="btn price gold smBtn backBtn" data-b="${id}" ${ownedB ? (eq ? 'disabled' : '') : locked ? 'disabled' : `data-price="${b.price}"`}>${ownedB ? (eq ? 'Надета' : 'Надеть') : locked ? '🔒' : `◈${b.price}`}</button>`);
+        `<button class="btn price gold smBtn backBtn" data-b="${id}" ${ownedB ? (eq ? 'disabled' : '') : locked ? 'disabled' : `data-price="${b.price}"`}>${ownedB ? (eq ? 'Надета' : 'Надеть') : locked ? '🔒' : `🪙${b.price}`}</button>`);
     }).join('');
     const tables = Object.entries(TABLE_SKINS).map(([id, k]) => {
       const ownedT = id === 'classic' || (meta.tablesOwned ?? []).includes(id);
       const eq = (meta.tableSkin || 'classic') === id;
       return tile(`<i class="ofSw t-${id}">${cosmImg('tables', id, 'ofSwImg')}</i>`, `Стол «${k.ru}»`,
-        ownedT ? (eq ? 'надет' : 'в коллекции') : k.cur === 'gem' ? `💎${k.price}` : `◈${k.price}`,
+        ownedT ? (eq ? 'надет' : 'в коллекции') : k.cur === 'gem' ? `💎${k.price}` : `🪙${k.price}`,
         prevBtn('table', id, 'Предпросмотр: фрагмент игрового стола'),
-        `<button class="btn price ${k.cur === 'gem' ? 'gem' : 'gold'} smBtn tableBtn" data-id="${id}" ${ownedT && eq ? 'disabled' : ''}>${ownedT ? (eq ? 'Надет' : 'Надеть') : k.cur === 'gem' ? `💎${k.price}` : `◈${k.price}`}</button>`);
+        `<button class="btn price ${k.cur === 'gem' ? 'gem' : 'gold'} smBtn tableBtn" data-id="${id}" ${ownedT && eq ? 'disabled' : ''}>${ownedT ? (eq ? 'Надет' : 'Надеть') : k.cur === 'gem' ? `💎${k.price}` : `🪙${k.price}`}</button>`);
     }).join('');
     const runes = Object.entries(RUNE_SKINS).map(([id, k]) => {
       const ownedR = id === 'classic' || (meta.runesOwned ?? []).includes(id);
       const eq = (meta.runeSkin || 'classic') === id;
       return tile(`<i class="ofSw r-${id}">${cosmImg('runes', id, 'rcImg')}✦</i>`, `Руны «${k.ru}»`,
-        ownedR ? (eq ? 'надеты' : 'в коллекции') : k.cur === 'gem' ? `💎${k.price}` : `◈${k.price}`,
+        ownedR ? (eq ? 'надеты' : 'в коллекции') : k.cur === 'gem' ? `💎${k.price}` : `🪙${k.price}`,
         prevBtn('rune', id, 'Предпросмотр: анимация рун'),
-        `<button class="btn price ${k.cur === 'gem' ? 'gem' : 'gold'} smBtn runeBtn" data-id="${id}" ${ownedR && eq ? 'disabled' : ''}>${ownedR ? (eq ? 'Надета' : 'Надеть') : k.cur === 'gem' ? `💎${k.price}` : `◈${k.price}`}</button>`);
+        `<button class="btn price ${k.cur === 'gem' ? 'gem' : 'gold'} smBtn runeBtn" data-id="${id}" ${ownedR && eq ? 'disabled' : ''}>${ownedR ? (eq ? 'Надета' : 'Надеть') : k.cur === 'gem' ? `💎${k.price}` : `🪙${k.price}`}</button>`);
     }).join('');
     h += `<div class="ofGrid"><div class="ofGroup">Рубашки карт</div>${backs}
       <div class="ofGroup">Скины игрового стола</div>${tables}
@@ -5394,20 +6494,30 @@ function openShop(): void {
       премиум-аватары за достижения и стартовые наборы, рамки — за достижения и пропуск.</div>`;
   }
   if (shopTab === 'craft') {
-    const craftable = [...db.values()].filter(c => isExpansionId(c.id) && ownedCount(c.id) < PLAYSET)
+    const craftable = [...db.values()].filter(c => !STARTER_CARD_IDS.has(c.id) && ownedCount(c.id) < PLAYSET)
       .sort((a, b) => (CRAFT_COST[a.rarity] ?? 0) - (CRAFT_COST[b.rarity] ?? 0)).slice(0, 14);
-    h += `<div class="jl">Пыль ◈ = золото: разбор дубликатов даёт ◈ (1/5/20/100 по редкости),
-      крафт стоит ◈ (5/20/100/400). Точечный крафт любой карты — в коллекции (клик по карте).</div>
-      <div class="ofGroup">Быстрый крафт: недостающие карты ECH1</div>` +
+    h += `<div class="jl">Монеты: разбор дубликатов выдаёт 1/2/5/20/100 монет по редкости;
+      создание карты стоит 5/10/20/100/400 монет. Точечное создание любой карты — в коллекции (клик по карте).</div>
+      <div class="ofGroup">Быстрое создание: карты вне стартовых колод</div>` +
       (craftable.map(c => `<div class="cfRow"><div class="cfName">${esc(c.name)} · ${RARITY_RU[c.rarity]} · ${c.cost} маны
         <span class="setHint">${ownedCount(c.id)}/4 копии</span></div>
-        <button class="btn price gold craftBtn2" data-id="${c.id}">◈${CRAFT_COST[c.rarity] ?? 100}</button></div>`).join('')
-        || '<div class="jl">Все карты расширения собраны 🏆</div>');
+        <button class="btn price gold craftBtn2" data-id="${c.id}">🪙${CRAFT_COST[c.rarity] ?? 100}</button></div>`).join('')
+        || '<div class="jl">Все карты вне стартовых колод собраны 🏆</div>');
   }
   h += `<div class="shTabs">${TABS.map(([id, ru]) =>
     `<button class="btn shTab stab${shopTab === id ? ' sel' : ''}" data-stab="${id}">${ru}</button>`).join('')}</div>`;
   $('shopBody').innerHTML = h;
   $('shopModal').classList.remove('hidden');
+  // Когда загружен PNG самого пакета, убираем процедурный корпус/значки с его контейнера.
+  document.querySelectorAll<HTMLImageElement>('#shopBody .packOfferArtImg').forEach(img => {
+    const markArt = (): void => {
+      const pack = img.closest('.packVis');
+      pack?.classList.add('hasArt');
+      pack?.closest('.packOfferArt')?.classList.add('hasPackArt');
+    };
+    img.addEventListener('load', markArt, { once: true });
+    if (img.complete && img.naturalWidth > 0) markArt();
+  });
   // объём как в MTG — после рендера витрины цепляем 3D-блик
   try { attachVolumetric(document.getElementById('shopBody')!); } catch {}
   try { const _sealed = document.getElementById('packSealed'); if (_sealed) attachVolumetric(_sealed.parentElement!); } catch {}
@@ -5419,22 +6529,20 @@ document.addEventListener('click', ev => {
   const cp = t?.closest?.('.cosmPrev') as HTMLElement | null;
   if (cp?.dataset.kind) { Sfx.uiClick(); openCosmPreview(cp.dataset.kind, cp.dataset.id ?? ''); return; }
   if (t?.id === 'buyPack') {
-    if (shardsGet() < PACK_PRICE && (meta.freeOpens ?? 0) <= 0) { showToast('Недостаточно ◈'); return; }
-    $('shopModal').classList.add('hidden');
-    hideSealedInstant();
-    $('boosterModal').classList.remove('hidden');
-    const _pr = $('packRow'); if (_pr) _pr.innerHTML=''; const _st=document.getElementById('packStage') as HTMLElement|null; if(_st) _st.classList.remove('hasSealed');
-    newPack();
+    if (shardsGet() < PACK_PRICE) { showToast('Недостаточно монет'); return; }
+    shardsAdd(-PACK_PRICE);
+    meta.freeOpens = (meta.freeOpens ?? 0) + 1;
+    metaSave();
+    openBoosterPanel();
+    showToast('Бустер добавлен в коллекцию паков — выберите его, чтобы вскрыть');
     return;
   }
   const fp = t?.closest?.('.buyFacPack') as HTMLElement | null;
   if (fp?.dataset.f) {
-    if (shardsGet() < 350) { showToast('Нужно ◈350'); return; }
+    if (pendingPack) { showToast('Сначала вскройте выбранный бустер'); return; }
+    if (shardsGet() < 350) { showToast('Нужно 350 монет'); return; }
     shardsAdd(-350);
-    hideSealedInstant();
-    $('shopModal').classList.add('hidden');
-    $('boosterModal').classList.remove('hidden');
-    const _st2=document.getElementById('packStage') as HTMLElement|null; if(_st2) _st2.classList.remove('hasSealed');
+    openBoosterPanel();
     const slots = drawFactionPack(fp.dataset.f);
     renderShards();
     showSealedPack(slots, 'pack_' + fp.dataset.f);
@@ -5455,28 +6563,31 @@ document.addEventListener('click', ev => {
       if (gemsGet() < o.gem) { showToast(`Нужно 💎${o.gem}`); return; }
       gemsAdd(-o.gem);
     } else {
-      if (shardsGet() < o.gold) { showToast(`Нужно ◈${o.gold}`); return; }
+      if (shardsGet() < o.gold) { showToast(`Нужно ${o.gold} монет`); return; }
       shardsAdd(-o.gold);
     }
     if (o.kind === 'mythic') {
       meta.premOpens = (meta.premOpens ?? 0) + o.qty;
-      metaSave(); renderShards(); openShop();
-      showToast(`✦ ${o.qty} мифических паков — открывай в «◈ Бустеры» (премиум)`);
+      metaSave();
+      openBoosterPanel();
+      showToast(`✦ ${o.qty} премиум-бустеров добавлено в коллекцию паков`);
     } else {
       meta.freeOpens = (meta.freeOpens ?? 0) + o.qty;
-      metaSave(); renderShards(); openShop();
-      showToast(`🎁 ${o.qty} бустеров — открывай в «◈ Бустеры» · паков в запасе ${meta.freeOpens}`);
+      metaSave();
+      openBoosterPanel();
+      showToast(`🎁 ${o.qty} бустеров добавлено в коллекцию паков`);
     }
     return;
   }
   const navGo = (t?.closest?.('.navItem[data-goto]') as HTMLElement | null)?.dataset.goto;
   if (navGo) { shopTab = navGo; openShop(); return; }
   if (t?.id === 'buyBundle11') {
-    if (shardsGet() < 2700) { showToast('Нужно ◈2700'); return; }
+    if (shardsGet() < 2700) { showToast('Нужно 2700 монет'); return; }
     shardsAdd(-2700);
     meta.freeOpens = (meta.freeOpens ?? 0) + 11;
-    metaSave(); renderShards(); openShop();
-    showToast('🎁 Набор «10+1»: 11 бустеров ждут в меню «◈ Бустеры»');
+    metaSave();
+    openBoosterPanel();
+    showToast('🎁 Набор «10+1»: 11 бустеров добавлены в коллекцию паков');
     return;
   }
   const bb = t?.closest?.('.backBtn') as HTMLElement | null;
@@ -5484,7 +6595,7 @@ document.addEventListener('click', ev => {
     const id = bb.dataset.b ?? 'classic';
     if (!meta.backsOwned.includes(id)) {
       const price = Number(bb.dataset.price ?? 0);
-      if (shardsGet() < price) { showToast('Недостаточно ◈'); return; }
+      if (shardsGet() < price) { showToast('Недостаточно монет'); return; }
       shardsAdd(-price); meta.backsOwned.push(id); renderShards();
     }
     meta.backEq = id; metaSave();
@@ -5500,10 +6611,13 @@ document.addEventListener('click', ev => {
     meta.tablesOwned = meta.tablesOwned ?? [];
     if (id !== 'classic' && !meta.tablesOwned.includes(id)) {
       if (k.cur === 'gem') { if (gemsGet() < k.price) { showToast(`Нужно 💎${k.price}`); return; } gemsAdd(-k.price); }
-      else { if (shardsGet() < k.price) { showToast(`Нужно ◈${k.price}`); return; } shardsAdd(-k.price); }
+      else { if (shardsGet() < k.price) { showToast(`Нужно ${k.price} монет`); return; } shardsAdd(-k.price); }
       meta.tablesOwned.push(id);
     }
-    meta.tableSkin = id; metaSave(); applySettings(); openShop();
+    meta.tableSkin = id; metaSave(); applySettings();
+    if (!$('battle').classList.contains('hidden')) applyBattleBg(battle.playerFaction);
+    void applyCosmArt();
+    openShop();
     return;
   }
   const rb = t?.closest?.('.runeBtn') as HTMLElement | null;
@@ -5513,7 +6627,7 @@ document.addEventListener('click', ev => {
     meta.runesOwned = meta.runesOwned ?? [];
     if (id !== 'classic' && !meta.runesOwned.includes(id)) {
       if (k.cur === 'gem') { if (gemsGet() < k.price) { showToast(`Нужно 💎${k.price}`); return; } gemsAdd(-k.price); }
-      else { if (shardsGet() < k.price) { showToast(`Нужно ◈${k.price}`); return; } shardsAdd(-k.price); }
+      else { if (shardsGet() < k.price) { showToast(`Нужно ${k.price} монет`); return; } shardsAdd(-k.price); }
       meta.runesOwned.push(id);
     }
     meta.runeSkin = id; metaSave(); applySettings(); openShop();
@@ -5548,8 +6662,9 @@ document.addEventListener('click', ev => {
     meta.freeOpens = (meta.freeOpens ?? 0) + 10;
     if (!meta.avatarsOwned.includes('arch')) meta.avatarsOwned.push('arch');
     shardsAdd(500);
-    metaSave(); renderShards(); openShop();
-    showToast(`🎁 Набор «${FACTION_RU[fac as Faction]}»: 10 бустеров, ◈500 и аватар «Архонт» ✧`);
+    metaSave();
+    openBoosterPanel();
+    showToast(`🎁 Набор «${FACTION_RU[fac as Faction]}»: 10 бустеров добавлены в коллекцию паков`);
   }
 });
 document.body.dataset.back = meta.backEq || 'classic';
@@ -5594,14 +6709,8 @@ document.addEventListener('click', ev => {
     return;
   }
   const wq = t0?.closest?.('.wqClaim') as HTMLElement | null;
-  if (wq && !wq.hasAttribute('disabled')) {
-    const q = (meta.wquests ?? []).find(x => x.id === wq.dataset.q);
-    if (q && !q.claimed && q.prog >= q.goal) {
-      q.claimed = true; shardsAdd(WEEK_REWARD[q.id] ?? 0); meta.bpXp = (meta.bpXp ?? 0) + 250;
-      metaSave(); renderShards(); openProfile();
-      apiSend('/api/quests/claim', { id: q.id, kind: 'weekly', prog: q.prog, goal: q.goal });
-      showToast(`Недельное задание: ◈${WEEK_REWARD[q.id] ?? 0} и +250 опыта пропуска`);
-    }
+  if (wq) {
+    if (!wq.hasAttribute('disabled') && wq.dataset.q) claimQuestReward('weekly', wq.dataset.q);
     return;
   }
   if (t0?.id === 'btnReplayPlay') { replayPlay(); return; }
@@ -5620,14 +6729,14 @@ const BP_LEVELS = 50;
 const BP_STEP = 400;   // опыта пропуска на уровень
 interface BpRw { ru: string; shards?: number; pack?: number; premPack?: number; back?: string; gems?: number; foil?: number; ava?: string }
 /* Таблица наград v2.5.0 (спека «5. Боевой пропуск»):
-   free — золото/пыль (◈, единая валюта) и обычные бустеры;
+   free — монеты и обычные бустеры;
    prem — рубашки, фойл-жетоны (решение пользователя вместо альт-артов),
    премиум-бустеры 2 эпика+ (решение пользователя), гемы, аватар. */
 function bpReward(lvl: number): { free: BpRw; prem: BpRw } {
-  const free: BpRw = { ru: `◈${50 + lvl * 3}`, shards: 50 + lvl * 3 };
+  const free: BpRw = { ru: `🪙${50 + lvl * 3}`, shards: 50 + lvl * 3 };
   if (lvl % 10 === 0) { free.ru = 'Бустер ECH1'; free.pack = 1; free.shards = 0; }
   if (lvl === 50) { free.ru = 'Бустер ECH1 ×2'; free.pack = 2; free.shards = 0; }
-  const prem: BpRw = { ru: `◈${90 + lvl * 5} пыли`, shards: 90 + lvl * 5 };
+  const prem: BpRw = { ru: `🪙${90 + lvl * 5} монет`, shards: 90 + lvl * 5 };
   if (lvl === 5) { prem.ru = '🌟 Фойл-жетон'; prem.foil = 1; prem.shards = 0; }
   if (lvl === 10) { prem.ru = '💎 30 гемов'; prem.gems = 30; prem.shards = 0; }
   if (lvl === 15) { prem.ru = '🌟 Премиум-бустер (2 эпика+)'; prem.premPack = 1; prem.shards = 0; }
@@ -5659,9 +6768,21 @@ function bpGrant(rw: BpRw): BpSum {
 }
 /* --- v2.5.2: лента пропуска в манере MTG Arena Mastery (скрин 1): страницы по 8 уровней,
      плитки free/prem, замки/галочки, стрелки и точки страниц, градиентные кнопки низа --- */
-const BP_PER_PAGE = 8;
-const BP_PAGES = Math.ceil(BP_LEVELS / BP_PER_PAGE);
+function bpPerPageForViewport(): number {
+  return window.innerWidth <= 600 ? 2 : window.innerWidth <= 920 ? 4 : 8;
+}
+let BP_PER_PAGE = bpPerPageForViewport();
+let BP_PAGES = Math.ceil(BP_LEVELS / BP_PER_PAGE);
 let bpPage = 0;
+window.addEventListener('resize', () => {
+  const currentLevel = bpLevel();
+  const next = bpPerPageForViewport();
+  if (next === BP_PER_PAGE) return;
+  BP_PER_PAGE = next;
+  BP_PAGES = Math.ceil(BP_LEVELS / BP_PER_PAGE);
+  bpPage = Math.min(BP_PAGES - 1, Math.floor((currentLevel - 1) / BP_PER_PAGE));
+  if (!document.getElementById('bpModal')?.classList.contains('hidden')) openBP();
+});
 function bpGlyph(rw: BpRw): string {
   if (rw.back) return '🂠';
   if (rw.ava) return '☾';
@@ -5671,10 +6792,24 @@ function bpGlyph(rw: BpRw): string {
   if (rw.gems) return '💎';
   return '◈';
 }
+function bpAssetId(rw: BpRw): string {
+  if (rw.premPack) return 'premium_booster';
+  if (rw.pack) return 'booster';
+  if (rw.back) return 'cardback';
+  if (rw.gems) return 'gems';
+  if (rw.foil) return 'foil_token';
+  if (rw.ava) return 'avatar';
+  return 'coins';
+}
 function bpTileInner(rw: BpRw): string {
-  return `<span class="bpIco">${bpGlyph(rw)}</span><span class="bpLbl">${rw.ru}</span>`;
+  const art = bpAssetId(rw);
+  return `<span class="bpRewardVisual" aria-hidden="true"><img class="bpRewardArt" src="/cosm/bp/${art}" alt="" loading="lazy" onload="this.closest('.bpRewardVisual')?.classList.add('hasArt')" onerror="this.remove()"><span class="bpIco">${bpGlyph(rw)}</span></span><span class="bpLbl">${rw.ru}</span>`;
 }
 function openBP(): void {
+  setAppRoute('mastery');
+  $('menu').classList.add('hidden');
+  for (const id of ['homeScreen','eventsScreen','decksScreen','collection','shopModal','profileModal','boosterModal','campaignModal'])
+    document.getElementById(id)?.classList.add('hidden');
   const days = seasonDaysLeft();
   const lvlNow = bpLevel();
   if (bpPage < 0 || bpPage >= BP_PAGES) bpPage = Math.min(BP_PAGES - 1, Math.floor((lvlNow - 1) / BP_PER_PAGE));
@@ -5686,8 +6821,8 @@ function openBP(): void {
     const page = Math.floor((lv - 1) / BP_PER_PAGE);
     return `<div class="bpCol${lv === lvlNow ? ' curCol' : ''}" data-page="${page}">
       <div class="bpColHead">${lv === lvlNow ? '<span class="bpArrow" title="Текущий уровень">▼</span>' : ''}<div class="bpLvl${reached ? ' on' : ''}${lv === lvlNow ? ' cur' : ''}" title="${lv === lvlNow ? 'Текущий уровень' : reached ? 'Достигнут' : 'Заблокирован'}">${lv}</div></div>
-      <button class="bpTile free bpClaim${cF ? ' got' : ''}" data-l="${lv}" data-t="free" ${reached && !cF ? '' : 'disabled'}>${cF ? '✔' : bpTileInner(r.free)}</button>
-      <button class="bpTile prem bpClaim${cP ? ' got' : ''}" data-l="${lv}" data-t="prem" ${meta.bpPremium && reached && !cP ? '' : 'disabled'}>${cP ? '✔' : (meta.bpPremium ? '' : '<span class="bpLock">🔒</span>') + bpTileInner(r.prem)}</button>
+      <button class="bpTile free bpClaim${cF ? ' got' : ''}" data-l="${lv}" data-t="free" aria-label="${esc(r.free.ru)} · уровень ${lv} · бесплатная награда" ${reached && !cF ? '' : 'disabled'}>${cF ? '✔' : bpTileInner(r.free)}</button>
+      <button class="bpTile prem bpClaim${cP ? ' got' : ''}" data-l="${lv}" data-t="prem" aria-label="${esc(r.prem.ru)} · уровень ${lv} · премиум-награда" ${meta.bpPremium && reached && !cP ? '' : 'disabled'}>${cP ? '✔' : (meta.bpPremium ? '' : '<span class="bpLock">🔒</span>') + bpTileInner(r.prem)}</button>
     </div>`;
   });
   const pages = Array.from({ length: BP_PAGES }, (_, p) =>
@@ -5749,7 +6884,7 @@ document.addEventListener('click', ev => {
     metaSave(); renderShards(); openBP();
     if (!n) { showToast('Нет доступных наград'); return; }
     const parts: string[] = [];
-    if (tot.shards) parts.push(`◈${tot.shards}`);
+    if (tot.shards) parts.push(`🪙${tot.shards}`);
     if (tot.gems) parts.push(`💎${tot.gems}`);
     if (tot.packs) parts.push(`бустеры ×${tot.packs}`);
     if (tot.premPacks) parts.push(`🌟 премиум-бустеры ×${tot.premPacks}`);
@@ -5903,9 +7038,9 @@ document.addEventListener('click', ev => {
 
 /* --- обучение: 4 интерактивных урока, тренер-панель, награда (спека «6. 🎓 Обучение», v2.5.1) --- */
 const LESSONS: Array<{ ru: string; hint: string; need: string; reward: string }> = [
-  { ru: 'Урок 1 · Основы', hint: 'По шагам: руна → существо («Ветеран Осады») → заклинание («Луч Рассвета»). Игра подсвечивает нужную карту и блокирует остальные действия.', need: 'Разыграйте руну, существо и заклинание', reward: '◈100' },
-  { ru: 'Урок 2 · Бой', hint: 'Атакуйте цель своим существом, затем встаньте Провокацией ⛨: атаки врага обязаны бить провокатора — так работает блок.', need: 'Нанесите урон в бою', reward: '◈100' },
-  { ru: 'Урок 3 · Ключевые механики', hint: 'Вампиризм 🩸 (урон лечит героя), Неуловимость 👁 (нельзя выбрать целью — наша «неуязвимость») и Боевой клич ✦. Карты уже в руке — разыграйте все три.', need: 'Разыграйте все три механики', reward: '◈150' },
+  { ru: 'Урок 1 · Основы', hint: 'По шагам: руна → существо («Ветеран Осады») → заклинание («Луч Рассвета»). Игра подсвечивает нужную карту и блокирует остальные действия.', need: 'Разыграйте руну, существо и заклинание', reward: '🪙100' },
+  { ru: 'Урок 2 · Бой', hint: 'Атакуйте цель своим существом, затем встаньте Провокацией ⛨: атаки врага обязаны бить провокатора — так работает блок.', need: 'Нанесите урон в бою', reward: '🪙100' },
+  { ru: 'Урок 3 · Ключевые механики', hint: 'Вампиризм 🩸 (урон лечит героя), Неуловимость 👁 (нельзя выбрать целью — наша «неуязвимость») и Боевой клич ✦. Карты уже в руке — разыграйте все три.', need: 'Разыграйте все три механики', reward: '🪙150' },
   { ru: 'Урок 4 · Ресурсы', hint: 'Кривая маны: почему нельзя сыграть карту за 5✦ на 2-й ход. Мана +1 за ход; сыграйте 3+ карты к 3-му ходу — не копите дорогое.', need: '3+ карты к 3-му ходу', reward: '💎100 + 5 бустеров' },
 ];
 /* Зеркало unity/.../StreamingAssets/tutorial.json: те же 20 шагов, те же сообщения. */
@@ -6171,62 +7306,163 @@ $('settingsScrim')?.addEventListener('click', () => toggleSettings(false));
     applySettings();
   });
 });
-btn('btnMenu').addEventListener('click', () => {
-  battle.tutCleanup();   // уроки: снять поллер/блокер/подсветку при выходе в меню
-  battle.stop();
-  $('battle').classList.add('hidden');
-  $('menu').classList.remove('hidden');
-});
+btn('btnMenu').addEventListener('click', () => openHomeScreen());
 btn('btnAgain').addEventListener('click', () => { $('gameover').classList.add('hidden'); battle.start().catch(err => reportFatal('restart', err)); });
-btn('btnGoMenu').addEventListener('click', () => {
-  $('gameover').classList.add('hidden');
-  $('battle').classList.add('hidden');
-  $('menu').classList.remove('hidden');
-});
+btn('btnGoMenu').addEventListener('click', () => openHomeScreen());
 
-/* --- коллекция (150 карт) --- */
+/* --- коллекция: виртуализированная подгрузка оформлениями по 40 карточек --- */
+interface CollectionEntry { card: CardData; style: CardAppearance }
+const COLLECTION_PAGE_SIZE = 40;
 let colList: CardData[] = [];
+let colStyles: CardAppearance[] = [];
+let colEntries: CollectionEntry[] = [];
+let colRendered = 0;
+let colBaseCount = 0;
+let colActiveStyle = '';
+let colObserver: IntersectionObserver | null = null;
+let colRenderGeneration = 0;
+function openCollectionScreen(): void {
+  setAppRoute('collection');
+  $('menu').classList.add('hidden');
+  for (const id of ['homeScreen','eventsScreen','decksScreen','shopModal','bpModal','profileModal','boosterModal','campaignModal','journalModal','replayModal'])
+    document.getElementById(id)?.classList.add('hidden');
+  $('collection').classList.remove('hidden');
+  document.getElementById('tabCollection')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+}
+function collectionCountText(baseCount: number, styleFilter: string): string {
+  if (styleFilter === '') return `${baseCount} карт × 2 оформления`;
+  return styleFilter === 'borderless' ? `${baseCount} Borderless-вариантов` : `${baseCount} классических карт`;
+}
+function updateCollectionCount(baseCount: number, styleFilter: string): void {
+  const node = document.getElementById('colCount');
+  if (!node) return;
+  const found = colEntries.length;
+  if (!found) { node.textContent = 'Ничего не найдено'; return; }
+  const count = Math.min(colRendered, found);
+  const tail = count < found ? ` · ещё ${found - count} загрузятся при прокрутке` : ' · всё загружено';
+  node.textContent = `Показано ${count} из ${found} · ${collectionCountText(baseCount, styleFilter)}${tail}`;
+  const load = document.querySelector<HTMLButtonElement>('#colSentinel .collectionLoadMore');
+  if (load && !load.disabled) load.textContent = `Загрузить ещё · ${Math.min(COLLECTION_PAGE_SIZE, found - count)} из ${found - count}`;
+}
+function renderCollectionEntry(entry: CollectionEntry): HTMLElement {
+  const { card: c, style } = entry;
+  const node = renderCard(c, style);
+  node.style.transform = 'none';
+  node.addEventListener('mouseenter', ev => { showTooltip(c, ev.clientX, ev.clientY); showZoom(c, ev.clientX, ev.clientY, 'auto', style); });
+  node.addEventListener('mouseleave', () => { hideTooltip(); hideZoom(); });
+  node.addEventListener('click', () => openCardModal(c, colList, style, colStyles));
+  if (style === 'borderless') {
+    if (!hasBorderless(c.id)) {
+      node.classList.add('locked', 'borderlessLocked');
+      node.title = 'Borderless — та же карта без рамки. Награда события или шанс 0,1% из бустера.';
+    } else {
+      node.classList.add('borderlessOwned');
+      if (isBorderlessEquipped(c.id)) node.classList.add('borderlessEquipped');
+    }
+  } else {
+    const cnt = ownedCount(c.id);
+    if (cnt > 1) node.appendChild(el('div', 'ownCnt', `×${cnt}`));
+    if (cnt === 0) {
+      node.classList.add('locked');
+      node.appendChild(el('div', 'lockBadge', 'Не открыта'));
+      node.title = STARTER_CARD_IDS.has(c.id)
+        ? 'Карта есть в готовой стартовой колоде; отдельная копия коллекции не открыта.'
+        : 'Карта вне стартовых колод: открывается из бустеров, боевого пропуска и событий.';
+    }
+    if (isBorderlessEquipped(c.id)) node.title = 'Borderless-вариант этой карты надет; откройте карточку, чтобы изменить оформление.';
+  }
+  return node;
+}
+function appendCollectionPage(): number {
+  const grid = document.getElementById('colGrid');
+  const sentinel = document.getElementById('colSentinel');
+  if (!grid || !sentinel || colRendered >= colEntries.length) return 0;
+  const start = colRendered;
+  const end = Math.min(colEntries.length, start + COLLECTION_PAGE_SIZE);
+  const added = end - start;
+  const fragment = document.createDocumentFragment();
+  for (; colRendered < end; colRendered++) fragment.appendChild(renderCollectionEntry(colEntries[colRendered]));
+  grid.insertBefore(fragment, sentinel);
+  updateCollectionCount(colBaseCount, colActiveStyle);
+  if (colRendered >= colEntries.length) {
+    colObserver?.disconnect(); colObserver = null;
+    sentinel.classList.add('allLoaded');
+    const button = sentinel.querySelector<HTMLButtonElement>('.collectionLoadMore');
+    if (button) { button.disabled = true; button.textContent = '✓ Все карты загружены'; }
+    const note = sentinel.querySelector<HTMLElement>('.collectionLoadNote');
+    if (note) note.textContent = 'Фильтры можно изменить в любое время.';
+  }
+  return added;
+}
+function loadAllCollectionPagesForTest(): number {
+  while (colRendered < colEntries.length) {
+    const before = colRendered;
+    appendCollectionPage();
+    if (colRendered === before) break;
+  }
+  return colRendered;
+}
+(window as any).ecTestLoadCollectionAll = loadAllCollectionPagesForTest;
+(window as any).ecTestCollectionState = (): { rendered: number; total: number; pageSize: number } =>
+  ({ rendered: colRendered, total: colEntries.length, pageSize: COLLECTION_PAGE_SIZE });
 function renderCollection(): void {
+  colObserver?.disconnect(); colObserver = null;
+  colRenderGeneration++;
+  const generation = colRenderGeneration;
   const fac = sel('colFaction').value;
   const typ = sel('colType').value;
   const rar = sel('colRarity').value;
   const q = ($('colSearch') as HTMLInputElement).value.trim().toLowerCase();
   const grid = $('colGrid');
   grid.innerHTML = '';
+  grid.scrollTop = 0;
+  colRendered = 0;
   const onlyOwned = ($('colOwned') as HTMLInputElement | null)?.checked ?? false;
   const costF = sel('colCost').value;
   const kwF = sel('colKw').value;
-  const list = ALL_CARDS.filter(c =>
+  const styleFilter = sel('colStyle').value;
+  colActiveStyle = styleFilter;
+  const baseList = ALL_CARDS.filter(c =>
     (!fac || c.faction === fac) && (!typ || c.type === typ) && (!rar || c.rarity === rar) &&
     (!costF || (costF === 'low' ? c.cost <= 3 : costF === 'mid' ? c.cost >= 4 && c.cost <= 5 : c.cost >= 6)) &&
     (!kwF || (c.keywords ?? []).includes(kwF as Keyword)) &&
-    (!onlyOwned || ownedCount(c.id) > 0) &&
     (!q || c.name.toLowerCase().includes(q) || (c.abilityText ?? '').toLowerCase().includes(q)
       || cardName(c).toLowerCase().includes(q) || cardText(c).toLowerCase().includes(q)));
   const order: Record<string, number> = { Creature: 0, Spell: 1, Rune: 2 };
-  list.sort((a, b) => (order[a.type] ?? 9) - (order[b.type] ?? 9) || a.cost - b.cost || a.name.localeCompare(b.name, 'ru'));
-  colList = list;
-  for (const c of list) {
-    const node = renderCard(c);
-    node.style.transform = 'none';
-    node.addEventListener('mouseenter', ev => { showTooltip(c, ev.clientX, ev.clientY); showZoom(c, ev.clientX, ev.clientY); });
-    node.addEventListener('mouseleave', () => { hideTooltip(); hideZoom(); });
-    node.addEventListener('click', () => openCardModal(c, colList));
-    {
-      const cnt = ownedCount(c.id);
-      if (cnt > 1) node.appendChild(el('div', 'ownCnt', `×${cnt}`));
-      if (cnt === 0) {
-        node.classList.add('locked');
-        node.appendChild(el('div', 'lockBadge', '◈ из бустера'));
-        node.title = 'Карта расширения «ECH1»: выпадает из бустеров';
-      }
-    }
-    grid.appendChild(node);
+  baseList.sort((a, b) => (order[a.type] ?? 9) - (order[b.type] ?? 9) || a.cost - b.cost || a.name.localeCompare(b.name, 'ru'));
+  const styles: CardAppearance[] = styleFilter === '' ? ['classic', 'borderless'] : [styleFilter as CardAppearance];
+  colBaseCount = baseList.length;
+  colEntries = [];
+  for (const card of baseList) for (const style of styles) {
+    if (onlyOwned && (style === 'borderless' ? !hasBorderless(card.id) : ownedCount(card.id) <= 0)) continue;
+    colEntries.push({ card, style });
   }
-  $('colCount').textContent = `Показано ${list.length} из ${ALL_CARDS.length}`;
+  colList = colEntries.map(entry => entry.card);
+  colStyles = colEntries.map(entry => entry.style);
+  if (!colEntries.length) {
+    grid.innerHTML = '<div class="collectionEmpty">Нет карт по выбранным фильтрам. Измените поиск или параметры фильтра.</div>';
+    updateCollectionCount(baseList.length, styleFilter);
+    return;
+  }
+  grid.innerHTML = `<div class="collectionSentinel" id="colSentinel">
+    <button type="button" class="btn collectionLoadMore" aria-label="Загрузить следующую страницу карт">Загрузить ещё · ${Math.min(COLLECTION_PAGE_SIZE, colEntries.length)} из ${colEntries.length}</button>
+    <span class="collectionLoadNote">Или прокрутите вниз — следующие карты появятся автоматически.</span>
+  </div>`;
+  const button = grid.querySelector<HTMLButtonElement>('.collectionLoadMore');
+  button?.addEventListener('click', () => appendCollectionPage());
+  appendCollectionPage();
+  updateCollectionCount(baseList.length, styleFilter);
+  const sentinel = document.getElementById('colSentinel');
+  if (sentinel && 'IntersectionObserver' in window) {
+    colObserver = new IntersectionObserver(entries => {
+      if (generation !== colRenderGeneration) return;
+      if (entries.some(entry => entry.isIntersecting)) appendCollectionPage();
+    }, { root: grid, rootMargin: '480px 0px', threshold: 0.01 });
+    colObserver.observe(sentinel);
+  }
 }
-btn('btnCollection').addEventListener('click', () => { $('collection').classList.remove('hidden'); renderCollection(); });
-btn('btnColClose').addEventListener('click', () => $('collection').classList.add('hidden'));
+btn('btnCollection').addEventListener('click', () => openCollectionScreen());
+btn('btnColClose').addEventListener('click', () => navigateApp('back'));
 sel('colFaction').innerHTML = '<option value="">Все фракции</option>' +
   FACTION_IDS.map(f => `<option value="${f}">${FACTION_RU[f]}</option>`).join('') + '<option value="Neutral">◈ Нейтральные</option>';
 const spSel = document.getElementById('setSpeed') as HTMLSelectElement | null;
@@ -6301,9 +7537,12 @@ async function pullProfile(pid: string): Promise<void> {
     meta.avatarFac = String(gp.avatarFac ?? meta.avatarFac);
     meta.frame = String(gp.frame ?? meta.frame);
     if (gp.ach) meta.ach = gp.ach as Record<string, boolean>;
-    const q = gp.quests as { daily?: Array<{ id: string; prog: number; goal: number; claimed: boolean }>; weekly?: Array<{ id: string; prog: number; goal: number; claimed: boolean }> } | undefined;
-    if (q?.daily) meta.quests = q.daily.map(x => ({ ...x }));
-    if (q?.weekly) meta.wquests = q.weekly.map(x => ({ ...x }));
+    const q = gp.quests as { daily?: Array<{ id: string; prog: number; goal: number; claimed: boolean; fac?: string }>; weekly?: Array<{ id: string; prog: number; goal: number; claimed: boolean }> } | undefined;
+    if (typeof gp.questDate === 'string') meta.questDate = gp.questDate;
+    if (typeof gp.wquestWeek === 'string') meta.wquestWeek = gp.wquestWeek;
+    if (q?.daily) meta.quests = normalizeQuestSet(q.daily.map(x => ({ ...x })), freshQuests());
+    if (q?.weekly) meta.wquests = normalizeQuestSet(q.weekly.map(x => ({ ...x })), freshWQuests());
+    syncQuestPeriods();
     if (Array.isArray(gp.history)) meta.history = gp.history as typeof meta.history;
     if (typeof gp.shards === 'number') shardsSet(gp.shards);
     if (typeof gp.gems === 'number') meta.gems = gp.gems;
@@ -6381,7 +7620,7 @@ if (logoutB) logoutB.addEventListener('click', () => {
   syncAccountRow();
   showToast('👋 Вы вышли из аккаунта');
 });
-['colFaction', 'colType', 'colRarity', 'colCost', 'colKw'].forEach(id => sel(id).addEventListener('change', renderCollection));
+['colFaction', 'colType', 'colRarity', 'colCost', 'colKw', 'colStyle'].forEach(id => sel(id).addEventListener('change', renderCollection));
 $('colOwned').addEventListener('change', renderCollection);
 $('colSearch').addEventListener('input', renderCollection);
 
@@ -6390,11 +7629,14 @@ $('colSearch').addEventListener('input', renderCollection);
 /* ---------------------------------------------------------------------- */
 
 let modalList: CardData[] = [];
+let modalStyles: CardAppearance[] = [];
 let modalIdx = 0;
 
-function openCardModal(card: CardData, list: CardData[]): void {
+function openCardModal(card: CardData, list: CardData[], appearance: CardAppearance = 'auto', styles?: CardAppearance[]): void {
   modalList = list.length ? list : [card];
-  modalIdx = Math.max(0, modalList.indexOf(card));
+  modalStyles = modalList.map((_, i) => styles?.[i] ?? appearance);
+  modalIdx = modalList.findIndex((item, i) => item === card && modalStyles[i] === appearance);
+  if (modalIdx < 0) modalIdx = Math.max(0, modalList.indexOf(card));
   renderCardModal();
   $('cardModal').classList.remove('hidden');
   hideZoom();
@@ -6405,30 +7647,62 @@ function openCardModal(card: CardData, list: CardData[]): void {
 function renderCardModal(): void {
   const c = modalList[modalIdx];
   if (!c) return;
+  const appearance = modalStyles[modalIdx] ?? 'auto';
+  const cardStyle = resolvedAppearance(c, appearance);
+  const borderlessOwned = hasBorderless(c.id);
+  const borderlessOn = isBorderlessEquipped(c.id);
   const col = colorOf(c.faction);
   const host = $('cmCard');
   host.innerHTML = '';
-  host.appendChild(renderCardLarge(c, 'xxl'));
+  host.appendChild(renderCardLarge(c, 'xxl', appearance));
   const kws = (c.keywords ?? []).map(k => kwName(k));
   $('cmInfo').innerHTML = `
     <div class="cmName" style="color:${col.primary}">${esc(cardName(c))}</div>
     <div class="cmType">${typeName(c.type)} · ${factionName(c.faction)} · ${rarityName(c.rarity)}${
       c.element !== Element.None ? ' · ' + elemName(c.element) : ''}${
       c.type === CardType.Spell && c.subtype === SpellSubtype.Ritual ? bi(' · ритуал', ' · ritual') : ''}</div>
+    <div class="cmVariantNote ${cardStyle === 'borderless' ? 'isBorderless' : ''}">${cardStyle === 'borderless'
+      ? '◇ Borderless · тот же арт и название, снята только рамка; правила и характеристики те же'
+      : 'Классическая версия · Borderless-вариант сохраняет арт, название и свойства карты'}</div>
+    <section class="cmStylePicker" id="cmStylePicker" aria-label="Стили карты">
+      <div class="cmStylePickerHead"><b>СТИЛЬ КАРТЫ</b><span>Используется в коллекции, колодах и матче</span></div>
+      <div class="cmStyleOptions">
+        <button type="button" class="cmStyleChoice ${borderlessOn ? '' : 'isActive'}" data-cm-style="classic" aria-pressed="${!borderlessOn}">
+          <span class="cmStyleSwatch classic" aria-hidden="true"></span><span class="cmStyleLabel"><b>Классика</b><small>Стандартная рамка</small></span><span class="cmStyleCheck">${borderlessOn ? '' : '✓'}</span>
+        </button>
+        <button type="button" class="cmStyleChoice ${borderlessOn ? 'isActive' : ''}" data-cm-style="borderless" aria-pressed="${borderlessOn}" ${borderlessOwned ? '' : 'disabled'} title="${borderlessOwned ? 'Применить стиль Borderless' : 'Получите вариант в событии или бустере'}">
+          <span class="cmStyleSwatch borderless" aria-hidden="true"></span><span class="cmStyleLabel"><b>Borderless</b><small>${borderlessOwned ? 'Получен · без рамки' : 'Не получен · событие или бустер'}</small></span><span class="cmStyleCheck">${borderlessOn ? '✓' : ''}</span>
+        </button>
+      </div>
+    </section>
+    <div class="cmStyleStatus">Сейчас в игре: <b>${borderlessOn ? 'Borderless' : 'Классика'}</b> · тот же игровой ID и лимит копий</div>
     <div class="cmStats">
       <span title="Стоимость маны">✦ ${c.cost}</span>
       ${c.type === CardType.Creature
         ? `<span title="Атака">⚔ ${c.attack ?? 0}</span><span title="Здоровье">❤ ${c.health ?? 0}</span>` : ''}
     </div>
-    <div class="cmText">${kws.length ? `<span class="cmKw">${esc(kws.join(' · '))}.</span> ` : ''}${
-      esc(cardText(c) || bi('Без текста способности.', 'No ability text.'))}</div>
+    <div class="cmText">${kws.length ? `<span class="cmKw">${kws.map(k => `<strong class="cardKeyword">${esc(k)}</strong>`).join(' · ')}.</span> ` : ''}${
+      highlightCardKeywords(cardText(c) || bi('Без текста способности.', 'No ability text.'))}</div>
     ${cardFlavor(c) ? `<div class="cmFlavor">${esc(cardFlavor(c))}</div>` : ''}`;
+  $('cmStylePicker').querySelectorAll<HTMLButtonElement>('[data-cm-style]').forEach(button => {
+    button.addEventListener('click', () => {
+      const wantsBorderless = button.dataset.cmStyle === 'borderless';
+      if (wantsBorderless && !hasBorderless(c.id)) return;
+      setBorderlessEquipped(c.id, wantsBorderless);
+      modalStyles[modalIdx] = 'auto';
+      renderCardModal();
+      if (!$('collection').classList.contains('hidden')) {
+        if (!$('dbMain').classList.contains('hidden')) renderEditor(); else renderCollection();
+      }
+      showToast(wantsBorderless ? `◇ Borderless надет: «${cardName(c)}»` : `Классический стиль включён: «${cardName(c)}»`);
+    });
+  });
   $('cmPos').textContent = `${modalIdx + 1} / ${modalList.length}`;
   const have = ownedCount(c.id);
   const bc = $('cmCraft') as HTMLButtonElement | null;
   const bd = $('cmDust') as HTMLButtonElement | null;
-  if (bc) { bc.textContent = `Создать ◈${CRAFT_COST[c.rarity] ?? 100}`; bc.disabled = have >= PLAYSET; }
-  if (bd) { bd.textContent = `Разобрать +◈${DUST_GAIN[c.rarity] ?? 20}`; bd.disabled = have <= (isExpansionId(c.id) ? 0 : 1); }
+  if (bc) { bc.textContent = `Создать 🪙${CRAFT_COST[c.rarity] ?? 100}`; bc.disabled = have >= PLAYSET; }
+  if (bd) { bd.textContent = `Разобрать +🪙${DISENCHANT_COINS[c.rarity] ?? 20}`; bd.disabled = have <= (isExpansionId(c.id) ? 0 : 1); }
   const bf = $('cmFoil') as HTMLButtonElement | null;
   if (bf) {
     bf.textContent = `🌟 Фойл (жетонов: ${meta.foilTokens ?? 0})`;
@@ -6436,8 +7710,17 @@ function renderCardModal(): void {
     bf.title = (meta.foilTokens ?? 0) <= 0 ? 'Фойл-жетоны — награда премиум-ветки пропуска (5 уровень)'
       : have <= 0 ? 'Сначала получите карту' : 'Сделать фойл-версию карты (навечно)';
   }
+  const bbl = $('cmBorderless') as HTMLButtonElement | null;
+  if (bbl) {
+    bbl.textContent = borderlessOwned ? (borderlessOn ? '◇ Borderless · надето ✓' : '◇ Надеть Borderless') : '◇ Borderless · не получено';
+    bbl.disabled = !borderlessOwned;
+    bbl.setAttribute('aria-pressed', borderlessOn ? 'true' : 'false');
+    bbl.title = borderlessOwned
+      ? 'Альтернативный внешний вид; правила и характеристики карты не меняются'
+      : 'Получите из события или с шансом 0,1% из бустера';
+  }
   const own = $('cmOwned');
-  if (own) own.textContent = `В коллекции: ×${have}`;
+  if (own) own.textContent = `Обычная ×${have} · Borderless ${borderlessOwned ? '✓' : '—'}`;
 }
 
 function modalStep(d: number): void {
@@ -6457,7 +7740,7 @@ $('cardModal').addEventListener('click', ev => { if (ev.target === $('cardModal'
 /*  Конструктор колод (пользовательские колоды, localStorage)              */
 /* ---------------------------------------------------------------------- */
 
-interface EditDeck { id: string | null; name: string; faction: Faction; counts: Map<string, number> }
+interface EditDeck { id: string | null; name: string; faction: Faction; counts: Map<string, number>; avatarCardId: string | null }
 let editing: EditDeck | null = null;
 let builderOn = false;
 
@@ -6490,10 +7773,9 @@ function canAdd(id: string): string | null {
   }
   const n = editing.counts.get(id) ?? 0;
   const have = ownedCount(id);
-  if (n >= have) return `«${c.name}»: в коллекции ${have} из 4 — откройте бустеры или скрафтите`;
   const cap = c.rarity === Rarity.Legendary ? MAX_LEGENDARY_COPIES : MAX_COPIES;
   if (n >= cap) return `«${c.name}»: не более ${cap} копий`;
-  if (editingCards().length >= DECK_SIZE) return `Колода уже полная (${DECK_SIZE} карт)`;
+  if (n >= have) return `«${c.name}»: в коллекции ${have} из ${cap} — откройте бустеры или скрафтите`;
   return null;
 }
 
@@ -6511,13 +7793,55 @@ function dbRemove(id: string): void {
   dbStatus(''); renderEditor();
 }
 
+function renderDeckAvatarPreview(): void {
+  const host = document.getElementById('dbAvatarPreview') as HTMLElement | null;
+  if (!host || !editing) return;
+  const card = editing.avatarCardId ? dbLookup(editing.avatarCardId) : undefined;
+  host.replaceChildren();
+  const fallback = el('span', 'dbAvatarPlaceholder', FACTION_SIGIL[editing.faction] ?? '◇');
+  host.appendChild(fallback);
+  if (card) {
+    const image = document.createElement('img');
+    image.src = `/art/${encodeURIComponent(card.faction)}/${encodeURIComponent(card.id)}.png`;
+    image.alt = '';
+    image.loading = 'lazy';
+    image.onerror = () => image.remove();
+    host.appendChild(image);
+    host.title = `Обложка колоды: ${cardName(card)}`;
+  } else {
+    host.title = 'Добавьте карту, чтобы выбрать обложку колоды';
+  }
+}
+
 function renderEditor(): void {
   if (!editing) return;
   const cards = editingCards();
   $('dbDeckFaction').textContent = `· ${FACTION_RU[editing.faction]}`;
-  $('dbCount').textContent = `${cards.length} / ${DECK_SIZE}`;
+  $('dbCount').textContent = `${cards.length} · мин. ${MIN_DECK_SIZE}`;
+  $('dbCount').title = `Минимум ${MIN_DECK_SIZE} карт; верхнего лимита нет`;
+  $('dbCount').setAttribute('aria-label', `${cards.length} карт; минимум ${MIN_DECK_SIZE}, верхнего лимита нет`);
   sel('dbFaction').value = editing.faction;
   ($('dbName') as HTMLInputElement).value = editing.name;
+
+  const avatarCards = [...editing.counts.entries()]
+    .map(([id, count]) => ({ card: dbLookup(id), count }))
+    .filter((row): row is { card: CardData; count: number } => !!row.card)
+    .sort((a, b) => a.card.cost - b.card.cost || a.card.name.localeCompare(b.card.name, 'ru'));
+  if (!editing.avatarCardId || !editing.counts.has(editing.avatarCardId)) {
+    editing.avatarCardId = suggestedDeckArt(avatarCards.map(row => row.card.id))?.id ?? null;
+  }
+  const avatarSelect = sel('dbAvatarCard');
+  avatarSelect.innerHTML = avatarCards.length
+    ? avatarCards.map(({ card, count }) => `<option value="${esc(card.id)}">${esc(cardName(card))} · ×${count}</option>`).join('')
+    : '<option value="">Добавьте карты в колоду</option>';
+  avatarSelect.disabled = avatarCards.length === 0;
+  avatarSelect.value = editing.avatarCardId ?? '';
+  const avatarGallery = document.getElementById('btnDbAvatarGallery') as HTMLButtonElement | null;
+  if (avatarGallery) {
+    avatarGallery.disabled = avatarCards.length === 0;
+    avatarGallery.title = avatarCards.length ? 'Открыть галерею артов карт этой колоды' : 'Сначала добавьте карты';
+  }
+  renderDeckAvatarPreview();
 
   /* список колоды */
   const listHost = $('dbDeckList');
@@ -6532,7 +7856,9 @@ function renderEditor(): void {
       .sort((a, b) => a.c.cost - b.c.cost || a.c.name.localeCompare(b.c.name, 'ru'));
     for (const r of rows) {
       const row = el('div', 'dbRow');
-      row.innerHTML = `<span class="c">${r.c.cost}</span><span class="n" title="${esc(r.c.name)}">${esc(r.c.name)}</span>
+      const styleBadge = isBorderlessEquipped(r.c.id)
+        ? '<span class="dbRowStyle isBorderless" title="Borderless-оформление надето для этой карты">◇</span>' : '';
+      row.innerHTML = `<span class="c">${r.c.cost}</span><span class="n" title="${esc(r.c.name)}">${esc(r.c.name)}${styleBadge}</span>
         <span class="q">×${r.n}</span>`;
       const minus = el('button', '', '−');
       minus.title = 'Убрать одну копию';
@@ -6557,6 +7883,7 @@ function renderEditor(): void {
   });
 
   renderPool();
+  updateDeckStyleAllButton();
 }
 
 function renderPool(): void {
@@ -6581,15 +7908,44 @@ function renderPool(): void {
     if (canAdd(c.id) !== null && n > 0) node.classList.add('maxed');
     const info = el('button', 'dbI', 'i');
     info.title = 'Открыть описание карты';
+    info.setAttribute('aria-label', `Описание: ${cardName(c)}`);
     info.addEventListener('click', ev => { ev.stopPropagation(); openCardModal(c, list); });
     node.appendChild(info);
+    const stylePicker = el('button', 'dbStylePicker', '◇') as HTMLButtonElement;
+    const equipped = isBorderlessEquipped(c.id);
+    stylePicker.dataset.cardId = c.id;
+    stylePicker.setAttribute('aria-pressed', equipped ? 'true' : 'false');
+    stylePicker.setAttribute('aria-label', `Выбрать оформление: ${cardName(c)}`);
+    stylePicker.title = `Стили карты · сейчас ${equipped ? 'Borderless' : 'Классика'} · выберите внешний вид для коллекции, колод и матча`;
+    stylePicker.addEventListener('click', ev => {
+      ev.stopPropagation();
+      openCardModal(c, list, 'auto');
+    });
+    stylePicker.addEventListener('contextmenu', ev => { ev.preventDefault(); ev.stopPropagation(); });
+    node.appendChild(stylePicker);
+    node.classList.toggle('borderlessEquipped', equipped);
     node.addEventListener('mouseenter', ev => showZoom(c, ev.clientX, ev.clientY));
     node.addEventListener('mouseleave', hideZoom);
     node.addEventListener('click', () => dbAdd(c.id));
     node.addEventListener('contextmenu', ev => { ev.preventDefault(); dbRemove(c.id); });
     grid.appendChild(node);
   }
-  $('colCount').textContent = `Пул: ${list.length} карт (свои + нейтральные)`;
+  const borderlessInPool = list.filter(card => hasBorderless(card.id)).length;
+  $('colCount').textContent = `Пул: ${list.length} игровых карт · Borderless доступно: ${borderlessInPool}`;
+}
+
+function updateDeckStyleAllButton(): void {
+  const button = document.getElementById('btnDbStyleAll') as HTMLButtonElement | null;
+  if (!button) return;
+  const unlockedIds = ALL_CARDS.filter(card => hasBorderless(card.id)).map(card => card.id);
+  const allOn = unlockedIds.length > 0 && unlockedIds.every(id => isBorderlessEquipped(id));
+  button.disabled = unlockedIds.length === 0;
+  button.textContent = unlockedIds.length === 0 ? '◇ Нет стилей'
+    : allOn ? '◇ Снять все' : `◇ Все стили · ${unlockedIds.length}`;
+  button.title = unlockedIds.length === 0
+    ? 'Сначала получите Borderless-вариант'
+    : allOn ? 'Снять Borderless-оформление со всех полученных карт'
+      : `Применить Borderless-оформление ко всем ${unlockedIds.length} полученным картам`;
 }
 
 function renderMyDecksSel(): void {
@@ -6600,14 +7956,20 @@ function renderMyDecksSel(): void {
 }
 
 function newEditing(faction: Faction): EditDeck {
-  return { id: null, name: '', faction, counts: new Map() };
+  return { id: null, name: '', faction, counts: new Map(), avatarCardId: null };
 }
 
 function loadIntoEditor(deck: DeckLike | null): void {
   if (!deck) return;
   const counts = new Map<string, number>();
   for (const id of deck.cards) counts.set(id, (counts.get(id) ?? 0) + 1);
-  editing = { id: deck.id.startsWith('custom-') ? deck.id : null, name: deck.name, faction: deck.faction as Faction, counts };
+  editing = {
+    id: deck.id.startsWith('custom-') ? deck.id : null,
+    name: deck.name,
+    faction: deck.faction as Faction,
+    counts,
+    avatarCardId: deck.avatarCardId ?? null,
+  };
   dbStatus(''); renderEditor();
 }
 
@@ -6632,6 +7994,14 @@ function setTab(builder: boolean): void {
 
 btn('tabCollection').addEventListener('click', () => { Sfx.uiClick(); setTab(false); });
 btn('tabBuilder').addEventListener('click', () => { Sfx.uiClick(); setTab(true); });
+btn('btnDbStyleAll').addEventListener('click', () => {
+  const styleIds = ALL_CARDS.filter(card => hasBorderless(card.id)).map(card => card.id);
+  if (!styleIds.length) { showToast('Borderless-стили ещё не получены'); return; }
+  const allOn = styleIds.every(id => isBorderlessEquipped(id));
+  meta.borderlessEquipped = allOn ? [] : Array.from(new Set([...(meta.borderlessEquipped ?? []), ...styleIds]));
+  metaSave(); renderEditor();
+  showToast(allOn ? 'Классические стили включены для всех карт' : `Применено Borderless-стилей: ${styleIds.length}`);
+});
 btn('btnDbNew').addEventListener('click', () => {
   editing = newEditing((sel('dbFaction').value || picked) as Faction);
   dbStatus(''); renderEditor(); Sfx.uiClick();
@@ -6663,12 +8033,19 @@ btn('btnDbSave').addEventListener('click', () => {
   const over = [...editing.counts.entries()].filter(([id, n]) => n > ownedCount(id));
   if (over.length > 0) { dbStatus('Копий в колоде больше, чем получено из бустеров'); return; }
   const id = editing.id ?? `custom-${Date.now().toString(36)}`;
-  const deck: CustomDeck = { id, name, faction: editing.faction, cards: editingCards(), updated: Date.now() };
+  const deck: CustomDeck = {
+    id,
+    name,
+    faction: editing.faction,
+    cards: editingCards(),
+    avatarCardId: editing.avatarCardId ?? undefined,
+    updated: Date.now(),
+  };
   upsertCustomDeck(deck);
   editing.id = id; editing.name = name;
   buildMenu(); renderMyDecksSel();
   sel('dbMyDecks').value = id;
-  dbStatus(`Сохранено: «${name}» — доступна в меню в списке «Колода» и кнопкой «В бой».`, true);
+  dbStatus(`Сохранено: «${name}» — выберите обложку и запускайте бой кнопкой «В бой» или через Колоды → «Играть».`, true);
   Sfx.uiClick();
 });
 btn('btnDbExport').addEventListener('click', () => {
@@ -6702,11 +8079,22 @@ btn('btnDbDelete').addEventListener('click', () => {
   editing.id = null;
   buildMenu(); renderMyDecksSel(); Sfx.uiClick();
 });
+function editorMatchesSavedDeck(deck: CustomDeck): boolean {
+  if (!editing) return false;
+  const ids = editingCards().slice().sort().join('|');
+  const savedIds = deck.cards.slice().sort().join('|');
+  const name = editing.name.trim() || `${FACTION_RU[editing.faction]}: моя колода`;
+  const editorAvatar = editing.avatarCardId ?? suggestedDeckArt(editingCards())?.id ?? null;
+  const savedAvatar = deck.avatarCardId ?? suggestedDeckArt(deck.cards)?.id ?? null;
+  return ids === savedIds && editing.faction === deck.faction && name === deck.name && editorAvatar === savedAvatar;
+}
+
 btn('btnDbUse').addEventListener('click', () => {
   if (!editing?.id) { dbStatus('Сначала сохраните колоду'); return; }
-  sel('deckPick').value = editing.id;
-  battle.playerDeckId = editing.id;
-  dbStatus(`Колода «${editing.name}» выбрана для боя.`, true);
+  const saved = loadCustomDecks().find(deck => deck.id === editing?.id);
+  if (!saved) { dbStatus('Сохранённая колода не найдена — сначала нажмите «Сохранить»'); return; }
+  if (!editorMatchesSavedDeck(saved)) { dbStatus('Есть несохранённые изменения. Нажмите «Сохранить», затем запускайте бой.'); return; }
+  if (launchDeckForBattle(saved.id)) showToast(`Запускаем колоду «${saved.name}»`);
 });
 sel('dbMyDecks').addEventListener('change', () => {
   const d = loadCustomDecks().find(x => x.id === sel('dbMyDecks').value);
@@ -6723,6 +8111,12 @@ sel('dbFaction').addEventListener('change', () => {
   dbStatus(''); renderEditor();
 });
 $('dbName').addEventListener('input', () => { if (editing) editing.name = ($('dbName') as HTMLInputElement).value; });
+sel('dbAvatarCard').addEventListener('change', () => {
+  if (!editing) return;
+  editing.avatarCardId = sel('dbAvatarCard').value || null;
+  renderDeckAvatarPreview();
+});
+btn('btnDbAvatarGallery').addEventListener('click', openEditorDeckArtPicker);
 sel('dbFaction').innerHTML = FACTION_IDS.map(f => `<option value="${f}">${FACTION_RU[f]}</option>`).join('');
 ['dbSearch', 'dbType'].forEach(id => $(id).addEventListener(id === 'dbSearch' ? 'input' : 'change', renderPool));
 
@@ -6751,7 +8145,7 @@ sel('dbFaction').innerHTML = FACTION_IDS.map(f => `<option value="${f}">${FACTIO
 /* --- правила --- */
 const RULES_HTML = `
 <h3 style="color:var(--gold-hi);letter-spacing:.1em;margin:.6rem 0">Цель и ресурсы</h3>
-<p>Снизьте здоровье героя противника с <b>30</b> до <b>0</b>. Колода — <b>40</b> карт, стартовая рука — <b>5</b>,
+<p>Снизьте здоровье героя противника с <b>30</b> до <b>0</b>. Колода — минимум <b>60</b> карт, не более <b>4</b> копий любой карты (включая легендарные); верхнего лимита и сайдборда нет. Стартовая рука — <b>5</b>,
 муллиган доступен <b>один раз</b> за игру. Максимум маны растёт на 1 каждый ход (до 10) и полностью восполняется
 в фазе «Ресурсы». <b>Неиспользованная мана сохраняется до вашего следующего хода</b> — оставляйте ману для <b>мгновенных заклинаний в ход противника</b> (как в MTG). Пустая колода → <b>усталость</b>: каждый добор наносит растущий урон.
 На доске не более <b>7</b> существ и <b>3</b> рун у каждого игрока.</p>
@@ -6848,14 +8242,20 @@ document.addEventListener('keydown', (ev: KeyboardEvent) => {
   const inBattle = !$('battle').classList.contains('hidden');
 
   if (ev.key === 'Escape') {
+    if (!$('deckArtPickerModal').classList.contains('hidden')) { closeDeckArtPicker(); return; }
     if (!$('cardModal').classList.contains('hidden')) { closeCardModal(); return; }
-    if (!$('journalModal').classList.contains('hidden')) { $('journalModal').classList.add('hidden'); return; }
-    if (!$('boosterModal').classList.contains('hidden')) { hideSealedInstant(); $('boosterModal').classList.add('hidden'); return; }
+    for (const id of ['cosmPreview','journalModal','replayModal','factionModal','graveModal']) {
+      const modal = document.getElementById(id);
+      if (modal && !modal.classList.contains('hidden')) { modal.classList.add('hidden'); return; }
+    }
     if (!$('authModal').classList.contains('hidden')) { closeAuth(); return; }
-    $('collection').classList.add('hidden');
-    $('rules').classList.add('hidden');
-    $('settingsPanel').classList.add('hidden');
-    $('settingsScrim')?.classList.add('hidden');
+    if (!$('rules').classList.contains('hidden')) { $('rules').classList.add('hidden'); return; }
+    if (!$('settingsPanel').classList.contains('hidden')) { $('settingsPanel').classList.add('hidden'); $('settingsScrim')?.classList.add('hidden'); return; }
+    if (['boosterModal','profileModal','shopModal','bpModal','campaignModal','tutModal'].some(id => !$(id).classList.contains('hidden'))
+        || ['collection','decksScreen','eventsScreen'].some(id => !$(id).classList.contains('hidden'))) {
+      navigateApp('back');
+      return;
+    }
     return;
   }
   if (!$('cardModal').classList.contains('hidden')) {
