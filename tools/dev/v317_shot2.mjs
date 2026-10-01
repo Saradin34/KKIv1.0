@@ -1,0 +1,14 @@
+import { chromium } from 'playwright';
+const SH = '/home/user/KKIv1.0/shots/v317';
+const b = await chromium.launch();
+const pg = await b.newPage({ viewport: { width: 1600, height: 900 } });
+await pg.addInitScript('window.EC_NO_AUTH_GATE=true');
+await pg.goto('http://localhost:5173/');
+await pg.waitForTimeout(1400);
+await pg.evaluate(() => document.querySelector("button[data-route=\"profile\"]")?.click());
+await pg.waitForTimeout(500);
+await pg.evaluate(() => document.querySelector('button.ptab[data-ptab="cosm"]')?.click());
+await pg.waitForTimeout(700);
+await pg.screenshot({ path: SH + '/08_profile_cosm.png' });
+console.log('ok');
+await b.close();

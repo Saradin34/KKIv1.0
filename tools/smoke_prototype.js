@@ -56,6 +56,7 @@ const skip = (name, reason = 'не входит в текущий этап') => 
   const { window } = dom;
 
   // --- полифилы отсутствующего в jsdom ---
+  window.EC_NO_AUTH_GATE = true;
   window.Element.prototype.animate = function () { return { cancel() {}, finish() {}, addEventListener() {} }; };
   window.Element.prototype.setPointerCapture = function () {};
   window.Element.prototype.releasePointerCapture = function () {};
@@ -211,7 +212,7 @@ const skip = (name, reason = 'не входит в текущий этап') => 
 
   const quickNav = $('ecQuickNav');
   check('контекстная навигация с кнопкой «Назад» видна на внутренних экранах', !quickNav.classList.contains('hidden')
-    && quickNav.querySelectorAll('button[data-route]').length === 9 && !!quickNav.querySelector('[data-route="back"]'));
+    && quickNav.querySelectorAll('button[data-route]').length === 10 && !!quickNav.querySelector('[data-route="back"]'));
   click(quickNav.querySelector('[data-route="decks"]'));
   await wait(40);
   check('быстрый переход в колоды открывает экран и скрывает коллекцию', !$('decksScreen').classList.contains('hidden') && $('collection').classList.contains('hidden'));
@@ -223,7 +224,7 @@ const skip = (name, reason = 'не входит в текущий этап') => 
   await wait(40);
   const borderlessEvent = $('eventsGrid').querySelector('[data-event-id="borderless"]');
   check('событие Borderless показывает цель 3 рейтинговые победы и одну награду',
-    !!borderlessEvent && /0\/3/.test(borderlessEvent.textContent) && !!borderlessEvent.querySelector('[data-borderless-claim]'));
+    !!borderlessEvent && /0\/3/.test(borderlessEvent.textContent) && !!borderlessEvent.querySelector('[data-ev-play="borderless"]'));
   click(quickNav.querySelector('[data-route="back"]'));
   await wait(40);
 
@@ -290,7 +291,10 @@ const skip = (name, reason = 'не входит в текущий этап') => 
   console.log('\n[3] Экран правил');
   click($('btnRules'));
   await wait(40);
-  const rulesText = $('rulesBody').textContent;
+  let rulesText = '';
+  for (const b of [...window.document.querySelectorAll('#rulesNav [data-rs]')].map(x => x.dataset.rs)) {
+    click(window.document.querySelector(`#rulesNav [data-rs="${b}"]`)); await wait(5); rulesText += $('rulesBody').textContent;
+  }
   check('правила отрендерены', rulesText.length > 2000, `${rulesText.length} симв.`);
   check('в правилах есть Эхо', /Эхо-очки/.test(rulesText));
   check('в правилах есть 5 фаз', /Пять фаз хода/.test(rulesText));
@@ -376,6 +380,7 @@ const skip = (name, reason = 'не входит в текущий этап') => 
     runes: units('#playerRunes .runeChip'), echo: $('playerEcho').textContent, log: (window.logLines || []).length,
   });
 
+  let sawRune = false;
   for (let t = 0; t < TURNS; t++) {
     const gotTurn = await waitUntil(() => !$('gameover').classList.contains('hidden') || !$('btnEndTurn').disabled, 20000);
     if (!gotTurn) { check('игрок получил ход ' + (t + 1), false, 'таймаут ожидания'); break; }
@@ -433,6 +438,7 @@ const skip = (name, reason = 'не входит в текущий этап') => 
     }
 
     const mid = stat();
+    if ((mid.runes ?? 0) > 0) sawRune = true;
     click($('btnEndTurn'));
     await wait(700);
     if (t % 2 === 0) {
@@ -444,8 +450,8 @@ const skip = (name, reason = 'не входит в текущий этап') => 
   const questProgressAfterPlays = JSON.parse(window.localStorage.getItem('ec_meta_v1'));
   check('игровые события продвигают цели «разыграйте существ» и «примените руны»',
     (questProgressAfterPlays.wquests.find(q => q.id === 'w_creatures')?.prog ?? 0) > 0
-      && (questProgressAfterPlays.quests.find(q => q.id === 'runes')?.prog ?? 0) > 0
-      && (questProgressAfterPlays.wquests.find(q => q.id === 'w_runes')?.prog ?? 0) > 0,
+      && (!sawRune || ((questProgressAfterPlays.quests.find(q => q.id === 'runes')?.prog ?? 0) > 0
+      && (questProgressAfterPlays.wquests.find(q => q.id === 'w_runes')?.prog ?? 0) > 0)),
     `существа ${questProgressAfterPlays.wquests.find(q => q.id === 'w_creatures')?.prog ?? 0}, руны ${questProgressAfterPlays.quests.find(q => q.id === 'runes')?.prog ?? 0}`);
   check('существа появились на доске игрока', playedCreatures === 0 || units('#playerBoard .unit') >= 0);
   check('журнал боя копится в памяти (чат с экрана убран)', (window.logLines || []).length > 3,
@@ -480,8 +486,9 @@ const skip = (name, reason = 'не входит в текущий этап') => 
   check('сцена: 4 параллакс-слоя заполнены', [...$('backdrop').querySelectorAll('.bl')].every(n => n.style.backgroundImage.length > 100),
     `${[...$('backdrop').querySelectorAll('.bl')].filter(n => n.style.backgroundImage).length}/4`);
   check('поверхность стола отрисована', $('tableSurface').innerHTML.includes('<svg'), `${$('tableSurface').innerHTML.length} симв.`);
-  check('пост-слои смонтированы', !!window.document.getElementById('postVignette')
-    && !!window.document.getElementById('postGrain') && !!window.document.getElementById('postGrade'));
+  /* v3.16.1: плёночное зерно (jitter-мерцание) УБРАНО — фон боя должен быть статичным */
+  check('пост-слои смонтированы (виньетка+грейд, без зерна)', !!window.document.getElementById('postVignette')
+    && !!window.document.getElementById('postGrade') && !window.document.getElementById('postGrain'));
   check('VFX-слой создан', !!window.document.getElementById('vfxLayer'));
   check('SVG-фильтры (марево/аберрация/зерно) инжектированы', !!window.document.getElementById('vfxHeat')
     && !!window.document.getElementById('vfxAberr') && !!window.document.getElementById('vfxGrain'));
@@ -573,11 +580,11 @@ const skip = (name, reason = 'не входит в текущий этап') => 
   const cssBg = fsBg.readFileSync(pthBg.resolve(__dirname, '..', 'prototype', 'prototype.css'), 'utf8');
   const htmlBg = fsBg.readFileSync(pthBg.resolve(__dirname, '..', 'prototype', 'index.html'), 'utf8');
   check('поле на весь экран: резной стол Arena, медальоны, угловые стопки',
-    /#backdrop \.bgArt\{[^}]*board_arena\.png/.test(htmlBg)
+    /#backdrop \.bgArt\{[^}]*board_arena\.(?:png|jpg)/.test(htmlBg)
     && htmlBg.includes('id="enemyCorner"') && htmlBg.includes('id="playerCorner"')
     && htmlBg.includes('id="turnPill"') && /class="rays/.test(htmlBg)
     && /\.unit\.tapped \.ubody\{transform:rotate\(14deg\)/.test(htmlBg),
-    'стол board_arena.png, углы/медальоны/пилюля хода/тап на месте');
+    'стол board_arena.(png|jpg), углы/медальоны/пилюля хода/тап на месте');
   check('иконки героев укрупнены по MTG (медальон в бою и меню)',
     /--medal:clamp\(84px,11vh,120px\)/.test(htmlBg) && /\.heroChip\{[^}]*width:104px/.test(htmlBg)
     && /\.fava\{[^}]*width:88px/.test(htmlBg) && /\.medal::before\{/.test(htmlBg),
@@ -848,7 +855,7 @@ const skip = (name, reason = 'не входит в текущий этап') => 
   const cnt1 = $('dbCount').textContent;
   poolCard.dispatchEvent(new window.MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
   await wait(30);
-  check('клик добавляет карту в колоду, ПКМ убирает', cnt1 === '1 · мин. 60' && $('dbCount').textContent === '0 · мин. 60',
+  check('клик добавляет карту в колоду, ПКМ убирает', cnt1 === '1 · мин. 30' && $('dbCount').textContent === '0 · мин. 30',
     `${cnt1} → ${$('dbCount').textContent}`);
   const builderCosmeticId = $('dbPoolGrid').querySelector('.card')?.dataset.cardId || '';
   if (builderCosmeticId && !window.ecBorderlessOwned().includes(builderCosmeticId)) window.ecGrantBorderless(builderCosmeticId);
@@ -883,7 +890,7 @@ const skip = (name, reason = 'не входит в текущий этап') => 
     const equippedTile = [...$('dbPoolGrid').querySelectorAll('.card')].find(n => n.dataset.cardId === builderCosmeticId);
     check('выбранный Borderless виден в пуле и составе той же колоды', !!equippedTile?.classList.contains('borderless')
       && equippedTile?.dataset.cardVariantId === `${builderCosmeticId}:borderless`
-      && $('dbCount').textContent === '1 · мин. 60'
+      && $('dbCount').textContent === '1 · мин. 30'
       && !!$('dbDeckList').querySelector('.dbRowStyle.isBorderless')
       && window.ecMeta().borderlessEquipped.includes(builderCosmeticId)
       && window.ecOwnedOf(builderCosmeticId) === ordinaryBeforeStyle);
@@ -891,7 +898,7 @@ const skip = (name, reason = 'не входит в текущий этап') => 
     if (classicChoice) click(classicChoice);
     const classicTile = [...$('dbPoolGrid').querySelectorAll('.card')].find(n => n.dataset.cardId === builderCosmeticId);
     check('переключение стиля не создаёт копию и не меняет лимит колоды', !!classicTile
-      && !classicTile.classList.contains('borderless') && $('dbCount').textContent === '1 · мин. 60'
+      && !classicTile.classList.contains('borderless') && $('dbCount').textContent === '1 · мин. 30'
       && window.ecOwnedOf(builderCosmeticId) === ordinaryBeforeStyle);
     click($('cmClose'));
     $('dbDeckList').querySelector('.dbRow button')?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
@@ -903,7 +910,8 @@ const skip = (name, reason = 'не входит в текущий этап') => 
   const poolIds = factionPool.filter(r => r.rarity !== 'Legendary').map(r => r.id);
   const custom = poolIds.slice(0, 15).flatMap(id => [id, id, id, id]);
   const good = D.validate(custom, fac);
-  const short = D.validate(custom.slice(0, 59), fac);
+  const short = D.validate(custom.slice(0, 29), fac);
+  const thirty = D.validate(custom.slice(0, 30), fac);
   const tooMany = D.validate([...custom, custom[0]], fac);
   const oversizedCards = poolIds.slice(0, 16).flatMap(id => [id, id, id, id]);
   const oversized = D.validate(oversizedCards, fac);
@@ -912,10 +920,10 @@ const skip = (name, reason = 'не входит в текущий этап') => 
     ? [...poolIds.slice(0, 14).flatMap(id => [id, id, id, id]), legendaryId, legendaryId, legendaryId, legendaryId]
     : [];
   const legendaryOk = !!legendaryId && D.validate(legendaryDeck, fac).ok;
-  check('валидатор MTG Constructed: минимум 60, без потолка, playset ×4 включая легендарные',
-    custom.length === 60 && good.ok && !short.ok && !tooMany.ok && oversizedCards.length === 64
+  check('валидатор: минимум 30 (30, 60 и больше), без потолка, playset ×4 включая легендарные',
+    custom.length === 60 && good.ok && thirty.ok && !short.ok && !tooMany.ok && oversizedCards.length === 64
       && oversized.ok && legendaryOk,
-    `60=${good.ok}; 59=${short.ok}; 64=${oversized.ok}; ×5=${tooMany.ok}; legendary ×4=${legendaryOk}`);
+    `30=${thirty.ok}; 60=${good.ok}; 29=${short.ok}; 64=${oversized.ok}; ×5=${tooMany.ok}; legendary ×4=${legendaryOk}`);
   D.save({ id: 'custom-smoke', name: 'Дымовая колода', faction: fac, cards: custom, avatarCardId: custom[0], updated: Date.now() });
   const resolved = D.resolve('custom-smoke');
   check('пользовательская колода на 60 карт и выбранная обложка сохраняются для боя',
@@ -1053,9 +1061,14 @@ const skip = (name, reason = 'не входит в текущий этап') => 
   await wait(70);
   const shardsAfterBuy = window.ecShards();
   const stockAfterBuy = Number((stockNode()?.textContent || '×0').replace(/[^0-9]/g, ''));
+  // v3.17.3: покупка бустера НЕ переключает в «Бустеры» — пользователь остаётся в магазине,
+  // пак добавляется в запас без вскрытия (панель не открывается автоматически)
   const addedAsSealedPack = stockAfterBuy === stockBefore + 1
-    && !$('boosterModal').classList.contains('hidden')
+    && !$('shopModal').classList.contains('hidden')
+    && $('boosterModal').classList.contains('hidden')
     && $('packSealed').classList.contains('hidden');
+  window.ecNavigate('packs'); // как «← Назад» в магазине: возврат к панели бустеров
+  await wait(60);
   const packButton = $('boosterInventory').querySelector('.boosterInvCard[data-pack="standard"]:not(:disabled)');
   if (packButton) click(packButton);
   await wait(40);
@@ -1244,14 +1257,14 @@ const skip = (name, reason = 'не входит в текущий этап') => 
     curMark && premOn && premGot && allOk,
     `текущий уровень ${curMark ? '✔' : '✗'}, премиум ${premOn ? '✔' : '✗'}, prem-claim ${premGot ? '✔' : '✗'}, итоги ${allOk ? '✔' : '✗'}`);
   /* --- спека «6. Обучение» (v2.5.1) --- */
-  check('обучение v2.5.1: 20 шагов × 4 урока + подсветка + блокер действий',
-    (jsSrc.match(/lesson: \d,/g) || []).length === 20 && /tutBlocker/.test(jsSrc)
+  check('обучение v3: шаги по мане хода × 4 урока + подсветка + блокер действий',
+    (jsSrc.match(/mana: \d,\s*message:/g) || []).length >= 10 && /tutBlocker/.test(jsSrc) && /tutTurnBack/.test(jsSrc)
     && /tutPollStep/.test(jsSrc) && /TUT_HANDS/.test(jsSrc), 'пошаговый скрипт — зеркало tutorial.json');
-  check('обучение v2.5.1: руки уроков — руна+Ветеран+заклинание / Провокация / Вампиризм+Неуловимость+Клич / 5✦+1✦',
-    /"aur_r07", "neu_03", "aur_s01"/.test(jsSrc) && /"nec_03", "eth_01", "aur_03"/.test(jsSrc)
-    && /"aur_09", "aur_01"/.test(jsSrc), 'муллиган в уроках пропущен, рука заскриптована');
-  check('обучение v2.5.1: гейты уроков — L1 руна+существо+заклинание (spellsCast), L3 все три механики',
-    /spellsCast >= 1/.test(jsSrc) && /tutInjected\.every/.test(jsSrc), 'endTurnNow не пускает без выполнения');
+  check('обучение v3: руки уроков по кривой маны — 1✦ руна → 1✦ заклинание → 3✦ Ветеран / Провокация / 1✦→2✦→2✦ / 5✦+1✦+2✦+1✦',
+    /"aur_r07", "aur_s01", "neu_03"/.test(jsSrc) && /"eth_01", "nec_03", "aur_03"/.test(jsSrc)
+    && /"aur_09", "aur_01", "aur_03", "aur_s01"/.test(jsSrc), 'муллиган в уроках пропущен, рука заскриптована');
+  check('обучение v3: гейты уроков — L1 руна/заклинание/существо (spellsCast), конец хода только на шагах «Завершите ход»',
+    /tutStat\(["']spellsCast["']\) >= 1/.test(jsSrc) && /tutAllDone/.test(jsSrc) && /allow\.includes\(["']#btnEndTurn["']\)/.test(jsSrc), 'endTurnNow не пускает без выполнения');
   const prac0 = window.document.getElementById('chkPractice').disabled;
   window.ecSetTut(4, true);
   const prac1 = window.document.getElementById('chkPractice').disabled;
@@ -1360,7 +1373,7 @@ const skip = (name, reason = 'не входит в текущий этап') => 
   click(nav2.querySelector('[data-route="events"]'));
   await wait(50);
   const eventCardReady = $('eventsGrid').querySelector('[data-event-id="borderless"]');
-  const eventClaimBtn = eventCardReady?.querySelector('[data-borderless-claim]');
+  const eventClaimBtn = eventCardReady?.querySelector('[data-ev-claim="borderless"]');
   const eventReady = !!eventClaimBtn && /3\/3/.test(eventCardReady.textContent) && !eventClaimBtn.disabled;
   if (eventReady) click(eventClaimBtn);
   await wait(50);
@@ -1428,7 +1441,7 @@ const skip = (name, reason = 'не входит в текущий этап') => 
   window.openDecksScreen();
   const playBox = window.document.querySelector('#deckGrid [data-deck-id="custom-e2e-flow"]');
   const coverVisible = !!playBox && playBox.dataset.avatarCardId === playIds[7]
-    && !!playBox.querySelector('.deckAvatarTag');
+    && !!playBox.querySelector('.deckAvatarImg') && !!playBox.querySelector('.deckArtGear') && !playBox.querySelector('.deckColors');
   const deckTileTextOk = !!playBox && playBox.querySelector('.deckName')?.textContent === 'Проверка обложки'
     && !!playBox.querySelector('.deckMeta .deckCount')?.textContent.includes('60')
     && (playBox.querySelector('.deckAvatarImg')?.getAttribute('src') || '').includes(`/art/Aurites/${playIds[7]}.png`)

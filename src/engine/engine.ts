@@ -57,6 +57,11 @@ export function emptyStats(): MatchStats {
 
 /* ======================================================================= */
 
+export interface EngineNetState {
+  players: [PlayerState, PlayerState]; turn: number; turnsTaken: [number, number]; activeSide: Side;
+  phase: Phase; result: GameResult; stats: [MatchStats, MatchStats]; uidCounter: number; rng: [number, number];
+}
+
 export class GameEngine {
   readonly config: GameConfig;
   readonly db: CardDatabase;
@@ -124,6 +129,53 @@ export class GameEngine {
       mulliganUsed: false,
       incomingDamageReductionTurns: 0,
     };
+  }
+
+
+  /* ----------------------------- ОНЛАЙН (v3.4) -----------------------------
+     Полный снимок состояния партии для сетевой синхронизации. Каждый клиент видит
+     себя стороной Player, поэтому снимок соперника применяется ЗЕРКАЛЬНО:
+     игроки меняются местами, owner/side/activeSide/result — инвертируются. */
+  exportState(): EngineNetState {
+    return JSON.parse(JSON.stringify({
+      players: this.players, turn: this.turn, turnsTaken: this.turnsTaken, activeSide: this.activeSide,
+      phase: this.phase, result: this.result, stats: this.stats, uidCounter: this.uidCounter,
+      rng: this.rng.getState(),
+    })) as EngineNetState;
+  }
+  importState(src: EngineNetState, mirror: boolean): void {
+    const s = JSON.parse(JSON.stringify(src)) as EngineNetState;
+    const flip = (x: Side | undefined | null): Side | undefined | null =>
+      x === undefined || x === null ? x : (x === Side.Player ? Side.Opponent : Side.Player);
+    if (mirror) {
+      s.players = [s.players[1], s.players[0]];
+      s.turnsTaken = [s.turnsTaken[1], s.turnsTaken[0]];
+      s.stats = [s.stats[1], s.stats[0]];
+      s.activeSide = flip(s.activeSide) as Side;
+      s.result = s.result === GameResult.PlayerWin ? GameResult.OpponentWin
+        : s.result === GameResult.OpponentWin ? GameResult.PlayerWin : s.result;
+      for (const pl of s.players) {
+        pl.side = flip(pl.side) as Side;
+        for (const c of pl.creatures) c.owner = flip(c.owner) as Side;
+        for (const r of pl.runes) r.owner = flip(r.owner) as Side;
+        for (const r of pl.rituals) { r.owner = flip(r.owner) as Side; if (r.targetSide !== undefined) r.targetSide = flip(r.targetSide) as Side; }
+        if (pl.lastSpellCast?.targetSide !== undefined) pl.lastSpellCast.targetSide = flip(pl.lastSpellCast.targetSide) as Side;
+      }
+    }
+    this.players = s.players;
+    this.turn = s.turn; this.turnsTaken = s.turnsTaken; this.activeSide = s.activeSide;
+    this.phase = s.phase; this.result = s.result; this.stats = s.stats;
+    this.uidCounter = s.uidCounter;
+    this.rng.setState(s.rng);
+    this.uidMap.clear();
+    for (const pl of this.players) for (const c of pl.creatures) this.uidMap.set(c.uid, c);
+    this.pendingDeaths = []; this.eventQueue = []; this.stack = []; this.instantWindow = null;
+  }
+  /** Короткий отпечаток состояния (сверка клиентов, диагностика рассинхрона). */
+  stateHash(): string {
+    const p = this.players.map(pl => [pl.health, pl.hand.length, pl.deck.length, pl.mana,
+      pl.creatures.map(c => `${c.uid}:${c.attack}/${c.health}`).join(',')].join('|'));
+    return `${this.turn}#${this.activeSide}#${p.join('~')}`;
   }
 
   /** Раздача стартовой руки. Возвращает true, если нужен муллиган. */
@@ -244,8 +296,9 @@ export class GameEngine {
     if (side === Side.Player) this.stats[Side.Opponent].damageDealt += dmg; else this.stats[Side.Player].damageDealt += dmg;
     this.stats[side].damageTaken += dmg;
     if (pl.health <= 0) {
-      pl.health = 0;
-      this.emit({ type: GameEventType.PlayerDeath, side, text: `${pl.name} пал` });
+      // v3.14: health остаётся отрицательным (оверкил виден на портрете, напр. 5 HP − 8 = −3),
+      // игра завершается немедленно и безусловно.
+      this.emit({ type: GameEventType.PlayerDeath, side, text: `${pl.name} пал (${pl.health} HP)` });
       this.endGame(side === Side.Player ? GameResult.OpponentWin : GameResult.PlayerWin);
     }
     return dmg;
@@ -1326,6 +1379,8 @@ export class GameEngine {
     const t = targetUid !== undefined ? this.findCreature(targetUid) : undefined;
     if (!t || t.owner === side) return false;
     if (hasTaunt && !taunts.includes(t)) return false;
+    // Неуловимость: существо нельзя выбрать целью атаки
+    if (t.unblockableThisTurn || (!t.silenced && t.keywords.includes(Keyword.Unblockable))) return false;
     this.resolveAttack(c, t); c.attacksThisTurn++; this.checkDeaths();
     return true;
   }

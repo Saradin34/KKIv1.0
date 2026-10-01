@@ -1,0 +1,10 @@
+import { chromium } from 'playwright';
+const b = await chromium.launch();
+const pg = await b.newPage({ viewport: { width: 1600, height: 900 } });
+await pg.goto('http://localhost:5173/', { waitUntil: 'domcontentloaded' });
+await pg.waitForTimeout(1500);
+const s1 = await pg.evaluate(`() => ({ menu: !document.getElementById('menu')?.classList.contains('hidden') })`);
+console.log('s1:', JSON.stringify(s1));
+const s2 = await pg.evaluate(() => ({ menu: !document.getElementById('menu')?.classList.contains('hidden') }));
+console.log('s2:', JSON.stringify(s2));
+await b.close();

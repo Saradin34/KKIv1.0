@@ -6,7 +6,7 @@
    колодами из Decks.json: меню «Колода», бой, список «Мои колоды».
 
    Правила сборки (MTG Constructed):
-     • минимум 60 карт, верхнего лимита нет;
+     • минимум 30 карт, верхнего лимита нет;
      • не более 4 копий любой карты, включая легендарные;
      • карта может быть своей фракции или нейтральной.
 
@@ -32,7 +32,7 @@ export interface CustomDeck extends DeckLike {
   updated: number;
 }
 
-export const MIN_DECK_SIZE = 60;
+export const MIN_DECK_SIZE = 30;
 /** @deprecated Используйте MIN_DECK_SIZE: верхнего лимита колоды нет. */
 export const DECK_SIZE = MIN_DECK_SIZE;
 export const MAX_COPIES = 4;   // MTG playset: максимум 4 копии карты в колоде
@@ -118,9 +118,9 @@ export function validateDeck(
 }
 
 /** Базовая валидность колоды для гейта «В бой»: по умолчанию Constructed — минимум
- *  MIN_DECK_SIZE (60), без верхнего лимита, не более 4 копий любой карты.
+ *  MIN_DECK_SIZE (30), без верхнего лимита, не более 4 копий любой карты.
  *  Только встроенный формат `starter` явно передаёт 30; пользовательские колоды всегда
- *  идут через validateDeck() и остаются минимум 60 карт. */
+ *  идут через validateDeck() и остаются минимум 30 карт. */
 export function validateDeckSize(
   cards: string[],
   lookup: (id: string) => CardData | undefined,

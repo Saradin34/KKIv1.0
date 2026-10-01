@@ -13,9 +13,9 @@
 import {
   CardData, CardType, EntityCreature, Element, Faction, FACTION_COLORS, FACTION_RU,
   GameEvent, GameEventType, GameResult, Keyword, Phase, PHASE_ORDER, PHASE_RU,
-  RARITY_COLORS, Rarity, Side, SpellSubtype, StatusType, TargetKind, DEFAULT_CONFIG,
+  RARITY_COLORS, Rarity, Side, SpellSubtype, StatusType, TargetKind, DEFAULT_CONFIG, PlayerState, CardEffect,
 } from '../engine/types';
-import { GameEngine } from '../engine/engine';
+import { GameEngine, EngineNetState } from '../engine/engine';
 import { AIController, AI_PROFILES } from '../engine/ai';
 import { buildDatabase, CardsFile, DeckFile } from '../engine/db';
 import cardsRaw from '../../unity/EchoCitadel/Assets/StreamingAssets/Cards.json';
@@ -51,7 +51,7 @@ const el = (tag: string, cls?: string, html?: string): HTMLElement => {
   return n;
 };
 
-type AppRoute = 'home' | 'collection' | 'decks' | 'store' | 'profile' | 'events' | 'packs' | 'mastery' | 'battle';
+type AppRoute = 'home' | 'collection' | 'decks' | 'store' | 'profile' | 'events' | 'packs' | 'mastery' | 'battle' | 'rules' | 'campaign' | 'online';
 let appRoute: AppRoute = 'home';
 const routeHistory: AppRoute[] = [];
 let suppressRouteHistory = false;
@@ -63,6 +63,8 @@ function setAppRoute(next: AppRoute): void {
     appRoute = next;
   }
   document.body.dataset.appRoute = next;
+  if (next !== 'rules') document.getElementById('rules')?.classList.add('hidden');
+  if (typeof closeOnline === 'function' && document.getElementById('onlineModal') && !document.getElementById('onlineModal')!.classList.contains('hidden')) closeOnline();
   const dock = document.getElementById('ecQuickNav');
   const show = next !== 'home' && next !== 'battle';
   dock?.classList.toggle('hidden', !show);
@@ -91,6 +93,7 @@ function navigateApp(next: AppRoute | 'back'): void {
     case 'events': openEventsScreen(); break;
     case 'packs': openBoosterPanel(); break;
     case 'mastery': openBP(); break;
+    case 'rules': openRules(); break;
     case 'battle':
       setAppRoute('battle');
       $('menu').classList.add('hidden');
@@ -100,10 +103,56 @@ function navigateApp(next: AppRoute | 'back'): void {
       break;
   }
 }
+(window as unknown as { ecNavigate?: typeof navigateApp }).ecNavigate = navigateApp;
+/* v3.12: единый закрытель экранов — чтобы любой переход не оставлял прежний раздел поверх нового */
+function closeAllScreens(): void {
+  for (const id of ['homeScreen','eventsScreen','decksScreen','collection','shopModal','bpModal','profileModal','boosterModal','campaignModal','onlineModal'])
+    document.getElementById(id)?.classList.add('hidden');
+}
+/* v3.10: навигация значками в верхней панели (десктоп) + доп. пункты бургера.
+   Кнопки-прокси нажимают существующие кнопки, поэтому вся логика разделов остаётся прежней. */
+function syncIconNav(): void {
+  const vis = (id: string): boolean => { const n = document.getElementById(id); return !!n && !n.classList.contains('hidden'); };
+  let cur: string = appRoute;
+  if (vis('onlineModal')) cur = 'online';
+  else if (vis('campaignModal')) cur = 'campaign';
+  document.querySelectorAll<HTMLElement>('#ecIconNav .ecIco[data-route]').forEach(b => {
+    const on = b.dataset.route === cur;
+    b.classList.toggle('active', on);
+    if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
+  });
+}
+function iconNavActivate(t: HTMLElement): void {
+  const px = t.dataset.proxy, route = t.dataset.route;
+  Sfx.uiClick();
+  document.getElementById('arenaTopNav')?.classList.remove('ecOpen');
+  document.getElementById('btnBurger')?.setAttribute('aria-expanded', 'false');
+  if (px) document.getElementById(px)?.click();
+  else if (route) navigateApp(route as AppRoute);
+  window.setTimeout(syncIconNav, 60);
+}
+document.addEventListener('click', ev => {
+  const t = (ev.target as HTMLElement | null)?.closest?.('#ecIconNav [data-proxy], #ecIconNav [data-route], #ecUtilNav [data-proxy], #ecUtilNav [data-route], #ecDrawer [data-proxy], #ecDrawer [data-route]') as HTMLElement | null;
+  if (!t) return;
+  ev.preventDefault();
+  iconNavActivate(t);
+});
+(() => {
+  const logo = document.querySelector<HTMLElement>('#arenaTopNav .ecLogoPlate');
+  const home = (): void => { if (!document.getElementById('battle')?.classList.contains('hidden')) return; Sfx.uiClick(); navigateApp('home'); syncIconNav(); };
+  logo?.addEventListener('click', home);
+  logo?.addEventListener('keydown', ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); home(); } });
+  new MutationObserver(syncIconNav).observe(document.body, { attributes: true, attributeFilter: ['data-app-route'] });
+  for (const id of ['onlineModal', 'campaignModal']) {
+    const n = document.getElementById(id);
+    if (n) new MutationObserver(syncIconNav).observe(n, { attributes: true, attributeFilter: ['class'] });
+  }
+  syncIconNav();
+})();
 document.getElementById('ecQuickNav')?.addEventListener('click', ev => {
   const route = (ev.target as HTMLElement | null)?.closest?.('[data-route]') as HTMLElement | null;
   const value = route?.dataset.route;
-  if (value && ['back','home','collection','decks','store','profile','events','packs','mastery'].includes(value)) {
+  if (value && ['back','home','collection','decks','store','profile','events','packs','mastery','rules'].includes(value)) {
     Sfx.uiClick();
     navigateApp(value as AppRoute | 'back');
   }
@@ -297,7 +346,7 @@ function renderCard(card: CardData, appearance: CardAppearance = 'auto'): HTMLEl
   node.insertAdjacentHTML('afterbegin', '<img class="frameOv" src="img/card_frame.png" alt="" draggable="false" onerror="this.remove()">');
   node.dataset.cardId = card.id;
   node.dataset.rarity = card.rarity as string;
-  const ability = highlightCardKeywords(cardText(card));
+  const ability = cardBodyHtml(card, false);
   node.innerHTML = `
     <div class="banner" style="background:linear-gradient(90deg,${col.primary},${col.accent})"></div>
     <div class="innerframe"></div>
@@ -311,7 +360,7 @@ function renderCard(card: CardData, appearance: CardAppearance = 'auto'): HTMLEl
       </div>
       <div class="ctype">${typeName(card.type)}${card.element !== Element.None ? ' · ' + elemName(card.element) : ''}</div>
       <div class="cart">${artSvg(card, 200, 190)}</div>
-      <div class="ctext">${keywordsLine(card)}${ability}</div>
+      <div class="ctext">${ability}</div>
       <div class="cfoot">
         <span class="rar" style="background:${rarCol};color:${rarCol}" title="${RARITY_RU[card.rarity]}"></span>
         <span class="cstats">${card.type === CardType.Creature
@@ -339,7 +388,7 @@ function showTooltip(card: CardData, x: number, y: number): void {
     <div class="ttName" style="color:${col.primary}">${cardName(card)}</div>
     <div class="ttType">${typeName(card.type)} · ${factionName(card.faction)} · ${rarityName(card.rarity)} · ${card.cost} ${bi('маны', 'Mana')}${card.element !== Element.None ? ' · ' + elemName(card.element) : ''}</div>
     ${card.type === CardType.Creature ? `<div style="color:#ffd98a;font-size:.92rem">⚔ ${card.attack ?? 0} &nbsp; ❤ ${card.health ?? 0}</div>` : ''}
-    <div class="ttText">${highlightCardKeywords(cardText(card)) || '—'}</div>
+    <div class="ttText">${cardBodyHtml(card)}</div>
     ${cardFlavor(card) ? `<div class="ttFlavor">${cardFlavor(card)}</div>` : ''}`;
   tooltip.classList.add('show');
   const w = 238;
@@ -492,7 +541,7 @@ function renderCardLarge(card: CardData, size: 'xl' | 'xxl' = 'xl', appearance: 
       </div>
       <div class="ctype">${typeName(card.type)}${card.element !== Element.None ? ' · ' + elemName(card.element) : ''}</div>
       <div class="cart">${artSvg(card, size === 'xxl' ? 340 : 300, size === 'xxl' ? 330 : 290)}</div>
-      <div class="ctext">${keywordsLine(card)}${highlightCardKeywords(cardText(card)) || '—'}${
+      <div class="ctext">${cardBodyHtml(card)}${
         card.flavor ? `<div class="zflavor">${card.flavor}</div>` : ''}</div>
       <div class="cfoot">
         <span class="rar" style="background:${rarCol};color:${rarCol}" title="${RARITY_RU[card.rarity]}"></span>
@@ -541,6 +590,9 @@ function showZoom(card: CardData, x: number, y: number, place: 'right' | 'left' 
   if (nearLeft && place === 'left') side = 'right';
   zoomPreview.style.left = side === 'left' ? '10px' : 'auto';
   zoomPreview.style.right = side === 'right' ? '10px' : 'auto';
+  // v3: в index.html стоит left:auto !important — сторону переключаем классом
+  zoomPreview.classList.remove('zoomAt');
+  zoomPreview.classList.toggle('zoomLeft', side === 'left');
   zoomPreview.style.top = '50%';
   zoomPreview.style.bottom = 'auto';
   zoomPreview.style.transform = side === 'right' ? 'translateY(-50%) translateX(0)' : 'translateY(-50%) translateX(0)';
@@ -564,6 +616,8 @@ function hideZoom(): void {
    откроет превью; узел умер без движения → renderAll скроет по isConnected. */
 let lastZoomEl: HTMLElement | null = null;
 document.addEventListener('mousemove', ev => {
+  // v3: слоты бустера управляют превью сами (и не раскрывают карту под рубашкой)
+  if ((ev.target as HTMLElement | null)?.closest?.('.packSlot')) return;
   const host = (ev.target as HTMLElement | null)?.closest?.('.card,.unit') as HTMLElement | null;
   if (host && host.dataset.cardId) {
     lastZoomEl = host;
@@ -689,8 +743,164 @@ function cardName(c: CardData): string {
   return isEN() ? (localeCache?.[`card_${c.id}_name`] || c.name) : c.name;
 }
 function cardText(c: CardData): string {
+  if (c.type === CardType.Creature && !isEN()) return creatureDescHtml(c).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
   const ru = c.abilityText ?? '';
   return isEN() ? (localeCache?.[`card_${c.id}_text`] || ru) : ru;
+}
+
+/* =====================================================================
+   v3.6: описание существ генерируется из данных движка (keywords + effects + onDeath),
+   поэтому текст всегда совпадает с тем, что реально происходит в бою.
+   Ключевое слово → жирное название + пояснение (как reminder text в MTG Arena).
+   ===================================================================== */
+const KW_REMINDER: Record<string, string> = {
+  Taunt: 'Пока это существо на поле, противник обязан атаковать его — бить героя или других существ нельзя.',
+  Rush: 'Может атаковать в тот же ход, когда вышло на поле.',
+  Windfury: 'Может атаковать дважды за ход.',
+  Trample: 'Если убивает существо в бою, лишний урон проходит в героя противника.',
+  Lifesteal: 'Урон, нанесённый этим существом, восстанавливает столько же здоровья вашему герою.',
+  Unblockable: 'Существа противника не могут выбрать его целью атаки.',
+  DivineShield: 'Выходит на поле со Щитом: первое полученное повреждение полностью поглощается.',
+  Poisonous: 'Существо, получившее от него урон, отравлено — следующее повреждение его убьёт.',
+  Freezing: 'Существо, получившее от него урон, замораживается и пропускает следующую атаку.',
+  SpellDamage: 'Ваши заклинания наносят на 1 урон больше.',
+  Battlecry: 'Срабатывает, когда вы разыгрываете это существо из руки.',
+  Deathrattle: 'Срабатывает, когда это существо погибает.',
+};
+function plural(n: number, one: string, few: string, many: string): string {
+  const a = Math.abs(n) % 100, b = a % 10;
+  if (a > 10 && a < 20) return many;
+  if (b === 1) return one;
+  if (b >= 2 && b <= 4) return few;
+  return many;
+}
+type TgtCase = 'dat' | 'acc' | 'gen';
+function tgtPhrase(to: string | undefined, f: CardEffect['filter'] | undefined, cs: TgtCase): string {
+  const k = cs === 'dat' ? 0 : cs === 'acc' ? 1 : 2;
+  const HERO: Record<string, [string, string, string]> = {
+    EnemyHero: ['герою противника', 'героя противника', 'героя противника'],
+    FriendlyHero: ['своему герою', 'своего героя', 'своего героя'],
+    AnyHero: ['любому герою', 'любого героя', 'любого героя'],
+    AllEnemies: ['всем существам противника', 'всех существ противника', 'всех существ противника'],
+    AllFriendlies: ['всем своим существам', 'всех своих существ', 'всех своих существ'],
+    AllCreatures: ['всем существам', 'всех существ', 'всех существ'],
+  };
+  if (to && HERO[to]) return HERO[to][k];
+  const own = to === 'FriendlyCreature';
+  const whose = to === 'EnemyCreature' ? ' противника' : '';
+  const cnt = f?.count && f.count > 1 ? f.count : 1;
+  let suf = '';
+  if (f?.highestAttack) suf = ' с наибольшей атакой';
+  else if (f?.lowestAttack) suf = ' с наименьшей атакой';
+  else if (f?.lowestHealth) suf = ' с наименьшим здоровьем';
+  else if (f?.highestHealth) suf = ' с наибольшим здоровьем';
+  if (cnt > 1) {
+    const noun = [own ? 'своим существам' : 'существам', own ? 'своих существ' : 'существ', own ? 'своих существ' : 'существ'][k];
+    return `${f?.random ? 'случайным ' .slice(0, k === 0 ? 9 : 0) : ''}${cnt} ${noun}${whose}${suf}`.replace(/^случайным (\d)/, '$1 случайным');
+  }
+  const adj = f?.random ? ['случайному', 'случайное', 'случайного'][k] : suf ? '' : ['выбранному', 'выбранное', 'выбранного'][k];
+  const pos = own ? ['своему', 'своё', 'своего'][k] : '';
+  const noun = ['существу', 'существо', 'существа'][k];
+  return [adj, pos, noun].filter(Boolean).join(' ') + whose + suf;
+}
+function effectRu(e: CardEffect, card: CardData, next?: CardEffect): { text: string; skipNext?: boolean } {
+  const v = e.value ?? 0;
+  const to = (e.to ?? card.target) as string | undefined;
+  const own = to === 'FriendlyCreature';
+  void own;
+  const dat = (): string => tgtPhrase(to, e.filter, 'dat');
+  const acc = (): string => tgtPhrase(to, e.filter, 'acc');
+  const gen = (): string => tgtPhrase(to, e.filter, 'gen');
+  const turns = (n: number): string => `${n} ${plural(n, 'ход', 'хода', 'ходов')}`;
+  switch (e.op) {
+    case 'damage': return { text: `Нанесите ${v} урона ${dat()}` };
+    case 'heal': return { text: `Восстановите ${v} здоровья ${dat()}` };
+    case 'draw': return { text: `Возьмите ${v} ${plural(v, 'карту', 'карты', 'карт')}` };
+    case 'opponentDraw': return { text: `Противник берёт ${v} ${plural(v, 'карту', 'карты', 'карт')}` };
+    case 'destroyCreature': return { text: `Уничтожьте ${acc()}` };
+    case 'buffAttack':
+      if (next && next.op === 'buffHealth' && (next.to ?? card.target) === to) return { text: `Дайте ${dat()} +${v}/+${next.value ?? 0}`, skipNext: true };
+      return { text: `Дайте ${dat()} +${v} к атаке` };
+    case 'buffHealth': return { text: `Дайте ${dat()} +${v} к здоровью` };
+    case 'debuffAttack': return { text: `Уменьшите атаку ${gen()} на ${v}` };
+    case 'debuffHealth': return { text: `Порча: навсегда уменьшите здоровье ${gen()} на ${v}` };
+    case 'applyStatus': {
+      const st = e.status as string;
+      if (st === 'Poison') return { text: `Отравите ${acc()} (${/^All/.test(to ?? '') || (e.filter?.count ?? 1) > 1 ? 'следующее повреждение убьёт каждого' : 'следующее повреждение его убьёт'})` };
+      if (st === 'Freeze') return { text: `Заморозьте ${acc()} на ${turns(Math.max(1, v))} — оно не атакует` };
+      if (st === 'Shield') return { text: `Дайте ${dat()} Щит (поглощает первое повреждение)` };
+      if (st === 'Burn') return { text: `Подожгите ${acc()}: ${e.statusValue ?? 1} урона в начале каждого хода, ${turns(Math.max(1, v))}` };
+      if (st === 'Fury') return { text: `Дайте ${dat()} Ярость — может атаковать сразу` };
+      if (st === 'Silence') return { text: `Наложите Немоту на ${acc()} — оно теряет все способности` };
+      return { text: `Наложите статус на ${acc()}` };
+    }
+    case 'removeStatus': return { text: `Снимите все статусы с ${gen()}` };
+    case 'silence': return { text: `Наложите Немоту на ${acc()} — оно навсегда теряет все способности` };
+    case 'returnToHand': return { text: `Верните ${acc()} в руку владельца` };
+    case 'stealCard': return { text: `Заберите ${v || 1} ${plural(v || 1, 'случайную карту', 'случайные карты', 'случайных карт')} из руки противника` };
+    case 'stealCreature': return { text: `Возьмите под контроль ${acc()}` };
+    case 'gainMana': return { text: `Получите ${v} ${plural(v, 'ману', 'маны', 'маны')} в этом ходу` };
+    case 'gainMaxMana': return { text: `Навсегда увеличьте максимум маны на ${v}` };
+    case 'summonToken': {
+      const t = (e as unknown as { token?: CardData }).token;
+      return { text: t ? `Призовите «${t.name}» ${t.attack ?? 0}/${t.health ?? 0}` : 'Призовите существо' };
+    }
+    case 'gainEcho': return { text: `Получите ${v || 1} Эхо-${plural(v || 1, 'очко', 'очка', 'очков')}` };
+    case 'sacrifice': return { text: 'Пожертвуйте своим самым слабым существом' };
+    case 'restoreHealthByAttack': return { text: 'Восстановите своему герою здоровье, равное атаке выбранного существа' };
+    case 'damageAllEnemyCreatures': return { text: `Нанесите ${v} урона всем существам противника` };
+    case 'damageAllFriendlyCreatures': return { text: `Нанесите ${v} урона всем своим существам` };
+    case 'damageAllCreatures': return { text: `Нанесите ${v} урона всем существам` };
+    case 'healAllFriendlyCreatures': return { text: `Восстановите ${v} здоровья всем своим существам` };
+    case 'freezeAllEnemies': return { text: `Заморозьте всех существ противника на ${turns(Math.max(1, v))}` };
+    case 'burnAllEnemies': return { text: `Подожгите всех врагов: ${e.statusValue ?? 1} урона в начале хода, ${turns(Math.max(1, v))}` };
+    case 'shieldAllFriendlies': return { text: 'Дайте всем своим существам Щит' };
+    case 'setAttack': return { text: `Сделайте атаку ${gen()} равной ${v}` };
+    case 'copyLastSpell': return { text: 'Повторите последнее разыгранное заклинание' };
+    case 'mill': return { text: `Противник сбрасывает ${v} ${plural(v, 'верхнюю карту', 'верхние карты', 'верхних карт')} своей колоды` };
+    case 'damageHeroes': return { text: `Нанесите ${v} урона обоим героям` };
+    case 'reduceIncomingDamage': return { text: `Ваш герой получает на ${v} урона меньше` };
+    case 'increaseSpellDamage': return { text: `Ваши заклинания наносят на ${v} урона больше` };
+    default: return { text: String(e.op) };
+  }
+}
+function effectsRu(list: CardEffect[], card: CardData): string {
+  const parts: string[] = [];
+  for (let i = 0; i < list.length; i++) {
+    const r = effectRu(list[i], card, list[i + 1]);
+    let t = r.text;
+    if (list[i].repeat && list[i].repeat! > 1) t += ` (×${list[i].repeat})`;
+    if (r.skipNext) i++;
+    // одинаковые призывы подряд: «Призовите 2 × «…»»
+    const last = parts[parts.length - 1];
+    const m = /^Призовите (?:(\d+) × )?(«.+)$/.exec(last ?? '');
+    if (m && t === `Призовите ${m[2]}`) { parts[parts.length - 1] = `Призовите ${(+(m[1] ?? 1)) + 1} × ${m[2]}`; continue; }
+    parts.push(t);
+  }
+  return parts.map((p, i) => (i === 0 ? p : p.charAt(0).toLowerCase() + p.slice(1))).join(', затем ');
+}
+/** HTML-описание существа: строка на каждую способность. */
+function creatureDescHtml(c: CardData, withReminder = true): string {
+  const kws = (c.keywords ?? []).map(String);
+  const lines: string[] = [];
+  const rem = (k: string): string => (withReminder ? ` <i class="kwRem">(${esc(KW_REMINDER[k] ?? '')})</i>` : '');
+  for (const k of kws) {
+    if (k === 'Battlecry' || k === 'Deathrattle') continue;
+    lines.push(`<div class="abLine"><strong class="cardKeyword">${esc(kwName(k))}</strong>${rem(k)}</div>`);
+  }
+  if (c.effects?.length) lines.push(`<div class="abLine"><strong class="cardKeyword">Боевой клич:</strong> ${esc(effectsRu(c.effects, c))}.</div>`);
+  if (c.onDeath?.length) lines.push(`<div class="abLine"><strong class="cardKeyword">Предсмертный хрип:</strong> ${esc(effectsRu(c.onDeath, c))}.</div>`);
+  if (c.onTurnStart?.length) lines.push(`<div class="abLine"><strong class="cardKeyword">В начале вашего хода:</strong> ${esc(effectsRu(c.onTurnStart, c))}.</div>`);
+  if (c.onTurnEnd?.length) lines.push(`<div class="abLine"><strong class="cardKeyword">В конце вашего хода:</strong> ${esc(effectsRu(c.onTurnEnd, c))}.</div>`);
+  if (c.onSpellCast?.length) lines.push(`<div class="abLine"><strong class="cardKeyword">Когда вы разыгрываете заклинание:</strong> ${esc(effectsRu(c.onSpellCast, c))}.</div>`);
+  if (c.onDamageTaken?.length) lines.push(`<div class="abLine"><strong class="cardKeyword">Получая урон:</strong> ${esc(effectsRu(c.onDamageTaken, c))}.</div>`);
+  if (!lines.length) return '<div class="abLine abVanilla">Существо без способностей.</div>';
+  return lines.join('');
+}
+/** Текст карты для карточек/подсказок: существа — из данных, остальное — как в Cards.json. */
+function cardBodyHtml(c: CardData, withReminder = true): string {
+  if (c.type === CardType.Creature && !isEN()) return creatureDescHtml(c, withReminder);
+  return keywordsLine(c) + (highlightCardKeywords(cardText(c)) || '—');
 }
 function highlightCardKeywords(text: string): string {
   let html = esc(text);
@@ -761,6 +971,8 @@ function openJournal(): void {
 class Battle {
   engine: GameEngine | null = null;
   ai: AIController | null = null;
+  /** v3.4: сетевой матч с живым соперником (null — обычный бой против ИИ). */
+  net: NetLink | null = null;
   playerFaction: Faction = Faction.Aurites;
   playerDeckId: string = 'Aurites';
   enemyFaction: Faction = Faction.Necrus;
@@ -779,6 +991,10 @@ class Battle {
   manualCombat = true;
   inCombatWindow = false;
   pendingAttack: number | null = null;
+  /** v3.17: «Атака всеми» — очередь атак готовых существ с ручным выбором целей */
+  massAttack: boolean = false;
+  private massDone = 0;
+  private massTotal = 0;
   private combatWindowDone: (() => void) | null = null;
   private turnDone: (() => void) | null = null;
   /** Существа, призванные с прошлого рендера: им показываем анимацию выхода. */
@@ -792,6 +1008,10 @@ class Battle {
   private pendingDraw: { cardId: string | null; at: DOMRect | null } | null = null;
   aimFrom: { x: number; y: number } | null = null;
   autoTurnEnabled = true;
+  /** v3.17.3: подсказка при долгом раздумье игрока — таймер + золотая подсветка сыгранных карт */
+  private thinkTimer: number | null = null;
+  private thinkOn = false;
+  private thinkHooks = false;
   private autoToken = '';
   private autoDeadline = 0;
   private autoTimer: number | null = null;
@@ -808,14 +1028,17 @@ class Battle {
     this.running = true; this.busy = false; this.overShown = false;
     this.combatBusy = false; this.combatSnap = null;
     this.unitNodes.clear(); this.dyingUnits.clear(); this.pendingSummonFx.clear(); this.pendingStatusFx = []; logBuffer.length = 0;
+    /* v3.17.5: выбранный стол (и авторский арт фона) применяется при ЛЮБОМ входе в бой —
+       «Играть», «Ещё бой», кампания, события, обучение, онлайн */
+    applyBattleBg(this.playerFaction);
 
     // v2.6: преконстракт-колоды (Decks.json) играбельны всегда, как базовые колоды
     // в Hearthstone; гейт владения — только для пользовательских колод.
     const pDef = resolveDeck(this.playerDeckId, deckList as unknown as DeckLike[])
       ?? starterDeckForFaction(this.playerFaction)
       ?? deckById.get(this.playerFaction)!;
-    const pDeck = pDef.cards.slice();
-    if (!isStarterDeckId(pDef.id)) {
+    const pDeck = this.net ? this.net.you.deck.slice() : pDef.cards.slice();
+    if (!this.net && !isStarterDeckId(pDef.id)) {
       const unowned = pDeck.filter(id => ownedCount(id) === 0);
       if (unowned.length > 0) {
         this.running = false;
@@ -829,11 +1052,11 @@ class Battle {
     const enemyDef = isStarterDeckId(pDef.id)
       ? starterDeckForFaction(this.enemyFaction) ?? deckById.get(this.enemyFaction)!
       : deckById.get(this.enemyFaction)!;
-    const eDeck = enemyDef.cards.slice();
+    const eDeck = this.net ? this.net.opp.deck.slice() : enemyDef.cards.slice();
 
     this.engine = new GameEngine(db, [pDeck, eDeck], {
       factions: [this.playerFaction, this.enemyFaction],
-      names: ['Вы', this.friendFoe ?? (this.bossPower ? `БОСС · ${FACTION_RU[this.enemyFaction]}` : FACTION_RU[this.enemyFaction])],
+      names: ['Вы', this.net ? this.net.opp.name : this.friendFoe ?? (this.bossPower ? `БОСС · ${FACTION_RU[this.enemyFaction]}` : FACTION_RU[this.enemyFaction])],
       seed: (Date.now() % 99991) + 7,
       config: { ...DEFAULT_CONFIG, passiveMul: PASSIVE_MUL, combatMode: 'manual' },
       hooks: { onEvent: (e: GameEvent) => this.onEvent(e) },
@@ -844,7 +1067,7 @@ class Battle {
       .catch(err => { reportFatal('combat-anim', err); })
       .finally(() => { this.combatBusy = false; this.combatSnap = null; this.renderStats(); });
     this.engine.onBeforeCombatEnd = this.combatAnim;
-    this.engine.interactiveStack = true;
+    this.engine.interactiveStack = !this.net;   // онлайн: без окон ответа в стеке (ходы строго по очереди)
     this.matchStart = Date.now();
     this.telemPlayed = [];
     this.bossLastTurn = -1;
@@ -853,7 +1076,7 @@ class Battle {
       op.health = this.bossHp; op.maxHealth = this.bossHp;
     }
     this.tutInjected = [];
-    if (this.tutLesson) {
+    if (this.tutLesson && !this.net) {
       // спека «6. Обучение»: у каждого урока своя заскриптованная рука (зеркало tutorial.json для Unity)
       const inj = TUT_HANDS[this.tutLesson] ?? [];
       const ph = this.engine.p(Side.Player);
@@ -875,13 +1098,20 @@ class Battle {
     $('gameover').classList.add('hidden');
     $('battle').classList.remove('hidden');
     this.setupScene();
-    const pPass = `${FACTION_RU[this.playerFaction]} · ${PASSIVE_TEXT[this.playerFaction].replace(/<[^>]+>/g, '')}`;
-    const ePass = `${FACTION_RU[this.enemyFaction]} · ${PASSIVE_TEXT[this.enemyFaction].replace(/<[^>]+>/g, '')}`;
-    $('playerFac').textContent = pPass; $('playerFac').title = pPass;
-    $('enemyFac').textContent = ePass; $('enemyFac').title = ePass;
+    // v3.17: на поле — только имя фракции (чисто, как в MTG Arena);
+    // текст пассива — в тултипе по наведению
+    const pFull = `Пассив фракции — ${PASSIVE_TEXT[this.playerFaction]}`;
+    const eFull = `Пассив фракции — ${PASSIVE_TEXT[this.enemyFaction]}`;
+    $('playerFac').textContent = FACTION_RU[this.playerFaction];
+    $('playerFac').innerHTML = FACTION_RU[this.playerFaction];
+    $('playerFac').title = pFull.replace(/<[^>]+>/g, '');
+    $('enemyFac').textContent = FACTION_RU[this.enemyFaction];
+    $('enemyFac').innerHTML = FACTION_RU[this.enemyFaction];
+    $('enemyFac').title = eFull.replace(/<[^>]+>/g, '');
     this.setPortrait('playerPortrait', this.playerFaction);
     this.setPortrait('enemyPortrait', this.enemyFaction);
 
+    if (this.net) { await this.netSetup(); return; }
     this.engine.setup();
     pushLog(`⚔ ${FACTION_RU[this.playerFaction]} против ${FACTION_RU[this.enemyFaction]}`, 'big');
     this.renderAll();
@@ -907,14 +1137,14 @@ class Battle {
     if (ts && !ts.dataset.ready) { ts.innerHTML = tableSurface(); ts.dataset.ready = '1'; }
     Vfx.vfxInit($('battle'));
     Vfx.mountPostLayers(document.body);
-    Vfx.startAmbient(paletteOf(this.playerFaction).secondary, 70);
-    Vfx.setAmbientColor(paletteOf(this.playerFaction).secondary);
-    Vfx.startParallax([...(bd?.querySelectorAll<HTMLElement>('.bl') ?? [])]);
-    if (!this.candleTimer) this.candleTimer = window.setInterval(() => Vfx.candleFlicker(bd ?? document.body), 2600);
+    /* v3.16.1: фон боя — СТАТИЧНЫЙ («чтобы фон не прыгал»):
+       убраны параллакс за курсором, ambient-частицы (мигающие точки) и
+       периодические вспышки свечей; дрейф/аврора/туман/плёночное зерно
+       отключены в CSS. Сцена светлая и чёткая — без моргающих элементов. */
+    Vfx.stopAmbient();
   }
-  private candleTimer: number | null = null;
 
-  stop(): void { this.running = false; this.turnDone?.(); }
+  stop(): void { this.running = false; this.turnDone?.(); this.clearThinkWatch(); }
 
   /* --------------------------- главный цикл --------------------------- */
 
@@ -923,6 +1153,7 @@ class Battle {
     try {
     while (this.running && e.result === GameResult.Ongoing) {
       if (e.activeSide === Side.Player) await this.humanTurn();
+      else if (this.net) await this.netTurn();
       else await this.aiTurn();
       if (e.result === GameResult.Ongoing && e.turn > e.config.maxTurns) e.result = GameResult.Draw;
       this.renderAll();
@@ -939,22 +1170,29 @@ class Battle {
     this.setBusy(false);
     this.setWho('Ваш ход');
     e.runTurn();                                   // → фаза Main
+    this.netAct('turnStart');
     this.ropeStart();
     await this.playPhaseBanners([Phase.Start, Phase.Resource]);
     this.renderAll();
 
     await new Promise<void>(res => { this.turnDone = res; });
     this.turnDone = null;
-    if (!this.running) return;
+    if (!this.running || e.result !== GameResult.Ongoing) return;
 
     this.aiInstantResponse('перед вашей атакой');
+    // v3.14: если летал случился ещё до боя (ответ ИИ), окно атак не открывается —
+    // иначе игрок застревал на стадии объявления атак после конца игры.
+    if (e.result !== GameResult.Ongoing || !this.running) { this.renderAll(); return; }
     this.setWho('Битва');
     if (this.manualCombat) {
       e.enterCombatPhase();
+      this.netAct('combat');
       await this.combatWindow();
-      if (!this.running) return;
+      if (!this.running || e.result !== GameResult.Ongoing) { this.renderAll(); return; }
     }
+    const skipCombat = e.manualCombatSkip;
     await e.finishMainPhase();                     // бой полностью проигрывается до конца хода
+    this.netAct('endTurn', { skip: skipCombat });
     this.aiInstantResponse('в конец вашего хода');
     this.renderAll();
   }
@@ -964,12 +1202,19 @@ class Battle {
   private instantPassResolve: (() => void) | null = null;
   private instantTimer = 0;
   private async responseWindow(label: string, force = false): Promise<void> {
+    if (this.net) return;
     const e = this.engine!;
     if (e.result !== GameResult.Ongoing || !this.running) return;
     const hand = e.p(Side.Player).hand.map(id => e.db.get(id)).filter(Boolean) as CardData[];
     const mana = e.p(Side.Player).mana;
-    if (!force && !hand.some(c => c.type === CardType.Spell && c.subtype === SpellSubtype.Instant && c.cost <= mana)) return;
+    void force;
+    if (!hand.some(c => c.type === CardType.Spell && c.subtype === SpellSubtype.Instant && c.cost <= mana)) return;
     e.openInstantWindow(Side.Player);
+    // v3.8 (как MTG Arena): останавливаемся, только если мгновенное реально можно сыграть — хватает маны И есть цель
+    const legal = e.p(Side.Player).hand.filter((_, i) => { const r = e.canPlay(Side.Player, i); return r.ok && r.card?.subtype === SpellSubtype.Instant; }).length;
+    if (!legal) { e.closeInstantWindow(); return; }
+    document.body.classList.add('ecPriority');
+    Sfx.uiClick();
     this.instantLabel = label;
     this.renderAll();
     if ((window as unknown as { ecAutoPass?: boolean }).ecAutoPass || settings.autoPass) {
@@ -989,6 +1234,7 @@ class Battle {
       this.instantPassResolve = res;
       this.instantTimer = window.setTimeout(() => this.passInstant(), 20000);
     });
+    document.body.classList.remove('ecPriority');
   }
   private prevMana = -1;
   private ropeTimer = 0;
@@ -1016,7 +1262,8 @@ class Battle {
   private telemPlayed: Array<[string, number]> = [];
 
   campaignBoss: string | null = null;
-  launchMode: 'menu' | 'campaign' | 'friend' | 'tut' = 'menu';
+  launchMode: 'menu' | 'campaign' | 'friend' | 'tut' | 'event' | 'online' = 'menu';
+  eventId: string | null = null;   // v3: матч запущен из «Событий»
   practice = false;
   matchId: string | null = null;   // из POST /api/match/start (спека п.1.4); null — офлайн/локальный бой
   friendFoe: string | null = null;
@@ -1047,13 +1294,18 @@ class Battle {
         meta.mmr += 12;
         if (!meta.borderlessEventClaimed) meta.borderlessEventWins = Math.min(BORDERLESS_EVENT_WINS, (meta.borderlessEventWins ?? 0) + 1);
       }
-      meta.xp += 80 + e.turn * 2; questBump('win_fac', 1, fac); }
+      meta.xp += Math.round((80 + e.turn * 2) * (1 + cosmBonusTotal().xp / 100)); questBump('win_fac', 1, fac); }
     else { meta.losses += 1; meta.facL[fac] = (meta.facL[fac] ?? 0) + 1;
       if (!unranked) meta.mmr = Math.max(800, meta.mmr - 10);
-      meta.xp += 20 + e.turn; }
+      meta.xp += Math.round((20 + e.turn) * (1 + cosmBonusTotal().xp / 100)); }
     meta.bestMmr = Math.max(meta.bestMmr ?? meta.mmr, meta.mmr);
-    meta.bpXp = (meta.bpXp ?? 0) + (win ? 120 : 60);   // спека «5. Боевой пропуск»: единые 120/60 во всех режимах (решение пользователя)
+    meta.bpXp = (meta.bpXp ?? 0) + Math.round((win ? 120 : 60) * (1 + cosmBonusTotal().bp / 100));   // спека «5. Боевой пропуск»: единые 120/60 во всех режимах (решение пользователя) + бонус косметики
     questBump('dmg', e.stats[Side.Player].damageDealt);
+    if (this.eventId) {
+      const evMsg = eventOnMatchEnd(this.eventId, win);
+      this.eventId = null;
+      if (evMsg) window.setTimeout(() => showToast(`◆ ${evMsg}`), 900);
+    }
     checkAchs();                                   // спека 2.5: достижения, тост, награда
     const lvlAfter = Math.floor(meta.xp / 500) + 1;
     if (lvlAfter > lvlBefore) levelUpFx(lvlAfter); // спека 2.1: анимация Level Up с частицами
@@ -1111,7 +1363,7 @@ class Battle {
         (reward ? `, 🪙${reward}${gemReward ? ` и 💎${gemReward}` : ''} за кампанию` : '');
       go.appendChild(line);
     }
-    if (reward) shardsAdd(reward);
+    if (reward) shardsAdd(Math.round(reward * (1 + cosmBonusTotal().sh / 100)));
     if (gemReward) gemsAdd(gemReward);
   }
 
@@ -1154,6 +1406,7 @@ class Battle {
   private cdTimer = 0;
   private cdLeft = 20;
   passInstant(): void {
+    document.body.classList.remove('ecPriority');
     if (this.cdTimer) { window.clearInterval(this.cdTimer); this.cdTimer = 0; }
     if (this.instantTimer) { window.clearTimeout(this.instantTimer); this.instantTimer = 0; }
     this.engine?.passStack(Side.Player);
@@ -1166,6 +1419,7 @@ class Battle {
   }
   /** ИИ отвечает мгновенными заклинаниями в ваш ход (эвристика). */
   private aiInstantResponse(label: string): void {
+    if (this.net || !this.ai) return;
     const e = this.engine!;
     if (e.result !== GameResult.Ongoing) return;
     const pl = e.p(Side.Opponent);
@@ -1407,7 +1661,7 @@ class Battle {
         if (rec.attackerAfter) this.combatSnap.units.set(rec.attackerUid, rec.attackerAfter.hp);
         if (rec.hitHero) {
           const target = rec.attackerSide === Side.Player ? Side.Opponent : Side.Player;
-          this.combatSnap.hp[target] = Math.max(0, this.combatSnap.hp[target] - rec.heroDamage);
+          this.combatSnap.hp[target] = this.combatSnap.hp[target] - rec.heroDamage;   // v3.14: оверкил виден (−3)
         }
         // вампиризм: нанесённый урон лечит героя атакующего в тот же момент
         const healed = rec.lifestealAmount ?? 0;
@@ -1451,7 +1705,9 @@ class Battle {
     return e.p(Side.Player).creatures.some(c => e.canAttack(c));
   }
   private async combatWindow(): Promise<void> {
+    if (this.engine!.result !== GameResult.Ongoing) return;   // v3.14: игра окончена — окно не ждёт кликов
     this.inCombatWindow = true;
+    this.massAttack = false; this.massDone = 0; this.massTotal = 0;   // v3.17
     this.setCombatStep(1);   // MTG: declare attackers
     this.renderPhaseTrack(Phase.Combat);
     await this.banner(PHASE_RU[Phase.Combat]);
@@ -1473,7 +1729,7 @@ class Battle {
   private scheduleWindowAutoClose(): void {
     if (!this.anyReadyAttacker()) setTimeout(() => this.closeCombatWindow(), 1100);
   }
-  closeCombatWindow(): void { this.setCombatStep(2); this.combatWindowDone?.(); }   // MTG: declare blockers
+  closeCombatWindow(): void { this.setCombatStep(2); this.clearMassAttack(true); this.combatWindowDone?.(); }   // MTG: declare blockers
   /** Пропустить бой без атак — как «не бить» в MTG, остаётся на усмотрение игрока. */
   skipCombat(): void {
     const e = this.engine;
@@ -1484,11 +1740,16 @@ class Battle {
     this.closeCombatWindow();
   }
   cancelAttack(): void {
-    if (this.pendingAttack === null) return;
-    const n = this.unitNodes.get(this.pendingAttack);
+    const massWasOn = this.massAttack;
+    if (this.pendingAttack === null && !massWasOn) return;
+    const n = this.pendingAttack !== null ? this.unitNodes.get(this.pendingAttack) : null;
     if (n) n.classList.remove('attacking');
     this.pendingAttack = null;
     this.clearHighlights();
+    if (massWasOn) {   // v3.17: Esc/ПКМ отменяют «Атака всеми» целиком
+      this.massAttack = false; this.massDone = 0; this.massTotal = 0;
+      if (this.inCombatWindow && this.engine) this.updateButtons();
+    }
   }
   private attackTargetsFor(uid: number): { uids: number[]; hero: boolean } {
     const e = this.engine!;
@@ -1498,7 +1759,7 @@ class Battle {
     const mustHit = !!(c as any)?.data?.mustHitCreature;
     // герой доступен только если нет провокации и нет спец-правила «бьёт только существо»
     const heroAllowed = taunts.length === 0 && !mustHit;
-    const pool = taunts.length ? taunts : en.creatures;
+    const pool = (taunts.length ? taunts : en.creatures).filter(c => !c.unblockableThisTurn && !(!c.silenced && (c.keywords ?? []).includes(Keyword.Unblockable)));
     return { uids: pool.map(c => c.uid), hero: heroAllowed };
   }
   private beginAttack(uid: number): void {
@@ -1535,10 +1796,66 @@ class Battle {
     const q0 = e.attackQueue.length;
     const ok = e.manualAttack(Side.Player, uid, targetUid, !!targetHero);
     if (!ok) { this.flashHint('Атака отклонена движком'); return; }
+    this.netAct('attack', { uid, targetUid, hero: !!targetHero });
     const recs = e.attackQueue.slice(q0);
     await this.combatCore(recs);
     this.renderAll();
     this.scheduleWindowAutoClose();
+    if (this.massAttack && this.inCombatWindow) this.nextMassAttacker();   // v3.17: «Атака всеми»
+  }
+
+  /** v3.17: уиды своих существ, готовых к атаке прямо сейчас. */
+  private readyAttackerUids(): number[] {
+    const e = this.engine;
+    return e ? e.p(Side.Player).creatures.filter(c => e.canAttack(c)).map(c => c.uid) : [];
+  }
+
+  /** v3.17: «Атака всеми» — по очереди берём каждое готовое существо,
+   *  цель выбирает игрок вручную (клик по существу/герою). */
+  startMassAttack(): void {
+    if (!this.inCombatWindow || this.busy) return;
+    const ready = this.readyAttackerUids();
+    if (ready.length === 0) { this.flashHint('Готовых к атаке существ нет'); return; }
+    this.massAttack = true;
+    this.massDone = 0;
+    this.massTotal = ready.length;
+    this.beginAttack(ready[0]);
+    this.massHint();
+  }
+
+  private nextMassAttacker(): void {
+    const ready = this.readyAttackerUids();
+    if (ready.length === 0) {
+      this.massAttack = false;
+      if (this.engine) this.updateButtons();
+      return;
+    }
+    this.massDone += 1;
+    this.beginAttack(ready[0]);
+    this.massHint();
+  }
+
+  private massHint(): void {
+    const n = this.massDone + 1;
+    $('actionHint').textContent =
+      `⚔ Атака всеми (${n}/${this.massTotal}): выберите цель — герой или существо · ПКМ/Esc — отменить`;
+    this.flashHint(`Атака всеми: ${n} из ${this.massTotal} — выберите цель (ПКМ/Esc — отменить)`);
+  }
+
+  private clearMassAttack(silent = false): void {
+    if (!this.massAttack) return;
+    this.massAttack = false;
+    this.massDone = 0;
+    this.massTotal = 0;
+    if (!silent) {
+      if (this.inCombatWindow && this.engine) {
+        const n = this.engine.p(Side.Player).creatures.filter(c => this.engine!.canAttack(c)).length;
+        $('actionHint').textContent = n > 0
+          ? `⚔ Фаза боя: ${n} готовых к атаке · клик по своему → цель · «Атака всеми» — все подряд`
+          : 'Фаза боя: нечем атаковать — «Пропустить бой» или Space';
+      }
+      this.updateButtons();
+    }
   }
 
   /* ------------------- события движка → визуал/лог ------------------- */
@@ -1711,6 +2028,18 @@ class Battle {
       case GameEventType.TurnStarted:
         this.renderPhaseTrack(Phase.Start);
         break;
+      case GameEventType.GameOver: {
+        // v3.14: игра окончена на любой стадии — освободить ВСЕ точки ожидания
+        // (ход, окно атак, окно приоритета), иначе бой «зависал» на стадии.
+        if (this.instantTimer) { window.clearTimeout(this.instantTimer); this.instantTimer = 0; }
+        if (this.cdTimer) { window.clearInterval(this.cdTimer); this.cdTimer = 0; }
+        document.body.classList.remove('ecPriority');
+        const ri = this.instantPassResolve; this.instantPassResolve = null;
+        ri?.();
+        this.turnDone?.();
+        this.combatWindowDone?.();
+        break;
+      }
       default:
         break;
     }
@@ -1955,7 +2284,9 @@ class Battle {
     const p = e.p(Side.Player), o = e.p(Side.Opponent);
     const cap = (x: number): string => String(Math.min(10, x));
     const snapHp = this.combatBusy && this.combatSnap ? this.combatSnap.hp : null;
-    $('playerHp').textContent = String(snapHp ? snapHp[Side.Player] : p.health);
+    const hpP = snapHp ? snapHp[Side.Player] : p.health;
+    $('playerHp').textContent = String(hpP);
+    $('playerHp').closest('.hbHp')?.classList.toggle('neg', hpP < 0);   // v3.14: смертельный перехлёст красным
     $('playerMana').textContent = `${p.mana}/${cap(p.maxMana + p.bonusMana)}`;
     if (p.mana > this.prevMana) {
       const st = $('playerMana').closest('.stat') as HTMLElement | null;
@@ -1967,7 +2298,9 @@ class Battle {
     $('playerEcho').textContent = String(p.echoPoints);
     $('playerGrave').textContent = String(p.graveyard.length);
     this.renderGraveZone(Side.Player, $('playerGraveZone'), p.graveyard.length);
-    $('enemyHp').textContent = String(snapHp ? snapHp[Side.Opponent] : o.health);
+    const hpO = snapHp ? snapHp[Side.Opponent] : o.health;
+    $('enemyHp').textContent = String(hpO);
+    $('enemyHp').closest('.hbHp')?.classList.toggle('neg', hpO < 0);
     $('enemyMana').textContent = `${o.mana}/${cap(o.maxMana + o.bonusMana)}`;
     $('enemyHand').textContent = String(o.hand.length);
     const backs = $('enemyBacks');
@@ -2126,7 +2459,8 @@ class Battle {
     const myMain = e.activeSide === Side.Player && e.phase === Phase.Main && !this.busy && this.running;
     const maxAngle = Math.min(12, n * 2.1);
     // шаг веера масштабируется от фактической ширины карты (адаптив)
-    const cw = Math.min(196, Math.max(118, window.innerWidth * 0.125));
+    // v3.8: реальная ширина из CSS-переменной --hand-w (clamp по vh/vw)
+    const cw = Math.min(168, Math.max(96, Math.min(window.innerHeight * 0.15, window.innerWidth * 0.11)));
     const overlap = Math.round(Math.max(-cw * 0.44, cw * 0.8 - n * cw * 0.12));
     pl.hand.forEach((cid: string, i: number) => {
       const card = db.get(cid);
@@ -2135,7 +2469,7 @@ class Battle {
       const t = n === 1 ? 0.5 : i / (n - 1);
       const angle = (t - 0.5) * maxAngle;
       const lift = -Math.cos((t - 0.5) * Math.PI) * 10;
-      const base = `rotate(${angle.toFixed(2)}deg) translateY(${lift.toFixed(1)}px)`;
+      const base = `translateY(var(--hand-sink, 0px)) rotate(${angle.toFixed(2)}deg) translateY(${lift.toFixed(1)}px)`;
       node.style.transform = base;
       node.style.marginLeft = i === 0 ? '0' : `${overlap}px`;
       node.style.zIndex = String(10 + i);
@@ -2510,6 +2844,7 @@ class Battle {
     const played = e.playCard(Side.Player, index, uid, side);
     if (!played) this.flashHint('Движок отклонил розыгрыш');
     else {
+      this.netAct('play', { index, uid, side });
       Sfx.cardPlay(card?.cost ?? 3);
       const zone = card && (card.type === CardType.Creature || card.type === CardType.Rune) ? $('playerBoard') : $('enemyBoard');
       Vfx.screenFlash(paletteOf((card?.faction as string) ?? Faction.Neutral).primary, 0.1, 200);
@@ -2552,30 +2887,105 @@ class Battle {
       ? `◈ Эхо: повторить «${(echo.card as CardData).name}» (очков ${e.p(Side.Player).echoPoints})`
       : '◈ Использовать Эхо';
     btn('btnEcho').title = echo.reason ?? 'Бесплатно повторить последнее разыгранное заклинание (один раз за игру)';
+    // v3.17: кнопки боевой фазы резервируют место (visibility, а не display) —
+    // панель действий не «прыгает» при смене фаз
     const ab = btn('btnAutoBattle');
-    ab.classList.toggle('hidden', !this.inCombatWindow);
+    ab.classList.toggle('inv', !this.inCombatWindow);
     ab.disabled = !this.inCombatWindow;
     const sc = btn('btnSkipCombat');
-    sc.classList.toggle('hidden', !this.inCombatWindow);
+    sc.classList.toggle('inv', !this.inCombatWindow);
     sc.disabled = !this.inCombatWindow;
+    const aa = btn('btnAttackAll');   // v3.17: «Атака всеми»
+    aa.classList.toggle('inv', !this.inCombatWindow);
+    aa.disabled = !this.inCombatWindow || this.busy || (this.engine ? this.readyAttackerUids().length === 0 : true);
     if (this.inCombatWindow) {
-      const n = this.engine ? this.engine.p(this.engine.activeSide).creatures.filter(c=> this.engine!.canAttack(c)).length : 0;
-      $('actionHint').textContent = n > 0
-        ? `⚔ Фаза боя: ${n} готовых к атаке подсвечены золотом · клик по своему → цель стрелкой · «Авто-бой» — доиграть, «Пропустить бой» — не бить`
-        : 'Фаза боя: нечем атаковать — нажмите «Пропустить бой» или Space';
+      const n = this.readyAttackerUids().length;
+      if (!this.massAttack) {
+        $('actionHint').textContent = n > 0
+          ? `⚔ Фаза боя: ${n} готовых к атаке · клик по своему → цель · «Атака всеми» — все подряд`
+          : 'Фаза боя: нечем атаковать — «Пропустить бой» или Space';
+      }
+      this.armThinkWatch();
       return;
     }
     if ($('actionHint').style.color) return;
+    if (this.thinkOn) {
+      /* v3.17.3: подсказка активна — фоновые перерисовки не затирают её текст/свечение,
+         пока ход игрока; иначе гасим и пишем обычный статус */
+      const still = this.running && !this.busy && e?.activeSide === Side.Player && e?.phase === Phase.Main;
+      if (still) return;
+      this.clearThinkWatch();
+    }
     $('actionHint').textContent = myMain
       ? 'Перетащите карту на поле или на цель · Пробел — завершить ход · E — Эхо'
       : 'Ожидание…';
+    this.armThinkWatch();
+  }
+
+  /* ---------------- v3.17.3: подсказка при долгом раздумье ----------------
+     Если в основной фазе игрок 7 секунд ничего не делает — карты, которые
+     можно разыграть, мягко пульсируют золотом + текст-подсказка в доке.
+     Любое изменение состояния (updateButtons) сбрасывает и перезапускает таймер. */
+  private clearThinkWatch(): void {
+    if (this.thinkTimer !== null) { clearTimeout(this.thinkTimer); this.thinkTimer = null; }
+    if (this.thinkOn) {
+      this.thinkOn = false;
+      document.querySelectorAll('#hand .card.thinkHint').forEach(n => n.classList.remove('thinkHint'));
+      const h = $('actionHint');
+      if (h.textContent?.startsWith('💡')) {
+        const e = this.engine;
+        const myMain = this.running && !this.busy && e?.activeSide === Side.Player && e?.phase === Phase.Main;
+        h.textContent = myMain
+          ? 'Перетащите карту на поле или на цель · Пробел — завершить ход · E — Эхо'
+          : 'Ожидание…';
+      }
+    }
+  }
+
+  private armThinkWatch(): void {
+    this.clearThinkWatch();   /* v3.17.3: подсветка живёт только до первого действия игрока */
+    const e = this.engine;
+    const myMain = this.running && !this.busy && e?.activeSide === Side.Player && e?.phase === Phase.Main;
+    if (!myMain || this.tutLesson) { return; }
+    if (!this.thinkHooks) {
+      this.thinkHooks = true;
+      /* любое касание/клавиша мгновенно гасит подсказку и перезапускает отсчёт */
+      const dismiss = (): void => {
+        if (!this.thinkOn && this.thinkTimer === null) return;
+        this.clearThinkWatch();
+        this.armThinkWatch();
+      };
+      document.addEventListener('pointerdown', dismiss, true);
+      document.addEventListener('keydown', dismiss, true);
+    }
+    this.thinkTimer = window.setTimeout(() => {
+      this.thinkTimer = null;
+      /* v3.17.3: перепроверяем, что всё ещё ход игрока (всплывающие баннеры фаз и т.п.) */
+      const eng = this.engine;
+      const still = this.running && !this.busy && eng?.activeSide === Side.Player && eng?.phase === Phase.Main;
+      if (!still || this.tutLesson) return;
+      const cards = [...document.querySelectorAll('#hand .card')]
+        .filter(n => !n.classList.contains('unplayable') && !n.classList.contains('tilting'));
+      if (cards.length === 0) {
+        if (!$('actionHint').style.color)
+          $('actionHint').textContent = '💡 Сыграть нечего — можно завершить ход (Пробел) или перейти к атакам';
+        return;
+      }
+      cards.forEach(n => n.classList.add('thinkHint'));
+      this.thinkOn = true;
+      if (!$('actionHint').style.color)
+        $('actionHint').textContent = `💡 Подсказка: можно разыграть ${cards.length} карт(ы) — подсвечены золотом`;
+    }, 7000);
   }
 
   /** Публичный «завершить ход» для обработчика кнопки. */
   endTurnNow(): void {
     if (this.tutLesson && !this.tutOk()) {
-      showToast(`🎓 ${LESSONS[this.tutLesson - 1].ru}: сначала ${LESSONS[this.tutLesson - 1].need.toLowerCase()}`);
-      return;
+      const st = this.tutStep();
+      if (!st || !st.allow.includes('#btnEndTurn')) {
+        showToast('🎓 Сначала выполните подсвеченное действие урока');
+        return;
+      }
     }
     this.ropeStop();
     const e = this.engine;
@@ -2587,17 +2997,10 @@ class Battle {
 
   /** Условие выполнения текущего урока. */
   private tutOk(): boolean {
-    const e = this.engine;
-    if (!e) return true;
-    const st = e.stats[Side.Player];
-    switch (this.tutLesson) {
-      case 1: return st.runesPlayed >= 1 && st.creaturesSummoned >= 1 && st.spellsCast >= 1;
-      case 2: return st.damageDealt > 0;
-      case 3: return this.tutInjected.length > 0 && this.tutInjected.every(id => this.tutPlayed(id));
-      case 4: return e.turn >= 3 && st.cardsPlayed >= 3;
-      default: return true;
-    }
+    if (!this.engine) return true;
+    return this.tutAllDone;
   }
+  private tutAllDone = false;
 
   /** Урок выполнен: снимаем гейт, начисляем награду (однократно), обновляем стадию. */
   private tutCheck(): void {
@@ -2636,6 +3039,7 @@ class Battle {
   /** Старт урока: первый шаг, поллер и блокер посторонних действий (Промпт 1 п.4). */
   private tutStartLesson(): void {
     this.tutCleanup();
+    this.tutAllDone = false;
     this.tutStepId = TUT_STEP_FIRST[this.tutLesson] ?? 0;
     this.tutApplyStep();
     if (!this.tutPollId) this.tutPollId = window.setInterval(() => this.tutPollStep(), 350);
@@ -2664,8 +3068,22 @@ class Battle {
     this.tutMarkCards = e?.stats[Side.Player].cardsPlayed ?? 0;
     this.tutMarkDmg = e?.stats[Side.Player].damageDealt ?? 0;
     this.tutTap = false;
-    tutCoach(`${LESSONS[st.lesson - 1].ru} · шаг ${st.id}/20 — ${st.message}`);
+    this.tutRenderCoach(st);
     st.hi()?.classList.add('tourHi');
+  }
+
+  /** Текст тренера: номер шага внутри урока + фактическая мана (ждём своего хода, если мана ещё не пришла). */
+  private tutRenderCoach(st: TutStep): void {
+    const list = TUT_LESSON_STEPS(st.lesson);
+    const idx = list.findIndex(x => x.id === st.id) + 1;
+    const head = `${LESSONS[st.lesson - 1].ru} · шаг ${idx}/${list.length}`;
+    const mine = tutMyMain();
+    let msg = st.message;
+    if (!mine) msg = 'Ход соперника — дождитесь своего хода…';
+    else if (st.mana && tutMana() < st.mana) msg = `Нужно ${st.mana}✦, у вас ${tutMana()}✦ — завершите ход, мана вырастет.`;
+    const text = `${head} · мана ${tutMana()}/${tutMaxMana()} — ${msg}`;
+    const n = document.getElementById('tutCoach');
+    if (n && n.textContent !== `🎓 ${text}`) tutCoach(text);
   }
 
   /** Ждём выполнения действия игроком, затем следующий шаг (Промпт 1 п.3). */
@@ -2679,9 +3097,10 @@ class Battle {
       document.querySelectorAll('.tourHi').forEach(x => x.classList.remove('tourHi'));
       hi.classList.add('tourHi');
     }
+    this.tutRenderCoach(st);
     if (!st.ok()) return;
     const next = TUT_STEPS.find(s => s.id === st.id + 1);
-    if (!next || next.lesson !== st.lesson) { this.tutCheck(); return; }   // урок завершён → награда
+    if (!next || next.lesson !== st.lesson) { this.tutAllDone = true; this.tutCheck(); return; }   // урок завершён → награда
     this.tutStepId = next.id;
     this.tutApplyStep();
   }
@@ -2754,6 +3173,7 @@ class Battle {
       }
     }
     if (e.useEcho(Side.Player, uid, side)) {
+      this.netAct('echo', { uid, side });
       pushLog(`◈ Эхо повторило «${card?.name ?? 'заклинание'}»`, 'big');
       Sfx.echo();
       Vfx.echoFx(Vfx.centerOf($('playerHero'), 0.42));
@@ -2761,6 +3181,111 @@ class Battle {
     this.renderAll();
     await sleep(320);
   }
+
+  /* ------------------------ онлайн (v3.4) ------------------------
+     Ходящий игрок — источник истины: действие + снимок состояния уходят сопернику,
+     тот проигрывает анимацию и накладывает зеркальный снимок (рассинхрон невозможен). */
+  private netAct(k: string, extra: Record<string, unknown> = {}): void {
+    if (!this.net || !this.engine) return;
+    this.net.send({ k, ...extra, st: this.engine.exportState() });
+  }
+  private netApply(st: EngineNetState | undefined): void {
+    const e = this.engine;
+    if (!e || !st) return;
+    e.importState(st, true);
+    this.combatBusy = false; this.combatSnap = null;
+    this.renderAll();
+  }
+  private async netSetup(): Promise<void> {
+    const e = this.engine!, net = this.net!;
+    net.onNeedSync = () => { if (this.engine) net.send({ k: 'sync', st: this.engine.exportState() }); };
+    pushLog(`⚔ Онлайн-матч: вы против ${net.opp.name} (${FACTION_RU[this.enemyFaction]}) · ${net.mode === 'ranked' ? 'рейтинговый' : net.mode === 'friendly' ? 'дружеский' : 'обычный'}`, 'big');
+    this.setWho('Подготовка матча…');
+    e.setup();
+    if (net.seat === 0) net.send({ k: 'init', st: e.exportState() });
+    else {
+      const m = await net.nextOf('init');
+      if (!m) { this.showGameOver(); return; }
+      e.importState(m.st as EngineNetState, true);
+    }
+    this.renderAll();
+    await this.showMulligan();
+    net.send({ k: 'mull', pl: e.exportState().players[Side.Player] });
+    this.setWho('Соперник выбирает стартовую руку…');
+    const om = await net.nextOf('mull');
+    if (!om) { this.showGameOver(); return; }
+    const opl = om.pl as PlayerState;
+    opl.side = Side.Opponent;
+    for (const c of opl.creatures) c.owner = Side.Opponent;
+    e.players[Side.Opponent] = opl;
+    e.activeSide = net.seat === 0 ? Side.Player : Side.Opponent;   // первым ходит место 0
+    e.turn = 0;
+    pushLog(net.seat === 0 ? 'Вы ходите первым' : `Первым ходит ${net.opp.name}`, 'phase');
+    this.renderAll();
+    await this.loop();
+  }
+  private async netTurn(): Promise<void> {
+    const e = this.engine!, net = this.net!;
+    this.setBusy(true);
+    this.setWho(`Ход соперника · ${net.opp.name}`);
+    const flip = (sd: unknown): Side | undefined => sd === Side.Player ? Side.Opponent : sd === Side.Opponent ? Side.Player : undefined;
+    for (;;) {
+      const m = await net.next();
+      if (!m || !this.running) break;
+      const st = m.st as EngineNetState | undefined;
+      try {
+        if (m.k === 'turnStart') { await this.playPhaseBanners([Phase.Start, Phase.Resource]); this.netApply(st); }
+        else if (m.k === 'play') {
+          e.playCard(Side.Opponent, Number(m.index), m.uid as number | undefined, flip(m.side));
+          this.renderAll(); await sleep(480); this.netApply(st);
+        } else if (m.k === 'echo') {
+          e.useEcho(Side.Opponent, m.uid as number | undefined, flip(m.side));
+          this.renderAll(); await sleep(360); this.netApply(st);
+        } else if (m.k === 'combat') {
+          e.enterCombatPhase(); this.setWho('Битва соперника');
+          await this.banner(PHASE_RU[Phase.Combat]); this.beginCombatSnap();
+        } else if (m.k === 'attack') {
+          const q0 = e.attackQueue.length;
+          if (e.manualAttack(Side.Opponent, Number(m.uid), m.targetUid as number | undefined, !!m.hero)) await this.combatCore(e.attackQueue.slice(q0));
+          this.netApply(st);
+        } else if (m.k === 'endTurn') {
+          e.manualCombatSkip = !!m.skip;
+          await e.finishMainPhase();
+          this.netApply(st);
+          break;
+        } else if (m.k === 'sync') { this.netApply(st); if (e.activeSide === Side.Player) break; }
+      } catch (err) {
+        // локальный повтор не удался — не страшно: снимок соперника всё равно главный
+        console.warn('[net] replay', m.k, err); this.netApply(st);
+      }
+      if (e.result !== GameResult.Ongoing) break;
+    }
+    this.setBusy(false);
+    this.renderAll();
+  }
+  /** Итог боя → матч-серверу (он сверяет отчёты обоих и начисляет рейтинг). */
+  private netFinish(): void {
+    const net = this.net, e = this.engine;
+    if (!net || !e) return;
+    const w = e.result === GameResult.PlayerWin ? net.seat : e.result === GameResult.OpponentWin ? (net.seat === 0 ? 1 : 0) : null;
+    if (!net.overInfo) net.sendRaw({ t: 'result', winnerSeat: w });
+    this.lastWasNet = true;
+    window.setTimeout(() => { net.close(); if (this.net === net) this.net = null; void onlineRefreshAfterMatch(); }, 4000);
+  }
+  /** Сервер завершил матч (сдача / обрыв / сверка итогов). */
+  netServerOver(winnerSeat: number | null, reason: string): void {
+    const e = this.engine, net = this.net;
+    if (!e || !net) return;
+    if (e.result === GameResult.Ongoing) {
+      e.result = winnerSeat == null ? GameResult.Draw : winnerSeat === net.seat ? GameResult.PlayerWin : GameResult.OpponentWin;
+      pushLog(reason === 'concede' ? (winnerSeat === net.seat ? '🏳 Соперник сдался' : '🏳 Вы сдались')
+        : reason === 'disconnect' ? '📡 Соперник не вернулся — техническая победа' : 'Матч завершён сервером', 'big');
+      this.turnDone?.(); this.combatWindowDone?.();
+      this.renderAll();
+      if (!this.overShown) window.setTimeout(() => this.showGameOver(), 300);
+    }
+  }
+  lastWasNet = false;
 
   /* ------------------------------ муллиган ------------------------------ */
 
@@ -2818,15 +3343,19 @@ class Battle {
   /* ---------------------------- конец игры ---------------------------- */
 
   private showGameOver(): void {
+    // v3.14: защита от повторного входа ДО наград, иначе двойной XP/рейтинг
+    if (this.overShown || !this.engine) return;
+    this.overShown = true;
+    this.ropeStop();
+    $('ropeBar')?.classList.add('hidden');
     tutCoachHide();
     Vfx.screenFlash('#ffd87a', 0.4, 620);
     Vfx.shake(9, undefined, 420);
     Vfx.vignettePulse('#d8b45a', 0.5);
     this.metaRewards();
-    if (this.overShown || !this.engine) return;
-    this.overShown = true;
     this.running = false;
     const e = this.engine;
+    if (this.net) this.netFinish();
     const win = e.result === GameResult.PlayerWin;
     const draw = e.result === GameResult.Draw;
     const title = $('goTitle');
@@ -2876,6 +3405,9 @@ function hurtKeys(): Keyframe[] {
 /* ---------------------------------------------------------------------- */
 
 const battle = new Battle();
+// v3.14: отладочный/тестовый хук (используется smoke и ручной проверкой стадий боя)
+(window as unknown as { ecBattle?: Battle }).ecBattle = battle;
+(window as unknown as { __battle?: Battle }).__battle = battle;
 /* Выбор фракции сохраняется между запусками (спека п.1.1; в Unity — PlayerPrefs "ec.faction"). */
 const PICK_KEY = 'ec.pickedFaction';
 const MENU_DECK_KEY = 'ec.menuSelectedDeckId';
@@ -2916,7 +3448,8 @@ interface MetaState {
   nick: string; avatarFac: string; frame: string; gems: number; signedIn: boolean; pid: string;
   bpXp: number; bpClaimedP: number[]; bpPremium: boolean; seasonStart: number; bestMmr: number;
   foilTokens: number; premOpens: number;   // спека «5»: фойл-жетоны и премиум-бустеры из пропуска
-  freeOpens: number; bundles: string[]; tableSkin: string; runeSkin: string; avatarsOwned: string[];
+  lastSynced?: { shards: number; gems: number; freeOpens: number; mmr: number; wins: number; losses: number; bpXp: number };   // v3.15.3: база дельта-синка валюты
+  freeOpens: number; bundles: string[]; tableSkin: string; runeSkin: string; avatarsOwned: string[]; setsOwned: string[];
   borderlessOwned: string[]; borderlessEquipped: string[]; borderlessEventWins: number; borderlessEventClaimed: boolean;
   tablesOwned: string[]; runesOwned: string[];
   friends: Array<{ nick: string; ts: number }>;
@@ -2991,7 +3524,7 @@ const META_DEFAULT: MetaState = {
   nick: 'Гость', avatarFac: 'Aurites', frame: 'bronze', gems: 500, signedIn: false, pid: '',
   bpXp: 0, bpClaimedP: [], bpPremium: false, seasonStart: 0, bestMmr: 1000,
   foilTokens: 0, premOpens: 1,
-  freeOpens: 5, bundles: [], tableSkin: 'classic', runeSkin: 'classic', avatarsOwned: [],
+  freeOpens: 5, bundles: [], tableSkin: 'classic', runeSkin: 'classic', avatarsOwned: [], setsOwned: [],
   borderlessOwned: [], borderlessEquipped: [], borderlessEventWins: 0, borderlessEventClaimed: false,
   tablesOwned: [], runesOwned: [],
   friends: [], campStars: {}, loreRead: [], tutStage: 0, tutReward: '', tutClaims: [],
@@ -3114,48 +3647,167 @@ function toggleBorderless(id: string): boolean {
    localStorage остаётся источником истины (офлайн-игра); сервер — зеркало профиля,
    реестр никнеймов и клеймы квестов. Троттлинг 1.5с: metaSave() вызывается часто. ---- */
 const META_API = (): string => `http://${window.location.hostname}:8081`;
+/* ---- JWT-авторизация клиента: access (короткий) + refresh (ротация) ---- */
+const AUTH_KEY = 'ec_auth_v1';
+interface AuthTokens { accessToken: string; refreshToken: string; exp: number }
+function authGet(): AuthTokens | null {
+  try { const a = JSON.parse(window.localStorage.getItem(AUTH_KEY) || 'null') as AuthTokens | null; return a && a.accessToken ? a : null; } catch { return null; }
+}
+function authSet(j: { accessToken?: string; refreshToken?: string; expiresIn?: number } | null): void {
+  try {
+    if (!j || !j.accessToken || !j.refreshToken) { window.localStorage.removeItem(AUTH_KEY); return; }
+    window.localStorage.setItem(AUTH_KEY, JSON.stringify({ accessToken: j.accessToken, refreshToken: j.refreshToken, exp: Date.now() + (j.expiresIn ?? 900) * 1000 }));
+  } catch { void 0; }
+}
+let authRefreshing: Promise<boolean> | null = null;
+function authRefresh(): Promise<boolean> {
+  const a = authGet();
+  if (!a) return Promise.resolve(false);
+  if (authRefreshing) return authRefreshing;
+  authRefreshing = (async () => {
+    try {
+      const r = await window.fetch(`${META_API()}/api/auth/refresh`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ refreshToken: a.refreshToken }),
+      });
+      const j = await r.json().catch(() => ({})) as { accessToken?: string; refreshToken?: string; expiresIn?: number };
+      if (!r.ok) { if (r.status === 401) { authSet(null); authExpired(); } return false; }
+      authSet(j); return true;
+    } catch { return false; } finally { authRefreshing = null; }
+  })();
+  return authRefreshing;
+}
+function authExpired(): void {
+  if (!meta.signedIn) return;
+  meta.signedIn = false; metaSave();
+  try { syncAccountRow(); showToast('🔒 Сессия истекла — войдите снова'); } catch { void 0; }
+}
+/** fetch к meta-server с Bearer-токеном; заранее обновляет истекающий access, при 401 — одна повторная попытка. */
+async function authFetch(url: string, init: RequestInit = {}): Promise<Response> {
+  let a = authGet();
+  if (a && a.exp - Date.now() < 30_000) { await authRefresh(); a = authGet(); }
+  const withAuth = (t: AuthTokens | null): RequestInit => ({ ...init, headers: { ...(init.headers as Record<string, string> || {}), ...(t ? { authorization: `Bearer ${t.accessToken}` } : {}) } });
+  let r = await window.fetch(url, withAuth(a));
+  if (r.status === 401 && a && await authRefresh()) r = await window.fetch(url, withAuth(authGet()));
+  return r;
+}
 let syncTimer = 0;
 function scheduleSync(): void {
   if (syncTimer) return;
   syncTimer = window.setTimeout(() => { syncTimer = 0; syncProfile(); }, 1500);
 }
-function syncProfile(): void {
-  try {
+/* v3.16: отладочный хук (devtools): состояние синк-машины — для диагностики «где застряла дельта» */
+(window as unknown as { __syncDbg?: () => Record<string, unknown> }).__syncDbg = () => ({
+  timer: syncTimer ? 'pending' : 'none', inFlight: !!syncInFlight,
+  shards: shardsGet(), lastSynced: meta.lastSynced ?? null, signedIn: meta.signedIn, pid: meta.pid,
+});
+/* v3.15.4: один раз предупредить в консоли, что сервер без дельта-протокола */
+let metaApiOldWarned = false;
+let syncInFlight: Promise<void> | null = null;
+function syncProfile(): Promise<void> {
+  /* v3.15.3: валюта/рейтинг шлём РАЗНИЦЕЙ от последнего подтверждённого синка (d*),
+     чтобы выдачи админки (/api/admin/adjust) не затирались локальными данными игрока.
+     Первый синк (нет lastSynced) — без дельт, сервер принимает абсолютные значения.
+     Ответ сервера содержит СМЕРЖЕННЫЙ профиль — в локальную валюту добавляем только
+     то, что изменилось на сервере (выдачи админа), и фиксируем новую базу дельт.
+     Параллельные вызовы не дублируют дельту (одна в полёте). */
+  if (syncInFlight) return syncInFlight;
+  const run = (async (): Promise<void> => {
     if (typeof window.fetch !== 'function' || !meta.pid) return;
-    const ctl = new AbortController();
-    const t = window.setTimeout(() => ctl.abort(), 800);
-    void window.fetch(`${META_API()}/api/profile`, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, signal: ctl.signal,
-      body: JSON.stringify({
-        pid: meta.pid, nick: meta.nick, level: Math.floor(meta.xp / 500) + 1, xp: meta.xp,
-        mmr: meta.mmr, bestMmr: meta.bestMmr ?? meta.mmr, wins: meta.wins, losses: meta.losses,
-        avatarFac: meta.avatarFac, frame: meta.frame, ach: meta.ach,
-        shards: shardsGet(), gems: gemsGet(), freeOpens: meta.freeOpens ?? 0,
-        bundles: meta.bundles ?? [],
-        bpXp: meta.bpXp ?? 0, bpPremium: !!meta.bpPremium,
-        bpClaimed: meta.bpClaimed ?? [], bpClaimedP: meta.bpClaimedP ?? [],
-        foilTokens: meta.foilTokens ?? 0, premOpens: meta.premOpens ?? 0,
-        avatarsOwned: meta.avatarsOwned ?? [],
-        tutStage: meta.tutStage ?? 0, tutDone: !!meta.tutDone,
-        tutReward: meta.tutReward ?? '', tutClaims: meta.tutClaims ?? [],
-        cosmetics: { backs: meta.backsOwned ?? [], tables: meta.tablesOwned ?? [], runes: meta.runesOwned ?? [],
-          backEq: meta.backEq ?? 'classic', tableSkin: meta.tableSkin ?? 'classic', runeSkin: meta.runeSkin ?? 'classic' },
-        questDate: meta.questDate, wquestWeek: meta.wquestWeek,
-        quests: {
-          daily: (meta.quests ?? []).map(q => ({ id: q.id, prog: q.prog, goal: q.goal, claimed: q.claimed, fac: q.fac })),
-          weekly: (meta.wquests ?? []).map(q => ({ id: q.id, prog: q.prog, goal: q.goal, claimed: q.claimed })),
-        },
-        history: (meta.history ?? []).slice(0, 20),
-      }),
-    }).then(() => window.clearTimeout(t), () => window.clearTimeout(t));
-  } catch { /* сервер недоступен — полностью локальная игра */ }
+    try {
+      const ctl = new AbortController();
+      const t = window.setTimeout(() => ctl.abort(), 800);
+      const ls = meta.lastSynced;
+      const first = !ls;
+      /* d* — изменение с последнего подтверждённого синка (только когда есть база lastSynced) */
+      const d = (v: number, p?: number): number | undefined => (first ? undefined : Math.trunc(v - (p ?? v)));
+      /* v3.15.4: абсолютные значения валюты/рейтинга шлём ТОЛЬКО на первом синке.
+         В дельт-режиме абсолют НЕ отправляем: старый сервер (без d*) делает
+         `b.shards ?? prev.shards` — если мы пошлём своё локальное (возможно, не
+         включающее выдачу админа) значение, оно ЗАТРЁТ выдачу на сервере. Без
+         абсолютного значения старый сервер оставит своё сохранённое prev (с выдачей). */
+      const abs = (v: number): number | undefined => (first ? v : undefined);
+      /* базовая точка ЛОКАЛЬНОЙ валюты на момент запроса — чтобы ответ применил только
+         серверные изменения (выдачи админа), а не затёр траты, случившиеся в полёте */
+      const atSend = { shards: shardsGet(), gems: gemsGet(), freeOpens: meta.freeOpens ?? 0,
+        mmr: meta.mmr, wins: meta.wins, losses: meta.losses, bpXp: meta.bpXp ?? 0 };
+      const r = await authFetch(`${META_API()}/api/profile`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, signal: ctl.signal,
+        body: JSON.stringify({
+          pid: meta.pid, nick: meta.nick, level: Math.floor(meta.xp / 500) + 1, xp: meta.xp,
+          bestMmr: meta.bestMmr ?? meta.mmr,
+          mmr: abs(meta.mmr), dMmr: d(meta.mmr, ls?.mmr),
+          wins: abs(meta.wins), dWins: d(meta.wins, ls?.wins),
+          losses: abs(meta.losses), dLosses: d(meta.losses, ls?.losses),
+          avatarFac: meta.avatarFac, frame: meta.frame, ach: meta.ach,
+          shards: abs(shardsGet()), dShards: d(shardsGet(), ls?.shards),
+          gems: abs(gemsGet()), dGems: d(gemsGet(), ls?.gems),
+          freeOpens: abs(meta.freeOpens ?? 0), dFreeOpens: d(meta.freeOpens ?? 0, ls?.freeOpens),
+          bundles: meta.bundles ?? [],
+          bpXp: abs(meta.bpXp ?? 0), dBpXp: d(meta.bpXp ?? 0, ls?.bpXp),
+          bpPremium: !!meta.bpPremium,
+          bpClaimed: meta.bpClaimed ?? [], bpClaimedP: meta.bpClaimedP ?? [],
+          foilTokens: meta.foilTokens ?? 0, premOpens: meta.premOpens ?? 0,
+          avatarsOwned: meta.avatarsOwned ?? [],
+          tutStage: meta.tutStage ?? 0, tutDone: !!meta.tutDone,
+          tutReward: meta.tutReward ?? '', tutClaims: meta.tutClaims ?? [],
+          cosmetics: { backs: meta.backsOwned ?? [], tables: meta.tablesOwned ?? [], runes: meta.runesOwned ?? [],
+            backEq: meta.backEq ?? 'classic', tableSkin: meta.tableSkin ?? 'classic', runeSkin: meta.runeSkin ?? 'classic' },
+          questDate: meta.questDate, wquestWeek: meta.wquestWeek,
+          quests: {
+            daily: (meta.quests ?? []).map(q => ({ id: q.id, prog: q.prog, goal: q.goal, claimed: q.claimed, fac: q.fac })),
+            weekly: (meta.wquests ?? []).map(q => ({ id: q.id, prog: q.prog, goal: q.goal, claimed: q.claimed })),
+          },
+          history: (meta.history ?? []).slice(0, 20),
+        }),
+      });
+      window.clearTimeout(t);
+      if (!r.ok) return;
+      const j = (await r.json().catch(() => null)) as { apiVersion?: number; profile?: Record<string, unknown> } | null;
+      const gp = j?.profile;
+      if (!gp) return;
+      if (j.apiVersion !== 3 && !metaApiOldWarned) {
+        metaApiOldWarned = true;
+        console.warn('[meta] Сервер meta без дельта-протокола (нет apiVersion:3): выдачи админки сохраняются, ' +
+          'но траты игрока сервер не записывает, пока не обновлён. Обновите: npm run server:meta (или node build/meta_server.js).');
+      }
+      /* в локальную валюту добавляем ТОЛЬКО серверные изменения (выдачи админа),
+         не затирая траты, случившиеся в полёте; рейтинг/статы — с сервера как есть.
+         v3.15.4: считаем, изменилось ли что-либо (applied) — см. гейт metaSave() ниже. */
+      let applied = false;
+      if (typeof gp.shards === 'number' && gp.shards !== atSend.shards) { shardsSet(shardsGet() + (gp.shards - atSend.shards)); applied = true; }
+      if (typeof gp.gems === 'number' && gp.gems !== atSend.gems) { meta.gems = Math.max(0, gemsGet() + (gp.gems - atSend.gems)); applied = true; }
+      if (typeof gp.freeOpens === 'number' && gp.freeOpens !== atSend.freeOpens) { meta.freeOpens = Math.max(0, (meta.freeOpens ?? 0) + (gp.freeOpens - atSend.freeOpens)); applied = true; }
+      if (typeof gp.mmr === 'number' && gp.mmr !== atSend.mmr) { meta.mmr = gp.mmr; applied = true; }
+      if (typeof gp.wins === 'number' && gp.wins !== atSend.wins) { meta.wins = gp.wins; applied = true; }
+      if (typeof gp.losses === 'number' && gp.losses !== atSend.losses) { meta.losses = gp.losses; applied = true; }
+      if (typeof gp.bpXp === 'number' && gp.bpXp !== atSend.bpXp) { meta.bpXp = Math.max(0, (meta.bpXp ?? 0) + (gp.bpXp - atSend.bpXp)); applied = true; }
+      if (typeof gp.bestMmr === 'number') meta.bestMmr = Math.max(meta.bestMmr ?? 0, gp.bestMmr);
+      meta.lastSynced = {
+        shards: typeof gp.shards === 'number' ? gp.shards : atSend.shards,
+        gems: typeof gp.gems === 'number' ? gp.gems : atSend.gems,
+        freeOpens: typeof gp.freeOpens === 'number' ? gp.freeOpens : atSend.freeOpens,
+        mmr: typeof gp.mmr === 'number' ? gp.mmr : atSend.mmr,
+        wins: typeof gp.wins === 'number' ? gp.wins : atSend.wins,
+        losses: typeof gp.losses === 'number' ? gp.losses : atSend.losses,
+        bpXp: typeof gp.bpXp === 'number' ? gp.bpXp : atSend.bpXp,
+      };
+      /* v3.15.4 FIX: metaSave() зовём ТОЛЬКО если сервер реально изменил что-то из валюты/рейтинга.
+         metaSave() → scheduleSync(), и раньше каждый успешный синк (даже no-op) перезаряжал таймер —
+         получался бесконечный цикл синков каждые 1.5 c с лишней записью снапшота на сервере. */
+      if (applied) metaSave();
+      renderShards();
+    } catch { /* сервер недоступен — полностью локальная игра */ }
+  })();
+  syncInFlight = run;
+  void run.finally(() => { if (syncInFlight === run) syncInFlight = null; });
+  return run;
 }
 function apiSend(path: string, body: unknown): void {
   try {
     if (typeof window.fetch !== 'function' || !meta.pid) return;
     const ctl = new AbortController();
     const t = window.setTimeout(() => ctl.abort(), 800);
-    void window.fetch(META_API() + path, {
+    void authFetch(META_API() + path, {
       method: 'POST', headers: { 'content-type': 'application/json' }, signal: ctl.signal,
       body: JSON.stringify({ pid: meta.pid, ...body as object }),
     }).then(() => window.clearTimeout(t), () => window.clearTimeout(t));
@@ -3216,7 +3868,7 @@ function renderQuestTask(q: Quest, kind: 'daily' | 'weekly'): string {
     ? `<span class="questTaskReset questReset" data-quest-reset="${kind}" data-reset-prefix="Сброс через">—</span>`
     : '';
   const buttonLabel = claimed ? 'Получено ✓' : canClaim ? 'Забрать' : `🪙${reward}`;
-  return `<article class="questTask ${status}" data-quest-card="${kind}:${esc(q.id)}" role="listitem">
+  return `<article class="questTask ${status}" data-quest-card="${kind}:${esc(q.id)}" role="listitem" style="--pct:${percent}">
     <span class="questTaskIcon" aria-hidden="true"><b>${icon}</b><img src="/cosm/quests/${artId}?t=${Date.now()}" alt="" loading="lazy" onload="this.closest('.questTaskIcon')?.classList.add('hasArt')" onerror="this.remove()"></span>
     <div class="questTaskMain">
       <strong class="questTaskTitle">${esc(label)}</strong>
@@ -3243,8 +3895,9 @@ function claimQuestReward(kind: 'daily' | 'weekly', id: string, keepHome = false
   const q = (weekly ? meta.wquests : meta.quests).find(x => x.id === id);
   if (!q || q.claimed || q.prog < q.goal) return false;
   q.claimed = true;
-  const reward = weekly ? (WEEK_REWARD[q.id] ?? 0) : (DAILY_REWARD[q.id] ?? 0);
-  const bpReward = weekly ? 250 : 150;
+  const cbQ = cosmBonusTotal();
+  const reward = Math.round((weekly ? (WEEK_REWARD[q.id] ?? 0) : (DAILY_REWARD[q.id] ?? 0)) * (1 + cbQ.sh / 100));
+  const bpReward = Math.round((weekly ? 250 : 150) * (1 + cbQ.bp / 100));
   shardsAdd(reward);
   meta.bpXp = (meta.bpXp ?? 0) + bpReward;
   metaSave(); renderShards();
@@ -3262,7 +3915,8 @@ document.addEventListener('click', ev => {
   const button = (ev.target as HTMLElement | null)?.closest?.('.homeQuestClaim') as HTMLButtonElement | null;
   if (!button || button.disabled) return;
   const kind = button.dataset.kind === 'weekly' ? 'weekly' : 'daily';
-  if (button.dataset.q) claimQuestReward(kind, button.dataset.q, true);
+  const inProfile = !!button.closest('#profBody');
+  if (button.dataset.q) claimQuestReward(kind, button.dataset.q, !inProfile);
 });
 window.setInterval(() => {
   const reset = syncQuestPeriods();
@@ -3309,9 +3963,33 @@ function showToast(text: string): void {
   if (toastTimer) window.clearTimeout(toastTimer);
   toastTimer = window.setTimeout(() => n.classList.remove('on'), 2400);
 }
+/* v3.3: ЕДИНАЯ ЭКОНОМИКА МАГАЗИНА (все цены — только здесь).
+   Курс: 💎1 ≈ 🪙1.5. Бустер = 🪙300 / 💎200. Опт: 10 шт −10%, 15 шт −17% (Best Value).
+   Мифический бустер (гарант. эпик+, 25% легенда) ≈ ×1.7 обычного.
+   Разовые наборы ≈ −40% к сумме содержимого. Косметика: стол > рубашка > руны.
+   Крафт/разбор — прежние утверждённые тарифы. */
+const ECONOMY = {
+  pack: { gold: 300, gem: 200 },
+  offers: {
+    p1:  { ru: '1 Бустер',          gem: 200,  gold: 300,  qty: 1,  kind: 'pack' as const },
+    p10: { ru: '10 Бустеров',       gem: 1800, gold: 2700, qty: 10, kind: 'pack' as const, save: 10 },
+    p15: { ru: '15 Бустеров',       gem: 2500, gold: 3750, qty: 15, kind: 'pack' as const, save: 17, hl: true },
+    m1:  { ru: '1 Мифический',      gem: 350,  gold: 500,  qty: 1,  kind: 'mythic' as const },
+    m10: { ru: '10 Мифических',     gem: 3150, gold: 4500, qty: 10, kind: 'mythic' as const, save: 10 },
+  },
+  factionPack: 350,          // 🪙: бустер выбранной фракции (+17% за выбор)
+  starter: 500,              // 🪙: «Набор новичка», 10 карт, разово
+  factionBundle: 1200,       // 💎: 10 бустеров + 🪙500 + аватар «Архонт», разово (≈ −45%)
+  backs: { runes: 600, ember: 900 } as Record<string, number>,                         // 🪙
+  tables: { terra: { price: 1500, cur: 'sh' as const }, necro: { price: 1000, cur: 'gem' as const } },
+  runes: { flame: { price: 400, cur: 'gem' as const } },
+  // крафт/разбор — тарифы, утверждённые пользователем (спека «3. Магазин» п.4.4), не менять
+  craft: { Common: 5, Uncommon: 10, Rare: 20, Epic: 100, Legendary: 400 } as Record<string, number>,
+  disenchant: { Common: 1, Uncommon: 2, Rare: 5, Epic: 20, Legendary: 100 } as Record<string, number>,
+};
 /* Экономика в монетах: создание 5/10/20/100/400, разбор 1/2/5/20/100; дубликаты сверх playset конвертируются в монеты. */
-const CRAFT_COST: Record<string, number> = { Common: 5, Uncommon: 10, Rare: 20, Epic: 100, Legendary: 400 };
-const DISENCHANT_COINS: Record<string, number> = { Common: 1, Uncommon: 2, Rare: 5, Epic: 20, Legendary: 100 };
+const CRAFT_COST: Record<string, number> = { Common: 5, Uncommon: 10, Rare: 20, Epic: 100, Legendary: 400 }; // = ECONOMY.craft
+const DISENCHANT_COINS: Record<string, number> = { Common: 1, Uncommon: 2, Rare: 5, Epic: 20, Legendary: 100 }; // = ECONOMY.disenchant
 (window as unknown as { ecMeta: () => MetaState }).ecMeta = () => meta;
 (window as unknown as { ecSetShards: (n: number) => void }).ecSetShards = n => shardsSet(n);
 /* тестовые хуки спеки «5. Боевой пропуск» (смоук): гемы и опыт пропуска */
@@ -3378,7 +4056,7 @@ ownedLoad();
 const PACK_ODDS: Array<[Rarity, number]> = [
   [Rarity.Common, 0.60], [Rarity.Rare, 0.25], [Rarity.Epic, 0.10], [Rarity.Legendary, 0.05],
 ];
-const PACK_PRICE = 300;
+const PACK_PRICE = ECONOMY.pack.gold;
 const PLAYSET = 4;                                   // MTG: максимум 4 копии карты
 const CONVERT: Record<Rarity, number> = { [Rarity.Common]: 1, [Rarity.Uncommon]: 2, [Rarity.Rare]: 5, [Rarity.Epic]: 20, [Rarity.Legendary]: 100 };
 const SHARD_KEY = 'ec_shards_v1';
@@ -3561,6 +4239,7 @@ function closeBoosterPanel(renderCards = false): void {
     renderShards();
   }
   $('boosterModal').classList.add('hidden');
+  hidePackInfo(); hideZoom();
   if (renderCards) renderCollection();
   const target = boosterReturnFocus;
   boosterReturnFocus = null;
@@ -3624,7 +4303,8 @@ function revealPack(): void {
 
 // ── объёмные объекты как в MTG: наклон от мыши + блик (рубашки, фоны, бустеры — art_raw вставишь сам) ──
 function attachVolumetric(root: ParentNode = document): void {
-  const selector = '.boosterInvCard, .packOffer, .ofCard, .bpTile, .packSealedInner, .cardback, .packSlot .back, .packSlot .face .card, .ofArt';
+  // v3: .packSlot .back/.face исключены — наклон ломал backface-visibility и открытая карта показывала рубашку
+  const selector = '.boosterInvCard, .packOffer, .ofCard, .bpTile, .packSealedInner, .cardback:not(.packSlot .cardback), .ofArt';
   const list = Array.from(root.querySelectorAll<HTMLElement>(selector));
   list.forEach(el => {
     if ((el as HTMLElement).dataset.volAttached) return;
@@ -3658,7 +4338,45 @@ function attachVolumetric(root: ParentNode = document): void {
 }
 
 
+/** Панель описания карты рядом с крупным превью (бустер): имя, тип, редкость, текст, флейвор. */
+function showPackInfo(sl: PackSlotData, side: 'left' | 'right'): void {
+  let box = document.getElementById('packInfo');
+  if (!box) { box = el('aside', 'packInfo'); box.id = 'packInfo'; document.body.appendChild(box); }
+  const c = sl.card;
+  const stats = c.type === CardType.Creature ? `<span class="piStats">⚔ ${c.attack ?? 0} · ❤ ${c.health ?? 0}</span>` : '';
+  box.innerHTML = `<div class="piName">${esc(cardName(c))}</div>
+    <div class="piType">${typeName(c.type)} · ${esc(factionName(c.faction))} · <b class="r-${String(c.rarity).toLowerCase()}">${rarityName(c.rarity)}</b></div>
+    <div class="piCost">Стоимость: <b>${c.cost}✦</b> ${stats}</div>
+    <div class="piText">${cardBodyHtml(c)}</div>
+    ${cardFlavor(c) ? `<div class="piFlavor">${cardFlavor(c)}</div>` : ''}
+    ${sl.foil ? '<div class="piTag">✦ Фойл</div>' : ''}${sl.borderless ? '<div class="piTag">◇ Borderless</div>' : ''}
+    ${sl.converted > 0 ? `<div class="piTag">Дубликат → 🪙${sl.converted}</div>` : `<div class="piTag">В коллекции: ${ownedCount(c.id)}/${PLAYSET}</div>`}`;
+  box.dataset.side = side;
+  box.classList.add('show');
+}
+/** Крупная карта и описание — вплотную к наведённой карте (справа или слева, как в коллекции). */
+function placePackPreview(slot: HTMLElement, side: 'left' | 'right'): void {
+  const r = slot.getBoundingClientRect();
+  const info = document.getElementById('packInfo');
+  const zw = zoomPreview.offsetWidth || 340;
+  const iw = info?.offsetWidth || 0;
+  const gap = 12;
+  const vw = window.innerWidth;
+  let zx = side === 'right' ? r.right + gap : r.left - gap - zw;
+  if (zx + zw > vw - 8) zx = vw - 8 - zw;
+  if (zx < 8) zx = 8;
+  zoomPreview.style.setProperty('--zx', `${zx}px`);
+  zoomPreview.classList.add('zoomAt');
+  if (info) {
+    let ix = side === 'right' ? zx + zw + gap : zx - gap - iw;
+    if (ix + iw > vw - 8 || ix < 8) ix = side === 'right' ? zx - gap - iw : zx + zw + gap;
+    info.style.left = `${Math.max(8, Math.min(vw - 8 - iw, ix))}px`; info.style.right = 'auto';
+  }
+}
+function hidePackInfo(): void { document.getElementById('packInfo')?.classList.remove('show'); }
+
 function renderPackSlots(slots: PackSlotData[]): void {
+  hidePackInfo();
   const row = $('packRow');
   if (!row) return;
   const stage = document.getElementById('packStage');
@@ -3717,6 +4435,17 @@ function renderPackSlots(slots: PackSlotData[]): void {
       try { Sfx.uiClick(); } catch {}
     };
     slot.addEventListener('click', doFlip);
+    // v3 (MTG Arena / как в коллекции): после вскрытия — крупная карта + описание сбоку от курсора
+    const showBig = (ev: MouseEvent): void => {
+      if (!slot.classList.contains('flip')) return;
+      const side: 'left' | 'right' = ev.clientX > window.innerWidth / 2 ? 'left' : 'right';
+      showZoom(sl.card, ev.clientX, ev.clientY, side, sl.borderless ? 'borderless' : 'auto');
+      showPackInfo(sl, side);
+      placePackPreview(slot, side);
+    };
+    slot.addEventListener('mouseenter', showBig);
+    slot.addEventListener('mousemove', showBig);
+    slot.addEventListener('mouseleave', () => { hideZoom(); hidePackInfo(); });
     // клавиатура: Enter/Space тоже переворачивает
     slot.setAttribute('role','button'); slot.setAttribute('tabindex','0');
     slot.addEventListener('keydown', (ev: KeyboardEvent) => { if (ev.key==='Enter'||ev.key===' ') { ev.preventDefault(); doFlip(); } });
@@ -3955,6 +4684,7 @@ function deckColorIcon(faction: string): string {
   return `<span class="deckCIcon" style="background:${bg[faction] ?? bg.Neutral}" title="${FACTION_RU[faction as Faction] ?? faction}">${sig[faction] ?? '◈'}</span>`;
 }
 
+const GEAR_SVG = '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path fill="currentColor" d="M19.14 12.94a7.5 7.5 0 0 0 .05-.94 7.5 7.5 0 0 0-.05-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.61-.22l-2.39.96a7 7 0 0 0-1.62-.94l-.36-2.54A.5.5 0 0 0 13.9 2h-3.84a.5.5 0 0 0-.49.42l-.36 2.54a7 7 0 0 0-1.62.94l-2.39-.96a.5.5 0 0 0-.61.22L2.67 8.48a.5.5 0 0 0 .12.64l2.03 1.58a7.5 7.5 0 0 0 0 1.88l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32c.13.22.39.3.61.22l2.39-.96c.5.39 1.04.7 1.62.94l.36 2.54c.04.24.25.42.49.42h3.84c.24 0 .45-.18.49-.42l.36-2.54a7 7 0 0 0 1.62-.94l2.39.96c.22.08.48 0 .61-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58ZM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7Z"/></svg>';
 function renderDeckGrid(): void {
   const grid = document.getElementById('deckGrid') as HTMLElement | null;
   const countEl = document.getElementById('decksCount') as HTMLElement | null;
@@ -4040,7 +4770,7 @@ function renderDeckGrid(): void {
       ? `<span class="deckAvatarTag" title="Обложка: ${esc(cardName(avatarCard))}">🎴 ${esc(cardName(avatarCard))}</span>`
       : '';
     const artEdit = !d.isPrecon
-      ? `<button class="deckArtEdit" type="button" title="Выбрать арт из карт этой колоды" aria-label="Выбрать арт для колоды «${esc(d.name)}»" data-deck-art-edit="${esc(d.id)}"><span aria-hidden="true">✦</span> Изменить арт</button>`
+      ? `<button class="deckArtEdit deckArtGear" type="button" title="Изменить арт колоды" aria-label="Изменить арт колоды «${esc(d.name)}»" data-deck-art-edit="${esc(d.id)}">${GEAR_SVG}</button>`
       : '';
     box.dataset.avatarCardId = avatarCard?.id ?? '';
     box.title = avatarCard ? `${d.name} · обложка: ${cardName(avatarCard)}` : d.name;
@@ -4055,13 +4785,16 @@ function renderDeckGrid(): void {
       if (facSet.size >= 3) break;
     }
     const colorsHtml = Array.from(facSet).slice(0,3).map(f=> deckColorIcon(f)).join('');
+    // v3 (MTG Arena): арт на весь блок, без круглых значков; текст поверх арта внизу, шестерёнка — справа сверху
+    void colorsHtml; void avatarTag; void fallbackSig;
+    box.classList.add('deckBoxFull');
     box.innerHTML = `
-      <div class="${deckArtClass}">${artHtml}<span class="deckArtFallback" aria-hidden="true">${fallbackSig}</span>${avatarTag}</div>
+      <div class="${deckArtClass}">${artHtml}</div>
       <div class="deckLabel">
         <div class="deckName" title="${esc(d.name)}">${esc(d.name)}</div>
-        <div class="deckMeta"><div class="deckColors">${colorsHtml}</div><span class="deckCount">${d.format === STARTER_DECK_FORMAT ? 'Стартовая · 30 карт' : `${d.cards.length} карт`}</span></div>
-        ${artEdit}
+        <div class="deckMeta"><span class="deckCount">${d.isPrecon ? `Стандартная · ${d.cards.length} карт` : `${d.cards.length} карт`}</span></div>
       </div>
+      ${artEdit}
       <span class="selCheck">✓</span>
     `;
     box.addEventListener('click', () => {
@@ -4205,7 +4938,7 @@ function openEditorDeckArtPicker(): void {
 }
 
 function deckPlayProblem(deck: DeckLike): string | null {
-  const minimum = isStarterDeckId(deck.id) ? 30 : 60;
+  const minimum = MIN_DECK_SIZE; // стандартные — ровно 30, свои — от 30 (60, 90… без потолка)
   const sizeCheck = validateDeckSize(deck.cards, dbLookup, minimum);
   if (!sizeCheck.ok) return sizeCheck.problems[0] ?? 'колода не собрана';
   if (!isStarterDeckId(deck.id)) {
@@ -4519,6 +5252,187 @@ function closeHomeScreen(): void {
   document.getElementById('homeScreen')?.classList.add('hidden');
   document.querySelectorAll('.topTab').forEach(el=> el.classList.toggle('active', (el as HTMLElement).dataset.tab==='home'));
 }
+/* =====================================================================
+   v3 · СОБЫТИЯ (по мотивам MTG Arena «Events»): каждое событие — реальный режим нашей игры.
+   Прогресс хранится в meta.events, период (день/неделя) сбрасывает прогресс, награды выдаются
+   один раз за период. Арт карточки события: art_raw/cosm/events/<id>.png (при отсутствии — градиент).
+   ===================================================================== */
+type EventPeriod = 'daily' | 'weekly' | 'none';
+interface EventDef {
+  id: string; title: string; kind: string; period: EventPeriod; goal: number;
+  desc: string; rules: string; reward: string; fac?: () => Faction;
+  launch?: 'match' | 'campaign' | 'tut'; difficulty?: number; ranked?: boolean; streak?: boolean;
+  grant?: () => void;
+}
+interface EventState { p: number; claimed: boolean; period: string }
+const weeklyFaction = (): Faction => {
+  const w = weekStr(); let h = 0;
+  for (const ch of w) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return FACTION_IDS[h % FACTION_IDS.length] as Faction;
+};
+const EVENT_DEFS: EventDef[] = [
+  { id: 'borderless', title: 'Галерея без границ', kind: 'Рейтинг · Borderless', period: 'none', goal: BORDERLESS_EVENT_WINS,
+    desc: 'Побеждайте в рейтинговых матчах любой колодой.', rules: 'Засчитываются только рейтинговые победы.',
+    reward: '◇ Borderless-вариант карты', launch: 'match', ranked: true },
+  { id: 'weekly_fac', title: 'Фракция недели', kind: 'Еженедельное', period: 'weekly', goal: 3,
+    desc: 'Одержите 3 победы стартовой колодой фракции недели.', rules: 'Колода фракции подставляется автоматически. Без рейтинга.',
+    reward: '🪙500 + 1 бустер', launch: 'match', difficulty: 0.7, fac: weeklyFaction,
+    grant: () => { shardsAdd(500); meta.freeOpens = (meta.freeOpens ?? 0) + 1; } },
+  { id: 'daily_nightmare', title: 'Вызов дня: Кошмар', kind: 'Ежедневное', period: 'daily', goal: 1,
+    desc: 'Победите ИИ на максимальной сложности.', rules: 'Сложность «Кошмар». Без рейтинга. 1 награда в день.',
+    reward: '💎50', launch: 'match', difficulty: 1.05, grant: () => gemsAdd(50) },
+  { id: 'gauntlet', title: 'Испытание стихий', kind: 'Серия', period: 'none', goal: 5, streak: true,
+    desc: 'Пять побед подряд — по одной над каждой фракцией.', rules: 'Поражение сбрасывает серию. Соперники идут по кругу.',
+    reward: '🪙1000 + мифический бустер', launch: 'match', difficulty: 0.85,
+    grant: () => { shardsAdd(1000); meta.premOpens = (meta.premOpens ?? 0) + 1; } },
+  { id: 'quick', title: 'Быстрая игра', kind: 'Тренировка', period: 'none', goal: 0,
+    desc: 'Матч против ИИ без рейтинга выбранной колодой.', rules: 'Опыт и пропуск начисляются как обычно.',
+    reward: 'Опыт и BP', launch: 'match', difficulty: 0.6 },
+  { id: 'campaign', title: 'Кампания', kind: 'Сюжет', period: 'none', goal: 0,
+    desc: 'Сюжетные главы фракций с элитами и боссами.', rules: 'Прогресс — в окне кампании.',
+    reward: 'Монеты, гемы, бустеры', launch: 'campaign' },
+  { id: 'tutorial', title: 'Обучение', kind: 'Новичкам', period: 'none', goal: 4,
+    desc: 'Четыре урока: мана, бой, механики, кривая маны.', rules: 'Шаги урока привязаны к мане хода.',
+    reward: 'Колода фракции + 5 бустеров + 💎100', launch: 'tut' },
+];
+let eventsFilter: 'all' | 'active' | 'rewards' = 'all';
+function eventPeriodKey(period: EventPeriod): string { return period === 'daily' ? todayStr() : period === 'weekly' ? weekStr() : 'all'; }
+function eventState(def: EventDef): EventState {
+  const all = ((meta as unknown as { events?: Record<string, EventState> }).events ??= {});
+  const key = eventPeriodKey(def.period);
+  let st = all[def.id];
+  if (!st || st.period !== key) { st = { p: 0, claimed: false, period: key }; all[def.id] = st; }
+  if (def.id === 'borderless') { st.p = Math.min(def.goal, meta.borderlessEventWins ?? 0); st.claimed = !!meta.borderlessEventClaimed; }
+  if (def.id === 'tutorial') { st.p = Math.min(4, meta.tutStage ?? 0); st.claimed = !!meta.tutReward; }
+  return st;
+}
+/** Соперник серии «Испытание стихий»: по кругу от текущего прогресса. */
+function gauntletFoe(): Faction { return FACTION_IDS[eventState(EVENT_DEFS.find(d => d.id === 'gauntlet')!).p % FACTION_IDS.length] as Faction; }
+/** Итог матча события (вызывается из metaRewards). Возвращает строку для тоста. */
+function eventOnMatchEnd(id: string, win: boolean): string {
+  const def = EVENT_DEFS.find(d => d.id === id);
+  if (!def || def.goal <= 0 || def.id === 'borderless' || def.id === 'tutorial') return '';
+  const st = eventState(def);
+  if (st.claimed) return '';
+  if (win) st.p = Math.min(def.goal, st.p + 1);
+  else if (def.streak) st.p = 0;
+  metaSave();
+  return win ? `${def.title}: ${st.p}/${def.goal}${st.p >= def.goal ? ' — награда ждёт в «Событиях»' : ''}`
+    : def.streak ? `${def.title}: серия прервана` : '';
+}
+function launchEvent(def: EventDef): void {
+  if (def.launch === 'campaign') { $('eventsScreen').classList.add('hidden'); openCampaign(); return; }
+  if (def.launch === 'tut') { $('eventsScreen').classList.add('hidden'); openTut(); return; }
+  if (def.id === 'borderless') {   // рейтинговый матч текущей колодой из меню
+    closeEventsScreen(); navigateApp('home');
+    const chk = document.getElementById('chkPractice') as HTMLInputElement | null; if (chk) chk.checked = false;
+    battle.launchMode = 'menu'; battle.eventId = null;
+    btn('btnPlay').click(); return;
+  }
+  const fac = def.fac?.();
+  if (fac) {
+    const deck = starterDeckForFaction(fac) ?? deckList.find(d => d.faction === fac);
+    const pick = sel('deckPick');
+    if (deck) {
+      if (![...pick.options].some(o => o.value === deck.id)) pick.add(new Option(deck.name, deck.id));
+      pick.value = deck.id;
+    }
+    picked = fac;
+  }
+  const deckNow = resolveDeck(sel('deckPick').value, deckList as unknown as DeckLike[]);
+  const problem = deckNow ? deckPlayProblem(deckNow) : 'колода не выбрана';
+  if (problem) { showToast(`Колода не готова: ${problem}`); return; }
+  if (deckNow && FACTION_IDS.includes(deckNow.faction as Faction)) picked = deckNow.faction as Faction;
+  battle.launchMode = 'event';
+  battle.eventId = def.id;
+  battle.practice = !def.ranked;
+  battle.difficulty = def.difficulty ?? 0.7;
+  battle.friendFoe = null; battle.bossPower = null; battle.bossHp = 0; battle.tutLesson = 0; battle.campNode = null;
+  battle.enemyFaction = def.id === 'gauntlet' ? gauntletFoe()
+    : FACTION_IDS[Math.floor(Math.random() * FACTION_IDS.length)] as Faction;
+  closeEventsScreen();
+  btn('btnPlay').click();
+}
+function claimEvent(def: EventDef): void {
+  const st = eventState(def);
+  if (st.claimed || def.goal <= 0 || st.p < def.goal) return;
+  if (def.id === 'borderless') {
+    const reward = grantRandomBorderless();
+    if (!reward) { showToast('Все Borderless-варианты уже собраны'); return; }
+    meta.borderlessEventClaimed = true; metaSave();
+    showToast(`◇ Получен Borderless-вариант: «${cardName(reward)}»`);
+  } else if (def.id === 'tutorial') { $('eventsScreen').classList.add('hidden'); openTut(); return; }
+  else {
+    def.grant?.();
+    st.claimed = true;
+    if (def.streak) { st.p = 0; st.claimed = false; }   // серию можно проходить снова
+    metaSave(); renderShards();
+    showToast(`🎁 ${def.title}: ${def.reward}`);
+  }
+  renderEvents();
+}
+function renderEvents(): void {
+  const grid = document.getElementById('eventsGrid') as HTMLElement | null;
+  if (!grid) return;
+  const rows = EVENT_DEFS.map(def => ({ def, st: eventState(def) }));
+  const list = rows.filter(({ def, st }) => eventsFilter === 'all'
+    || (eventsFilter === 'active' && def.goal > 0 && st.p > 0 && !st.claimed)
+    || (eventsFilter === 'rewards' && def.goal > 0 && st.p >= def.goal && !st.claimed));
+  grid.className = 'eventsGridV3';
+  grid.removeAttribute('style');
+  grid.innerHTML = list.map(({ def, st }) => {
+    const done = def.goal > 0 && st.p >= def.goal;
+    const canClaim = done && !st.claimed;
+    const fac = def.fac?.();
+    const foe = def.id === 'gauntlet' ? gauntletFoe() : null;
+    const pct = def.goal > 0 ? Math.round(st.p / def.goal * 100) : 0;
+    const timer = def.period !== 'none'
+      ? `<span class="evTimer questReset" data-quest-reset="${def.period}" data-reset-prefix="Осталось">—</span>` : '';
+    const extra = fac ? `<div class="evExtra">Фракция недели: <b>${FACTION_SIGIL[fac]} ${FACTION_RU[fac]}</b></div>`
+      : foe ? `<div class="evExtra">Следующий соперник: <b>${FACTION_SIGIL[foe]} ${FACTION_RU[foe]}</b></div>` : '';
+    const progress = def.goal > 0 ? `<div class="evProgress"><div class="evProgressTrack"><i style="width:${pct}%"></i></div><b>${st.p}/${def.goal}</b></div>` : '';
+    const action = canClaim
+      ? `<button type="button" class="evBtn claim" data-ev-claim="${def.id}">Забрать награду</button>`
+      : st.claimed && def.goal > 0 ? `<button type="button" class="evBtn" disabled>Получено ✓</button>`
+      : `<button type="button" class="evBtn play" data-ev-play="${def.id}">${def.launch === 'match' ? 'Играть' : 'Открыть'}</button>`;
+    return `<article class="evCard ev-${def.id}${canClaim ? ' ready' : ''}${st.claimed && def.goal > 0 ? ' claimed' : ''}" data-event-id="${def.id}">
+      <div class="evArt"><img src="/cosm/events/${def.id}" alt="" loading="lazy" onload="this.parentElement.classList.add('hasArt')" onerror="this.remove()"></div>
+      <div class="evShade"></div>
+      <div class="evTop"><span class="evKind">${def.kind}</span>${timer}</div>
+      <div class="evBody">
+        <h3 class="evTitle">${def.title}</h3>
+        <p class="evDesc">${def.desc}</p>
+        ${extra}
+        <p class="evRules">${def.rules}</p>
+        ${progress}
+        <div class="evFoot"><span class="evReward">Награда: <b>${def.reward}</b></span>${action}</div>
+      </div>
+    </article>`;
+  }).join('') || '<div class="evEmpty">Здесь пока пусто</div>';
+  grid.onclick = (ev: MouseEvent) => {
+    const t = ev.target as HTMLElement | null;
+    const play = t?.closest?.('[data-ev-play]') as HTMLElement | null;
+    if (play) { Sfx.uiClick(); const d = EVENT_DEFS.find(x => x.id === play.dataset.evPlay); if (d) launchEvent(d); return; }
+    const claim = t?.closest?.('[data-ev-claim]') as HTMLElement | null;
+    if (claim) { Sfx.uiClick(); const d = EVENT_DEFS.find(x => x.id === claim.dataset.evClaim); if (d) claimEvent(d); }
+  };
+  const side = document.getElementById('eventsSide');
+  if (side) {
+    const cnt = (f: typeof eventsFilter): number => rows.filter(({ def, st }) => f === 'all' || (f === 'active' ? def.goal > 0 && st.p > 0 && !st.claimed : def.goal > 0 && st.p >= def.goal && !st.claimed)).length;
+    side.className = 'eventsSideV3';
+    side.removeAttribute('style');
+    side.innerHTML = `<div class="evSideTitle">◆ События</div>` + ([['all', 'Все'], ['active', 'В процессе'], ['rewards', 'Награды']] as Array<[typeof eventsFilter, string]>)
+      .map(([id, ru]) => `<button type="button" class="evFilter${eventsFilter === id ? ' sel' : ''}" data-ev-filter="${id}">${ru}<span>${cnt(id)}</span></button>`).join('');
+    side.onclick = (ev: MouseEvent) => {
+      const f = (ev.target as HTMLElement | null)?.closest?.('[data-ev-filter]') as HTMLElement | null;
+      if (f) { eventsFilter = f.dataset.evFilter as typeof eventsFilter; renderEvents(); }
+    };
+  }
+  document.getElementById('eventsScreen')?.classList.add('eventsV3');
+  updateQuestCountdowns();
+}
+(window as unknown as { ecEvents: () => unknown }).ecEvents = () => EVENT_DEFS.map(d => ({ id: d.id, ...eventState(d) }));
+
 function openEventsScreen(): void {
   setAppRoute('events');
   $('menu').classList.add('hidden');
@@ -4534,63 +5448,7 @@ function openEventsScreen(): void {
   $('campaignModal')?.classList.add('hidden');
   const es = document.getElementById('eventsScreen') as HTMLElement | null;
   if (es) es.classList.remove('hidden');
-  // render grid like Arena events (screenshot 4)
-  const grid = document.getElementById('eventsGrid') as HTMLElement | null;
-  if (grid) {
-    const borderlessProgress = Math.min(BORDERLESS_EVENT_WINS, meta.borderlessEventWins ?? 0);
-    const canClaimBorderless = borderlessProgress >= BORDERLESS_EVENT_WINS && !meta.borderlessEventClaimed;
-    const events: Array<{ title: string; sub: string; art: string; borderless?: boolean }> = [
-      { title:'Галерея без границ', sub:'Событие · Borderless', art:'/art/Ethereal/eth_03.png', borderless:true },
-      { title:'Премьер-драфт', sub:'Лимит', art:'/art/Pyromancer/pyr_01.png' },
-      { title:'Быстрый старт', sub:'В быструю игру', art:'/art/Aurites/aur_01.png' },
-      { title:'Испытание стихий', sub:'Обучение', art:'/art/Ethereal/eth_01.png' },
-      { title:'Событие недели: Стандарт', sub:'Регистрация открыта', art:'/art/Terramorph/ter_01.png' },
-      { title:'Неоновая аркада', sub:'Событие', art:'/art/Necrus/nec_01.png' },
-      { title:'Классический драфт', sub:'Лимит', art:'/art/Aurites/aur_03.png' },
-      { title:'Быстрый драфт', sub:'Лимит', art:'/art/Neutral/neu_01.png' },
-      { title:'Турнир сборных колод', sub:'Конструктед', art:'/art/Ethereal/eth_03.png' },
-      { title:'Классический драфт', sub:'Лимит', art:'/art/Ethereal/eth_03.png' },
-      { title:'Классический турнир', sub:'Конструктед', art:'/art/Pyromancer/pyr_03.png' },
-    ];
-    grid.innerHTML = events.map(ev=> `
-      <div class="draftCard${ev.borderless ? ' borderlessEventCard' : ''}" data-event-id="${ev.borderless ? 'borderless' : ''}" style="height:${ev.borderless ? '172px' : '118px'};flex-direction:column;align-items:stretch;padding:0;border-radius:8px;overflow:hidden">
-        <div class="draftArt" style="position:absolute;inset:0"><img src="${ev.art}" alt="" loading="lazy" onerror="this.style.display='none'"></div>
-        <div class="eventArtShade"></div>
-        <div class="eventCardCopy">
-          <div class="eventCardTitle">${ev.title}</div>
-          <div class="eventCardSub">${ev.sub}</div>
-          ${ev.borderless ? `<div class="eventRewardBox">
-            <div class="eventProgressLabel"><span>Рейтинговые победы</span><b>${borderlessProgress}/${BORDERLESS_EVENT_WINS}</b></div>
-            <div class="eventProgressTrack"><i style="width:${borderlessProgress / BORDERLESS_EVENT_WINS * 100}%"></i></div>
-            <button type="button" class="eventRewardClaim" data-borderless-claim ${canClaimBorderless ? '' : 'disabled'}>
-              ${meta.borderlessEventClaimed ? 'Получено ✓' : canClaimBorderless ? 'Забрать Borderless награду' : `Ещё ${BORDERLESS_EVENT_WINS - borderlessProgress} победы`}
-            </button>
-            <small>1 косметический вариант карты · баланс не меняется</small>
-          </div>` : ''}
-        </div>
-        ${ev.borderless ? '<span class="eventBorderlessTag">◇ BORDERLESS</span>' : ''}
-      </div>
-    `).join('');
-    grid.onclick = (ev: MouseEvent) => {
-      const target = ev.target as HTMLElement | null;
-      const claim = target?.closest?.('[data-borderless-claim]') as HTMLButtonElement | null;
-      if (claim) {
-        ev.stopPropagation();
-        if (claim.disabled || meta.borderlessEventClaimed) return;
-        const reward = grantRandomBorderless();
-        if (!reward) { showToast('Все Borderless-варианты уже собраны'); return; }
-        meta.borderlessEventClaimed = true;
-        metaSave();
-        showToast(`◇ Получен Borderless-вариант: «${cardName(reward)}»`);
-        openEventsScreen();
-        return;
-      }
-      const tile = target?.closest?.('.draftCard') as HTMLElement | null;
-      if (tile && tile.dataset.eventId !== 'borderless') showToast('Событие скоро откроется');
-    };
-    // сетка сама центрируется по max-width — мёртвый отступ справа не нужен
-    (grid as any).style.marginRight = '';
-  }
+  renderEvents();
   syncTopWallet();
 }
 function closeEventsScreen(): void {
@@ -4717,7 +5575,7 @@ document.getElementById('btnNavQuests')?.addEventListener('click', () => {
   document.querySelectorAll('.topTab').forEach(x => x.classList.toggle('active', (x as HTMLElement).dataset.tab === 'profile'));
   openProfile();
 });
-document.getElementById('btnNavMulti')?.addEventListener('click', () => openEventsScreen());
+document.getElementById('btnNavMulti')?.addEventListener('click', () => openOnline());
 document.getElementById('btnNavPlay')?.addEventListener('click', () => btn('btnPlay').click());
 document.getElementById('btnNavExit')?.addEventListener('click', () => {
   Sfx.uiClick();
@@ -4731,6 +5589,7 @@ document.getElementById('menuNav')?.addEventListener('click', ev => {
   document.querySelectorAll('#menuNav .ecNavBtn').forEach(x => x.classList.toggle('active', x === b));
 });
 
+let homeChallengeList: Array<{ id: string; nick: string }> = [];
 function updateChallengePanel(): void {
   const evSel = document.getElementById('enemyFaction') as HTMLSelectElement | null;
   const ev = evSel ? evSel.value : '__random';
@@ -4757,6 +5616,9 @@ function updateChallengePanel(): void {
     }
   }
   const practice = !!(document.getElementById('chkPractice') as HTMLInputElement | null)?.checked;
+  const aiRow = document.querySelector<HTMLElement>('.ecAiOnly'); if (aiRow) aiRow.style.display = practice ? '' : 'none';
+  const titleEl = document.getElementById('ecChTitle');
+  if (titleEl) titleEl.textContent = homeChallengeList.length ? '⚔ Активный вызов' : 'Подготовка к бою';
   const modeEl = document.getElementById('ecModeText');
   if (modeEl) modeEl.textContent = practice ? 'Тренировка · без рейтинга' : 'Рейтинговая лестница · Сезон 4';
   const pm = document.getElementById('ecPlayMode');
@@ -5062,7 +5924,15 @@ function applyMenuBg(): void {
 /* ── Админка v2.21.0 ── */
 const ADMIN_KEY = 'ec_admin_v1';
 const ADMIN_USERS_KEY = 'ec_admin_users_v1';
-type AdminUser = { pid:string; nick:string; avatarFac:string; frame:string; level:number; mmr:number; wins:number; losses:number; shards:number; gems:number; banned:boolean; lastSeen:string; };
+type AdminUser = { pid:string; nick:string; avatarFac:string; frame:string; level:number; mmr:number; wins:number; losses:number; shards:number; gems:number; banned:boolean; lastSeen:string; online:boolean; lastSeenTs:number; };
+const ADMIN_LOG_KEY = 'ec_admin_log_v1';
+function admLog(msg: string): void {
+  try {
+    const arr = JSON.parse(window.localStorage.getItem(ADMIN_LOG_KEY) || '[]') as string[];
+    arr.unshift(`[${new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}] ${msg}`);
+    window.localStorage.setItem(ADMIN_LOG_KEY, JSON.stringify(arr.slice(0, 30)));
+  } catch { /* приватный режим */ }
+}
 function isAdmin(): boolean {
   try { return window.localStorage.getItem(ADMIN_KEY) === '1'; } catch { return false; }
 }
@@ -5083,11 +5953,13 @@ function ensureAdminUsers(): AdminUser[] {
   const facs: Faction[] = ['Aurites','Necrus','Terramorph','Pyromancer','Ethereal'] as Faction[];
   const frames = ['bronze','silver','gold','crystal','mythic'];
   const mocks: AdminUser[] = [];
-  mocks.push({ pid: meta.pid || 'me', nick: meta.nick || 'Гость', avatarFac: meta.avatarFac as string || 'Aurites', frame: meta.frame || 'bronze', level: Math.floor((meta.xp||0)/500)+1, mmr: meta.mmr||1000, wins: meta.wins||0, losses: meta.losses||0, shards: shardsGet(), gems: gemsGet(), banned:false, lastSeen: new Date().toISOString().slice(0,10) });
+  mocks.push({ pid: meta.pid || 'me', nick: meta.nick || 'Гость', avatarFac: meta.avatarFac as string || 'Aurites', frame: meta.frame || 'bronze', level: Math.floor((meta.xp||0)/500)+1, mmr: meta.mmr||1000, wins: meta.wins||0, losses: meta.losses||0, shards: shardsGet(), gems: gemsGet(), banned:false, lastSeen: new Date().toISOString().slice(0,10), online:true, lastSeenTs: Date.now() });
   const names = ['AetherWolf','ShadowMage','GroveKeeper','EmberLord','FrostWitch','IronBastion','StormCaller','VoidWalker'];
   for (let i=0;i<7;i++) {
     const f = facs[i%facs.length];
-    mocks.push({ pid: `ec-demo-${i+1}`, nick: names[i], avatarFac: f, frame: frames[i%frames.length], level: 5+Math.floor(Math.random()*40), mmr: 900+Math.floor(Math.random()*800), wins: Math.floor(Math.random()*120), losses: Math.floor(Math.random()*100), shards: 400+Math.floor(Math.random()*3000), gems: 20+Math.floor(Math.random()*500), banned: Math.random()<0.12, lastSeen: new Date(Date.now()-Math.floor(Math.random()*14)*86400000).toISOString().slice(0,10) });
+    const on = i % 3 === 0;   // треть игроков — в сети
+    const ago = on ? Math.floor(Math.random()*3600000) : Math.floor(Math.random()*14)*86400000;
+    mocks.push({ pid: `ec-demo-${i+1}`, nick: names[i], avatarFac: f, frame: frames[i%frames.length], level: 5+Math.floor(Math.random()*40), mmr: 900+Math.floor(Math.random()*800), wins: Math.floor(Math.random()*120), losses: Math.floor(Math.random()*100), shards: 400+Math.floor(Math.random()*3000), gems: 20+Math.floor(Math.random()*500), banned: Math.random()<0.12, lastSeen: new Date(Date.now()-ago).toISOString().slice(0,10), online: on, lastSeenTs: Date.now()-ago });
   }
   try { window.localStorage.setItem(ADMIN_USERS_KEY, JSON.stringify(mocks)); } catch {}
   return mocks;
@@ -5207,77 +6079,196 @@ function renderAdminMe(host:HTMLElement): void {
   host.querySelector('#admTogglePremium')?.addEventListener('click', ()=>{ meta.bpPremium=!meta.bpPremium; metaSave(); showToast(meta.bpPremium?'Премиум включён':'Премиум выключен'); renderAdmin(); });
   host.querySelector('#admLogout')?.addEventListener('click', ()=>{ setAdmin(false); closeAdmin(); showToast('Вышел из админки'); });
 }
-function renderAdminUsers(host:HTMLElement): void {
+/* v3.13: реальные игроки meta-сервера в админке */
+type SrvUser = { login: string; pid: string; nick: string; avatarFac: string; frame: string; level: number; mmr: number; wins: number; losses: number; shards: number; gems: number; freeOpens?: number; banned: boolean; status: string; lastSeen: number };
+let adminSrvUsers: SrvUser[] | null = null;
+let adminSrvErr = '';
+let adminSrvTimer = 0;
+/* v3.15.4: сервер не вернул apiVersion:3 → он старше дельта-протокола (v3.15.3).
+   На таком сервере клиент не слал бы абсолютную валюту (см. abs() в syncProfile),
+   поэтому выдачи админки сохраняются, НО траты игрока сервером не учитываются
+   до обновления. В админ-UI показываем баннер. */
+let adminSrvApiOld = false;
+function adminKeyGet(): string {
+  // v3.15: дев-секрет по умолчанию, чтобы админка сразу видела серверных игроков
+  // (онлайн/офлайн) без ручной настройки; свой ключ — «Система → Ключ → Сохранить».
+  try { return window.localStorage.getItem('ec_admin_key_v1') || 'echo-admin'; } catch { return 'echo-admin'; }
+}
+async function adminSrvFetch(): Promise<void> {
+  const key = adminKeyGet();
+  if (!key) { adminSrvUsers = null; adminSrvErr = 'no-key'; return; }
+  try {
+    const r = await window.fetch(`${META_API()}/api/admin/users`, { headers: { 'x-admin-key': key } });
+    if (r.status === 403) { adminSrvErr = 'key-invalid'; adminSrvUsers = null; return; }
+    if (!r.ok) { adminSrvErr = `HTTP ${r.status}`; adminSrvUsers = null; return; }
+    const j = await r.json() as { users: SrvUser[]; apiVersion?: number };
+    adminSrvUsers = j.users || []; adminSrvErr = '';
+    adminSrvApiOld = j.apiVersion !== 3;
+  } catch { adminSrvErr = 'offline'; adminSrvUsers = null; }
+}
+async function adminSrvPost(route: string, body: Record<string, unknown>): Promise<boolean> {
+  try {
+    const r = await window.fetch(`${META_API()}${route}`, { method: 'POST', headers: { 'x-admin-key': adminKeyGet(), 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    return r.ok;
+  } catch { return false; }
+}
+function srvRow(u: SrvUser): string {
+  const on = u.status !== 'offline';
+  const when = on ? (ONLINE_STATUS_RU[u.status] ?? u.status) : (u.lastSeen ? new Date(u.lastSeen).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—');
+  return `<tr>
+    <td><div style="display:flex;align-items:center;gap:.45rem"><span style="width:28px;height:28px;border-radius:50%;background:var(--panel);border:1px solid rgba(120,190,255,.35);display:flex;align-items:center;justify-content:center;font-size:.72rem">${FACTION_SIGIL[u.avatarFac as Faction] || '◈'}</span><div><div style="font-size:.78rem;color:#ffe9b0">${esc(u.nick)} <span class="admBadge" style="border-color:#2a4a6a;background:rgba(42,74,106,.15);color:#9fc6ff">сервер</span></div><div style="font-size:.62rem;color:#8b93ab">${esc(u.login)} · ${esc(FACTION_RU[u.avatarFac as Faction] || u.avatarFac)} · ${u.frame}</div></div></div></td>
+    <td><b>${u.level}</b> <span style="color:#8b93ab">/ ${u.mmr}</span></td>
+    <td>${u.wins}-${u.losses} <span style="color:#8b93ab">${((u.wins / Math.max(1, u.wins + u.losses)) * 100).toFixed(0)}%</span></td>
+    <td>🪙${u.shards} · 💎${u.gems}</td>
+    <td>${on ? `<span class="admBadge on">🟢 ${esc(ONLINE_STATUS_RU[u.status] ?? 'в сети')}</span>` : '<span class="admBadge off">⚪ оффлайн</span>'} ${u.banned ? '<span class="admBadge" style="border-color:#7c3a34;background:rgba(124,58,52,.12);color:#ffb3a6">бан</span>' : ''}<div style="font-size:.6rem;color:#6d7590">${when}</div></td>
+    <td><div class="admActions"><button class="btn" data-sact="edit" data-login="${esc(u.login)}" title="Ник и MMR">✎</button><button class="btn" data-sact="give" data-login="${esc(u.login)}" title="Выдать валюту/паки">🪙</button><button class="btn" data-sact="kick" data-login="${esc(u.login)}" title="Кик" ${on ? '' : 'disabled'}>⚡</button><button class="btn" data-sact="ban" data-login="${esc(u.login)}" title="Бан/разбан">${u.banned ? '✓' : '⛔'}</button></div></td>
+  </tr>`;
+}
+function renderAdminUsers(host: HTMLElement): void {
   const users = ensureAdminUsers();
-  users[0] = { pid: meta.pid||'me', nick: meta.nick, avatarFac: meta.avatarFac as string, frame: meta.frame, level: Math.floor((meta.xp||0)/500)+1, mmr: meta.mmr||1000, wins: meta.wins||0, losses: meta.losses||0, shards: shardsGet(), gems: gemsGet(), banned:false, lastSeen: new Date().toISOString().slice(0,10) };
+  users[0] = { pid: meta.pid||'me', nick: meta.nick, avatarFac: meta.avatarFac as string, frame: meta.frame, level: Math.floor((meta.xp||0)/500)+1, mmr: meta.mmr||1000, wins: meta.wins||0, losses: meta.losses||0, shards: shardsGet(), gems: gemsGet(), banned:false, lastSeen: new Date().toISOString().slice(0,10), online:true, lastSeenTs: Date.now() };
   saveAdminUsers(users);
+  const srvNote = adminSrvErr === '' ? `🌐 сервер: ${adminSrvUsers?.length ?? 0} игроков` :
+    adminSrvErr === 'no-key' ? '🌐 сервер: введите админ-ключ во вкладке «Система»' :
+    adminSrvErr === 'key-invalid' ? '🌐 сервер: админ-ключ не подошёл (v3.16+ генерирует свой: смотрите консоль сервера / server/data/admin_key, или задайте env ADMIN_KEY; впишите его в «Система → Ключ»)' :
+    adminSrvErr === 'offline' ? '🌐 сервер недоступен (npm run server:meta)' : `🌐 сервер: ошибка ${adminSrvErr}`;
+  /* v3.15.4: сервер не вернул apiVersion:3 → старая сборка без дельта-протокола.
+     Выдачи сохраняются (клиент не шлёт абсолютную валюту), но траты сервером не
+     учитываются — предупреждаем прямо в месте выдачи. */
+  const srvApiWarn = (adminSrvApiOld && adminSrvErr === '')
+    ? `<div style="margin-bottom:.5rem;padding:.55rem .7rem;border:1px solid #b3812f;background:rgba(179,129,47,.13);border-radius:8px;font-size:.68rem;color:#ffd98a;line-height:1.5">⚠️ <b>Обнаружен СТАРЫЙ meta-server (без дельта-протокола).</b> Выдаваемая здесь валюта/рейтинг сохраняется и не затирается синками игрока, НО траты игрока сервер записывать не умеет — они будут «возвращаться» при синке, пока сервер не обновлён. <br>Обновление: остановите старый процесс сервера и запустите <code style="background:rgba(0,0,0,.3);padding:0 .3rem;border-radius:4px">npm run server:meta</code> (пересоберёт и запустит) — либо <code style="background:rgba(0,0,0,.3);padding:0 .3rem;border-radius:4px">node build/meta_server.js</code> (свежая prebuilt-сборка лежит в архиве).</div>`
+    : '';
   host.innerHTML = `<div style="display:flex;gap:.4rem;align-items:center;flex-wrap:wrap;margin-bottom:.5rem">
-    <input id="admUserSearch" placeholder="Поиск по нику / PID..." style="flex:1;min-width:180px;background:#14161f;border:1px solid var(--line);color:var(--text);padding:.42rem .5rem;border-radius:6px">
-    <select id="admUserFilter" style="background:#14161f;border:1px solid var(--line);color:var(--text);padding:.42rem;border-radius:6px"><option value="">Все</option><option value="banned">Забанены</option><option value="top">Топ по MMR</option></select>
+    <input id="admUserSearch" placeholder="Поиск по нику / PID / логину..." style="flex:1;min-width:180px;background:#14161f;border:1px solid var(--line);color:var(--text);padding:.42rem .5rem;border-radius:6px">
+    <select id="admUserFilter" style="background:#14161f;border:1px solid var(--line);color:var(--text);padding:.42rem;border-radius:6px"><option value="">Все</option><option value="online">🟢 Онлайн</option><option value="offline">⚪ Оффлайн</option><option value="banned">Забанены</option><option value="top">Топ по MMR</option></select>
     <button class="btn" id="admUserAdd">＋ Добавить игрока</button>
+    <button class="btn" id="admUserGiveAll" title="Массовая выдача: +500 🪙 всем, кто в сети">🎁 Всем онлайн +500 🪙</button>
+    <button class="btn" id="admUserRefresh" title="Обновить список с сервера">🔄</button>
     <button class="btn" id="admUserExport">Экспорт CSV</button>
   </div>
+  <div style="font-size:.66rem;color:#9fc6ff;margin-bottom:.35rem"><span id="admSrvNote">${esc(srvNote)}</span> · реальные игроки сервера сверху, локальные — ниже</div>
+  ${srvApiWarn}
   <div style="overflow:auto;max-height:52vh;border:1px solid rgba(255,255,255,.06);border-radius:8px">
     <table class="admTable"><thead><tr><th>Игрок</th><th>Ур / MMR</th><th>W-L</th><th>🪙 / 💎</th><th>Статус</th><th>Действия</th></tr></thead><tbody id="admUserTbody"></tbody></table>
   </div>
-  <div style="font-size:.62rem;color:#8b93ab;margin-top:.4rem">Всего ${users.length} · в проде подмени localStorage на GET /api/admin/users?search=&filter=</div>`;
+  <div style="font-size:.62rem;color:#8b93ab;margin-top:.4rem"><span id="admSrvTotal">Всего ${users.length + (adminSrvUsers?.length ?? 0)} · онлайн ${(adminSrvUsers ?? []).filter(u => u.status !== 'offline').length + users.filter(u => u.online).length}</span></div>
+  <div class="admCard" style="margin-top:.6rem"><h4>📋 Журнал действий админа</h4><div id="admUserLog" style="max-height:110px;overflow:auto;font-size:.66rem;color:#cbb98a;background:rgba(0,0,0,.18);border:1px solid rgba(255,255,255,.06);border-radius:6px;padding:.4rem .5rem">${(JSON.parse(window.localStorage.getItem(ADMIN_LOG_KEY)||'[]') as string[]).map(x=>`<div>${esc(x)}</div>`).join('')||'— пока пусто —'}</div></div>`;
   const tbody = host.querySelector('#admUserTbody') as HTMLElement;
   const search = host.querySelector('#admUserSearch') as HTMLInputElement;
   const filter = host.querySelector('#admUserFilter') as HTMLSelectElement;
-  const render = ()=>{
-    const q = (search.value||'').toLowerCase();
+  const render = (): void => {
+    const q = (search.value || '').toLowerCase();
+    const match = (nick: string, id: string): boolean => !q || nick.toLowerCase().includes(q) || id.toLowerCase().includes(q);
+    let srv = (adminSrvUsers ?? []).slice();
+    if (filter.value === 'banned') srv = srv.filter(u => u.banned);
+    if (filter.value === 'online') srv = srv.filter(u => u.status !== 'offline');
+    if (filter.value === 'offline') srv = srv.filter(u => u.status === 'offline');
+    srv = srv.filter(u => match(u.nick, u.login));
+    if (filter.value === 'top') srv.sort((a, b) => b.mmr - a.mmr);
+    srv.sort((a, b) => ((b.status !== 'offline') ? 1 : 0) - ((a.status !== 'offline') ? 1 : 0));
     let list = users.slice();
-    if (filter.value==='banned') list = list.filter(u=>u.banned);
-    if (filter.value==='top') list.sort((a,b)=>b.mmr-a.mmr);
-    if (q) list = list.filter(u=>u.nick.toLowerCase().includes(q)||u.pid.toLowerCase().includes(q));
-    tbody.innerHTML = list.map(u=>`<tr>
+    if (filter.value === 'banned') list = list.filter(u => u.banned);
+    if (filter.value === 'online') list = list.filter(u => u.online);
+    if (filter.value === 'offline') list = list.filter(u => !u.online);
+    if (filter.value === 'top') list.sort((a, b) => b.mmr - a.mmr);
+    list.sort((a, b) => (b.online ? 1 : 0) - (a.online ? 1 : 0));
+    list = list.filter(u => match(u.nick, u.pid));
+    tbody.innerHTML = srv.map(srvRow).join('') + list.map(u => `<tr>
       <td><div style="display:flex;align-items:center;gap:.45rem"><span style="width:28px;height:28px;border-radius:50%;background:var(--panel);border:1px solid rgba(255,216,122,.18);display:flex;align-items:center;justify-content:center;font-size:.72rem">${FACTION_SIGIL[u.avatarFac as Faction]||'◈'}</span><div><div style="font-size:.78rem;color:#ffe9b0">${esc(u.nick)} ${u.pid===meta.pid?'<span class="admBadge">вы</span>':''}</div><div style="font-size:.62rem;color:#8b93ab">${esc(u.pid)} · ${esc(FACTION_RU[u.avatarFac as Faction]||u.avatarFac)} · ${u.frame}</div></div></div></td>
       <td><b>${u.level}</b> <span style="color:#8b93ab">/ ${u.mmr}</span></td>
       <td>${u.wins}-${u.losses} <span style="color:#8b93ab">${((u.wins/Math.max(1,u.wins+u.losses))*100).toFixed(0)}%</span></td>
       <td>🪙${u.shards} · 💎${u.gems}</td>
-      <td>${u.banned?'<span class="admBadge" style="border-color:#7c3a34;background:rgba(124,58,52,.12);color:#ffb3a6">бан</span>':'<span class="admBadge">активен</span>'} · ${u.lastSeen}</td>
-      <td><div class="admActions"><button class="btn" data-act="edit" data-pid="${u.pid}">✎</button><button class="btn" data-act="give" data-pid="${u.pid}">🪙</button><button class="btn" data-act="ban" data-pid="${u.pid}">${u.banned?'✓':'⛔'}</button><button class="btn danger" data-act="del" data-pid="${u.pid}">✕</button></div></td>
+      <td>${u.online?'<span class="admBadge on">🟢 онлайн</span>':'<span class="admBadge off">⚪ оффлайн</span>'} ${u.banned?'<span class="admBadge" style="border-color:#7c3a34;background:rgba(124,58,52,.12);color:#ffb3a6">бан</span>':''}<div style="font-size:.6rem;color:#6d7590">${u.online?'в сети':u.lastSeen}</div></td>
+      <td><div class="admActions"><button class="btn" data-act="edit" data-pid="${u.pid}">✎</button><button class="btn" data-act="give" data-pid="${u.pid}">🪙</button><button class="btn" data-act="kick" data-pid="${u.pid}" ${u.online?'':'disabled'}>⚡</button><button class="btn" data-act="ban" data-pid="${u.pid}">${u.banned?'✓':'⛔'}</button><button class="btn danger" data-act="del" data-pid="${u.pid}">✕</button></div></td>
     </tr>`).join('');
-    tbody.querySelectorAll('[data-act]').forEach(b=>{
-      b.addEventListener('click', ()=>{
-        const act=(b as HTMLElement).dataset.act; const pid=(b as HTMLElement).dataset.pid!;
-        const idx=users.findIndex(x=>x.pid===pid); if(idx<0) return;
-        if(act==='edit'){
-          const nu=prompt('Новый ник', users[idx].nick); if(nu===null) return;
-          const nm=parseInt(prompt('MMR', String(users[idx].mmr))||String(users[idx].mmr))||users[idx].mmr;
-          users[idx].nick=nu.trim()||users[idx].nick; users[idx].mmr=nm;
-          if(pid===meta.pid){ meta.nick=users[idx].nick; meta.mmr=nm; metaSave(); }
-          saveAdminUsers(users); render(); showToast('Сохранено');
-        } else if(act==='give'){
-          const sh=parseInt(prompt('Выдать монеты', '500')||'0')||0;
-          const ge=parseInt(prompt('Выдать 💎', '50')||'0')||0;
-          users[idx].shards+=sh; users[idx].gems+=ge;
-          if(pid===meta.pid){ shardsAdd(sh); gemsAdd(ge); }
-          saveAdminUsers(users); render(); showToast('Выдано 🪙'+sh+' 💎'+ge);
-        } else if(act==='ban'){
-          users[idx].banned=!users[idx].banned;
-          saveAdminUsers(users); render(); showToast(users[idx].banned?'Забанен':'Разбанен');
-        } else if(act==='del'){
-          if(!confirm('Удалить '+users[idx].nick+'?')) return;
-          if(pid===meta.pid){ alert('Свой аккаунт удалить нельзя — очисти localStorage'); return; }
-          users.splice(idx,1); saveAdminUsers(users); render(); showToast('Удалён');
+    /* v3.15: счётчики серверных игроков обновляются вместе с таблицей (fetch асинхронный) */
+    const noteEl = host.querySelector('#admSrvNote') as HTMLElement | null;
+    if (noteEl) noteEl.textContent = adminSrvErr === '' ? `🌐 сервер: ${(adminSrvUsers ?? []).length} игроков · онлайн ${(adminSrvUsers ?? []).filter(u => u.status !== 'offline').length}` :
+      adminSrvErr === 'no-key' ? '🌐 сервер: введите админ-ключ во вкладке «Система»' :
+      adminSrvErr === 'offline' ? '🌐 сервер недоступен (npm run server:meta)' : `🌐 сервер: ошибка ${adminSrvErr}`;
+    const totEl = host.querySelector('#admSrvTotal') as HTMLElement | null;
+    if (totEl) totEl.textContent = `Всего ${users.length + (adminSrvUsers ?? []).length} · онлайн ${(adminSrvUsers ?? []).filter(u => u.status !== 'offline').length + users.filter(u => u.online).length}`;
+    tbody.querySelectorAll('[data-act]').forEach(b => {
+      b.addEventListener('click', () => {
+        const act = (b as HTMLElement).dataset.act; const pid = (b as HTMLElement).dataset.pid!;
+        const idx = users.findIndex(x => x.pid === pid); if (idx < 0) return;
+        if (act === 'edit') {
+          const nu = prompt('Новый ник', users[idx].nick); if (nu === null) return;
+          const nm = parseInt(prompt('MMR', String(users[idx].mmr)) || String(users[idx].mmr)) || users[idx].mmr;
+          users[idx].nick = nu.trim() || users[idx].nick; users[idx].mmr = nm;
+          if (pid === meta.pid) { meta.nick = users[idx].nick; meta.mmr = nm; metaSave(); }
+          saveAdminUsers(users); admLog(`правка ${users[idx].nick}: MMR ${nm}`); render(); showToast('Сохранено');
+        } else if (act === 'give') {
+          const sh = parseInt(prompt('Выдать монеты', '500') || '0') || 0;
+          const ge = parseInt(prompt('Выдать 💎', '50') || '0') || 0;
+          const pk = parseInt(prompt('Выдать бустеров', '0') || '0') || 0;
+          users[idx].shards += sh; users[idx].gems += ge;
+          if (pid === meta.pid) { shardsAdd(sh); gemsAdd(ge); if (pk) { meta.freeOpens = (meta.freeOpens ?? 0) + pk; metaSave(); } }
+          saveAdminUsers(users); admLog(`выдача ${users[idx].nick}: 🪙${sh} 💎${ge} 🃏${pk}`); render(); showToast('Выдано 🪙' + sh + ' 💎' + ge + (pk ? ' 🃏' + pk : ''));
+        } else if (act === 'kick') {
+          users[idx].online = false; users[idx].lastSeenTs = Date.now(); users[idx].lastSeen = new Date().toISOString().slice(0, 10);
+          saveAdminUsers(users); admLog(`кик ${users[idx].nick}`); render(); showToast('⚡ ' + users[idx].nick + ' отключён');
+        } else if (act === 'ban') {
+          users[idx].banned = !users[idx].banned;
+          if (users[idx].banned) { users[idx].online = false; users[idx].lastSeenTs = Date.now(); }
+          saveAdminUsers(users); admLog(`${users[idx].banned ? 'бан' : 'разбан'} ${users[idx].nick}`); render(); showToast(users[idx].banned ? 'Забанен (и кикнут)' : 'Разбанен');
+        } else if (act === 'del') {
+          if (!confirm('Удалить ' + users[idx].nick + '?')) return;
+          admLog(`удаление ${users[idx].nick}`);
+          if (pid === meta.pid) { alert('Свой аккаунт удалить нельзя — очисти localStorage'); return; }
+          users.splice(idx, 1); saveAdminUsers(users); render(); showToast('Удалён');
+        }
+      });
+    });
+    tbody.querySelectorAll('[data-sact]').forEach(b => {
+      b.addEventListener('click', () => {
+        const act = (b as HTMLElement).dataset.sact; const login = (b as HTMLElement).dataset.login!;
+        const u = (adminSrvUsers ?? []).find(x => x.login === login); if (!u) return;
+        if (act === 'edit') {
+          const nu = prompt('Новый ник', u.nick); if (nu === null) return;
+          const nm = parseInt(prompt('MMR', String(u.mmr)) || String(u.mmr)) || u.mmr;
+          void adminSrvPost('/api/admin/adjust', { login, nick: nu.trim() || u.nick, mmr: nm }).then(ok => { showToast(ok ? 'Сохранено на сервере' : 'Ошибка сервера'); void adminSrvFetch().then(render); });
+        } else if (act === 'give') {
+          const sh = parseInt(prompt('Выдать монеты', '500') || '0') || 0;
+          const ge = parseInt(prompt('Выдать 💎', '50') || '0') || 0;
+          const pk = parseInt(prompt('Выдать бустеров', '0') || '0') || 0;
+          void adminSrvPost('/api/admin/adjust', { login, shards: u.shards + sh, gems: u.gems + ge, freeOpens: pk ? u.freeOpens ?? 0 + pk : undefined }).then(ok => {
+            admLog(`сервер: выдача ${u.nick} 🪙${sh} 💎${ge}`); showToast(ok ? `Выдано ${u.nick}: 🪙${sh} 💎${ge}` : 'Ошибка сервера'); void adminSrvFetch().then(render);
+          });
+        } else if (act === 'kick') {
+          void adminSrvPost('/api/admin/kick', { login }).then(ok => { admLog(`сервер: кик ${u.nick}`); showToast(ok ? '⚡ ' + u.nick + ' отключён от сервера' : 'Ошибка сервера'); void adminSrvFetch().then(render); });
+        } else if (act === 'ban') {
+          void adminSrvPost('/api/admin/adjust', { login, banned: !u.banned }).then(ok => { admLog(`сервер: ${u.banned ? 'разбан' : 'бан'} ${u.nick}`); showToast(ok ? (u.banned ? 'Разбанен' : 'Забанен и кикнут') : 'Ошибка сервера'); void adminSrvFetch().then(render); });
         }
       });
     });
   };
   search.addEventListener('input', render);
   filter.addEventListener('change', render);
-  host.querySelector('#admUserAdd')?.addEventListener('click', ()=>{
-    const nick=prompt('Ник нового игрока','NewPlayer');
-    if(!nick) return;
-    users.push({ pid: `ec-`+Math.random().toString(36).slice(2,7), nick: nick.trim(), avatarFac: 'Aurites', frame:'bronze', level:1, mmr:1000, wins:0, losses:0, shards:1200, gems:100, banned:false, lastSeen: new Date().toISOString().slice(0,10) });
+  host.querySelector('#admUserRefresh')?.addEventListener('click', () => { void adminSrvFetch().then(() => { render(); showToast('Список обновлён'); }); });
+  host.querySelector('#admUserGiveAll')?.addEventListener('click', () => {
+    const on = users.filter(u => u.online);
+    on.forEach(u => { u.shards += 500; if (u.pid === meta.pid) shardsAdd(500); });
+    saveAdminUsers(users);
+    void Promise.all((adminSrvUsers ?? []).filter(u => u.status !== 'offline').map(u => adminSrvPost('/api/admin/adjust', { login: u.login, shards: u.shards + 500 })));
+    admLog(`массовая выдача +500 🪙 (${on.length} локально + серверные онлайн)`); render(); showToast('🎁 +500 🪙 всем онлайн');
+  });
+  host.querySelector('#admUserAdd')?.addEventListener('click', () => {
+    const nick = prompt('Ник нового игрока', 'NewPlayer');
+    if (!nick) return;
+    users.push({ pid: `ec-` + Math.random().toString(36).slice(2, 7), nick: nick.trim(), avatarFac: 'Aurites', frame: 'bronze', level: 1, mmr: 1000, wins: 0, losses: 0, shards: 1200, gems: 100, banned: false, lastSeen: new Date().toISOString().slice(0, 10), online: false, lastSeenTs: Date.now() });
     saveAdminUsers(users); render(); showToast('Игрок создан');
   });
-  host.querySelector('#admUserExport')?.addEventListener('click', ()=>{
-    const csv = 'pid,nick,mmr,level,wins,losses,shards,gems,banned\n' + users.map(u=>`${u.pid},${u.nick},${u.mmr},${u.level},${u.wins},${u.losses},${u.shards},${u.gems},${u.banned}`).join('\n');
-    const blob = new Blob([csv], {type:'text/csv'});
-    const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='users.csv'; a.click(); URL.revokeObjectURL(a.href);
+  host.querySelector('#admUserExport')?.addEventListener('click', () => {
+    const rows = (adminSrvUsers ?? []).map(u => `${u.login},${u.nick},${u.mmr},${u.level},${u.wins},${u.losses},${u.shards},${u.gems},${u.banned},server,${u.status}`).concat(
+      users.map(u => `${u.pid},${u.nick},${u.mmr},${u.level},${u.wins},${u.losses},${u.shards},${u.gems},${u.banned},local,${u.online ? 'online' : 'offline'}`));
+    const csv = 'pid,nick,mmr,level,wins,losses,shards,gems,banned,source,status\n' + rows.join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'users.csv'; a.click(); URL.revokeObjectURL(a.href);
   });
+  window.clearInterval(adminSrvTimer);
+  adminSrvTimer = window.setInterval(() => { if (adminTab === 'users') void adminSrvFetch().then(render); }, 12000);
+  void adminSrvFetch().then(render);
   render();
 }
 function renderAdminEconomy(host:HTMLElement): void {
@@ -5565,6 +6556,11 @@ function renderAdminSystem(host:HTMLElement): void {
       <div style="font-size:.62rem;color:#8b93ab;margin-top:.4rem">Клиентские настройки в ec_settings_v1</div>
     </div>
   </div>
+  <div class="admCard" style="margin-top:.6rem"><h4>🌐 Сервер: реальные игроки</h4>
+    <div style="font-size:.72rem;color:#cbb98a">Админ-ключ meta-сервера (env ADMIN_KEY, по умолчанию <b style="color:#ffe9b0">echo-admin</b>). С ключом вкладка «Игроки» показывает реальных зарегистрированных игроков и их онлайн-статус, а правки уходят на сервер.</div>
+    <div class="admField" style="margin-top:.4rem"><label>Ключ</label><input id="admSrvKey" placeholder="echo-admin" value="${esc(adminKeyGet())}"><button class="btn" id="admSrvKeySave">Сохранить</button><button class="btn" id="admSrvPing">Проверить</button></div>
+    <div id="admSrvPingLog" style="font-size:.66rem;color:#8b93ab;margin-top:.3rem">—</div>
+  </div>
   <div class="admCard" style="margin-top:.6rem"><h4>🔐 Безопасность</h4><div style="font-size:.72rem;color:#cbb98a">Пароль прототипа admin хранится только в браузере. Для прода: <code style="background:rgba(0,0,0,.3);padding:.1rem .3rem;border-radius:4px">POST /api/admin/login → JWT role:admin</code> + проверка Authorization: Bearer на /api/admin/*.</div></div>`;
   host.querySelector('#admSysExport')?.addEventListener('click', ()=>{
     const data = { meta, shards: shardsGet(), gems: gemsGet(), owned: Array.from(getOwnedMap().entries()), decks: loadCustomDecks() };
@@ -5579,6 +6575,20 @@ function renderAdminSystem(host:HTMLElement): void {
     if(!confirm('Очистить ВСЁ (localStorage ec_*)?')) return;
     Object.keys(window.localStorage).filter(k=>k.startsWith('ec_')).forEach(k=>window.localStorage.removeItem(k));
     location.reload();
+  });
+  host.querySelector('#admSrvKeySave')?.addEventListener('click', ()=>{
+    const v=(host.querySelector('#admSrvKey') as HTMLInputElement).value.trim();
+    try{ window.localStorage.setItem('ec_admin_key_v1', v); }catch{ /* private */ }
+    showToast(v?'Ключ сохранён':'Ключ очищен');
+  });
+  host.querySelector('#admSrvPing')?.addEventListener('click', async ()=>{
+    const log=host.querySelector('#admSrvPingLog') as HTMLElement;
+    const key=(host.querySelector('#admSrvKey') as HTMLInputElement).value.trim()||adminKeyGet();
+    try{
+      const r=await window.fetch(`${META_API()}/api/admin/users`,{headers:{'x-admin-key':key}});
+      const j=await r.json().catch(()=>({})) as {users?:unknown[]; error?:string};
+      log.textContent=r.ok?`✅ сервер на связи: ${(j.users??[]).length} игроков`:`❌ ${r.status}: ${j.error??''}`;
+    }catch{ log.textContent='❌ сервер недоступен (запусти npm run server:meta, порт 8081)'; }
   });
   host.querySelector('#admSysBgTest')?.addEventListener('click', async ()=>{
     const log=host.querySelector('#admSysBgLog') as HTMLElement;
@@ -5622,7 +6632,7 @@ document.addEventListener('keydown', e=>{
   if((e.ctrlKey||e.metaKey) && e.shiftKey && e.key.toLowerCase()==='a'){ e.preventDefault(); openAdmin(); }
 });
 
-/* ---- Гейт «В БОЙ»: минимум 60 карт, без верхнего лимита, до 4 копий любой карты ---- */
+/* ---- Гейт «В БОЙ»: минимум 30 карт, без верхнего лимита, до 4 копий любой карты ---- */
 function updatePlayGate(): void {
   const b = btn('btnPlay');
   const id = sel('deckPick').value;
@@ -5692,20 +6702,24 @@ function applyBattleBg(playerFaction: Faction = picked): void {
   if (!backdrop) return;
   const tableSkin = String(meta.tableSkin || 'classic');
   const tableUrl = [`/cosm/tables/${encodeURIComponent(tableSkin)}`];
-  const imgUrls = [...tableUrl, `/bg/battle/battle_${fac}`, `/bg/battle/battle`, `img/board_arena.png`];
+  const imgUrls = [...tableUrl, `/bg/battle/battle_${fac}`, `/bg/battle/battle`, `img/board_arena.jpg`];
   const vidUrls = [`/bg/animated/battle/battle_${fac}`, `/bg/animated/battle/battle`];
   const loadImg = (idx:number) => {
     if (idx >= imgUrls.length) {
       if (imgEl) imgEl.classList.remove('show');
       backdrop.classList.remove('hasCustomBg');
+      backdrop.classList.remove('hasTableArt');
       loadVid(0);
       return;
     }
     const url = imgUrls[idx];
     const probe = new Image();
     probe.onload = () => {
-      if (imgEl) { imgEl.src = url; imgEl.classList.add('show'); (imgEl.style as any).opacity='0.92'; }
+      if (imgEl) { imgEl.src = url; imgEl.classList.add('show'); (imgEl.style as any).opacity='1'; }   /* v3.17.6: арт чисто, без затемнения */
       backdrop.classList.add('hasCustomBg');
+      /* v3.17.4: помечаем, что загружен АВТОРСКИЙ арт стола (/cosm/tables/<id>) —
+         для него тонировка скина мягче; для встроенного фона — полный образ скина */
+      backdrop.classList.toggle('hasTableArt', url.startsWith('/cosm/tables/'));
       if (vidEl) { vidEl.classList.remove('show'); vidEl.style.display='none'; vidEl.pause(); }
     };
     probe.onerror = () => loadImg(idx+1);
@@ -5729,10 +6743,13 @@ function applyBattleBg(playerFaction: Faction = picked): void {
 }
 btn('btnPlay').addEventListener('click', () => {
   audioUnlock(); musicStart(); Sfx.uiClick();
+  if (battle.net) { battle.net.close(); battle.net = null; }
+  battle.lastWasNet = false;
   applyBattleBg(picked);
   battle.playerFaction = picked;
   battle.playerDeckId = sel('deckPick').value;
   const fromMenu = battle.launchMode === 'menu';
+  if (battle.launchMode !== 'event') battle.eventId = null;
   if (fromMenu) {
     const ev = sel('enemyFaction').value;
     battle.enemyFaction = ev === '__random'
@@ -5741,6 +6758,7 @@ btn('btnPlay').addEventListener('click', () => {
     battle.difficulty = parseFloat(sel('difficulty').value);
     battle.practice = !!(document.getElementById('chkPractice') as HTMLInputElement | null)?.checked;
     battle.friendFoe = null; battle.bossPower = null; battle.bossHp = 0; battle.tutLesson = 0; battle.campNode = null;
+    battle.eventId = null;
   }
   battle.launchMode = 'menu';
   void (async () => {
@@ -5776,6 +6794,40 @@ document.addEventListener('contextmenu', ev => {
 btn('btnSkip').addEventListener('click', () => battle.endTurnNow());
 btn('btnAutoBattle').addEventListener('click', () => battle.closeCombatWindow());
 btn('btnSkipCombat').addEventListener('click', () => battle.skipCombat());
+btn('btnAttackAll').addEventListener('click', () => battle.startMassAttack());   // v3.17: «Атака всеми»
+
+/* v3.17: watchdog «тёмных кадров» — если в бою неожиданно появляется полноэкранное
+   тёмное перекрытие (кандидат на «чёрный экран»), пишем в журнал, чтобы причину
+   удалось найти по логам (console + localStorage «ec_darklog»). */
+window.setInterval(() => {
+  const b = $('battle');
+  if (!b || b.classList.contains('hidden')) return;
+  const W = window.innerWidth, H = window.innerHeight;
+  const known = new Set(['backdrop', 'tableSurface', 'mulligan', 'gameover', 'cardModal', 'graveModal',
+    'journalModal', 'replayModal', 'factionModal', 'levelUpFx', 'boosterModal', 'cosmPreview',
+    'upgradeModal', 'profileModal', 'adminModal', 'topbar', 'toast', 'screenFlash', 'vignettePulse']);
+  for (const elx of Array.from(document.body.children) as HTMLElement[]) {
+    if (known.has(elx.id)) continue;
+    const st = getComputedStyle(elx);
+    if (st.display === 'none' || st.visibility === 'hidden' || parseFloat(st.opacity) < 0.45) continue;
+    const r = elx.getBoundingClientRect();
+    if (r.width < W * 0.55 || r.height < H * 0.55) continue;
+    const m = st.backgroundColor.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/);
+    if (!m) continue;
+    const a = m[4] === undefined ? 1 : +m[4];
+    if (a < 0.45) continue;   // прозрачный слой (canvas/vfx) — не «тёмный экран»
+    const lum = (0.2125 * +m[1] + 0.7152 * +m[2] + 0.0722 * +m[3]) * a;
+    if (lum > 55) continue;
+    const entry = { t: new Date().toISOString(), el: elx.id || '.' + String(elx.className).split(' ')[0] || '(без id)', z: st.zIndex, lum: Math.round(lum) };
+    console.warn('[ec-v3.17] подозрительное тёмное перекрытие в бою:', entry);
+    try {
+      const arr = JSON.parse(localStorage.getItem('ec_darklog') ?? '[]');
+      arr.push(entry);
+      localStorage.setItem('ec_darklog', JSON.stringify(arr.slice(-12)));
+      if (arr.length === 1) pushLog('Диагностика: в бою появилось нештатное тёмное перекрытие — записано в журнал (F12/Console)', 'sys');
+    } catch { /* noop */ }
+  }
+}, 1000);
 btn('btnBoosters').addEventListener('click', () => openBoosterPanel(btn('btnBoosters')));
 btn('btnProfile').addEventListener('click', () => openProfile());
 btn('btnProfileClose').addEventListener('click', () => navigateApp('back'));
@@ -5850,10 +6902,14 @@ const FRAME_DEFS: Array<{ id: string; ru: string; req: () => boolean }> = [
   { id: 'crystal', ru: 'Кристалл · пропуск 45 ур.', req: () => (meta.bpClaimedP ?? []).includes(45) },
   { id: 'mythic', ru: 'Мифический · все боссы', req: () => FACTION_IDS.every(f => meta.campaign[f]) },
 ];
-const PREMIUM_AVATARS: Record<string, { ru: string; glyph: string; req: () => boolean }> = {
-  arch: { ru: 'Архонт', glyph: '✧', req: () => (meta.avatarsOwned ?? []).includes('arch') },
-  lich: { ru: 'Лич', glyph: '💀', req: () => !!meta.ach.packs10 },
-  lunar: { ru: 'Лунный Архонт', glyph: '☾', req: () => (meta.avatarsOwned ?? []).includes('lunar') },   // пропуск 40 ур. (премиум)
+type CosmBonus = { xp?: number; sh?: number; bp?: number };
+const PREMIUM_AVATARS: Record<string, { ru: string; glyph: string; req: () => boolean; bonus?: CosmBonus }> = {
+  arch: { ru: 'Архонт', glyph: '✧', req: () => (meta.avatarsOwned ?? []).includes('arch'), bonus: { xp: 3 } },
+  lich: { ru: 'Лич', glyph: '💀', req: () => !!meta.ach.packs10, bonus: { sh: 3 } },
+  lunar: { ru: 'Лунный Архонт', glyph: '☾', req: () => (meta.avatarsOwned ?? []).includes('lunar'), bonus: { bp: 4 } },   // пропуск 40 ур. (премиум)
+  dragon: { ru: 'Дракон Цитадели', glyph: '🐉', req: () => (meta.avatarsOwned ?? []).includes('dragon'), bonus: { xp: 5 } },
+  phoenix: { ru: 'Феникс', glyph: '🔥', req: () => (meta.avatarsOwned ?? []).includes('phoenix'), bonus: { sh: 4 } },
+  runekeep: { ru: 'Хранитель Рун', glyph: '❈', req: () => (meta.avatarsOwned ?? []).includes('runekeep'), bonus: { bp: 5 } },
 };
 function avaGlyph(): string {
   const pa = PREMIUM_AVATARS[meta.avatarFac];
@@ -6009,7 +7065,7 @@ function openProfile(): void {
     <section class="profileHero">
       <div class="prfHead">
         <div class="fava avaBig frame-${meta.frame || 'bronze'}">${avaGlyph()}${
-          PREMIUM_AVATARS[meta.avatarFac] ? '' : `<img src="/heroes/${encodeURIComponent(meta.avatarFac)}" alt="" onerror="this.remove()">`}</div>
+          `<img src="/heroes/${encodeURIComponent(meta.avatarFac)}" alt="" onerror="this.remove()">`}</div>
         <div class="profileIdentity">
           <div class="profileNameRow">
             <input id="nickInput" maxlength="16" value="${esc(meta.nick ?? 'Гость')}" aria-label="Никнейм" title="3–16 символов; уникальность проверяется на сервере">
@@ -6045,29 +7101,20 @@ function openProfile(): void {
     for (const m of t) for (const id of m.stuck) stuckC.set(id, (stuckC.get(id) ?? 0) + 1);
     const topStuck = [...stuckC.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3)
       .map(([id, n]) => `${db.get(id)?.name ?? id} ×${n}`).join(', ') || '—';
-    const qs = meta.quests.map(q => {
-      const done = q.prog >= q.goal;
-      return `<div class="setRow profileQuestRow" style="margin:0">
-        <div class="profileQuestText">${esc(QUEST_RU[q.id]?.(q) ?? q.id)} — ${q.prog}/${q.goal}${done ? '<small class="questInlineReset questReset" data-quest-reset="daily" data-reset-prefix="Сброс через">—</small>' : ''}</div>
-        <button class="btn qClaim" data-q="${esc(q.id)}" ${done && !q.claimed ? '' : 'disabled'}>
-          ${q.claimed ? 'Получено' : `🪙${DAILY_REWARD[q.id] ?? 0}`}</button></div>`;
-    }).join('');
-    const wqs = (meta.wquests ?? []).map(q => {
-      const done = q.prog >= q.goal;
-      return `<div class="setRow profileQuestRow" style="margin:0">
-        <div class="profileQuestText profileWeeklyQuestText">${esc(WQUEST_RU[q.id] ?? q.id)} — ${q.prog}/${q.goal}${done ? '<small class="questInlineReset questReset" data-quest-reset="weekly" data-reset-prefix="Сброс через">—</small>' : ''}</div>
-        <button class="btn wqClaim" data-q="${esc(q.id)}" ${done && !q.claimed ? '' : 'disabled'}>
-          ${q.claimed ? 'Получено' : `🪙${WEEK_REWARD[q.id] ?? 0} +250 BP`}</button></div>`;
-    }).join('');
     const achs = ACH_DEFS.map(a => {
       const [p, g] = a.prog();
       return `<div class="jl ${meta.ach[a.id] ? 'you' : ''}" title="Награда: ${a.rewardRu}">
       <img class="achIco" src="img/ico_ach_${a.ico}.png" alt="" onerror="this.remove()">${meta.ach[a.id] ? '🏆' : '🔒'} ${a.ru} — <b>${p}/${g}</b></div>`;
     }).join('');
-    const avas = FACTION_IDS.map(f =>
-      `<button class="btn avaBtn${meta.avatarFac === f ? ' sel' : ''}" data-f="${f}" title="${FACTION_RU[f as Faction]}">${FACTION_SIGIL[f]}</button>`).join('')
-      + Object.entries(PREMIUM_AVATARS).map(([id, a]) =>
-        `<button class="btn avaBtn${meta.avatarFac === id ? ' sel' : ''}" data-f="${id}" ${a.req() ? '' : 'disabled'} title="${a.ru}">${a.req() ? a.glyph : '🔒'}</button>`).join('');
+    // v3: маленькие круглые аватары (арт героя из art_raw/heroes/<id>/, при отсутствии — сигил)
+    const avaCircle = (id: string, title: string, glyph: string, locked: boolean): string =>
+      `<button type="button" class="avaCircle${meta.avatarFac === id ? ' sel' : ''}${locked ? ' locked' : ''}" data-f="${id}" ${locked ? 'disabled' : ''}
+        title="${esc(title)}${locked ? ' · 🔒 закрыт' : ''}" aria-label="Аватар: ${esc(title)}" aria-pressed="${meta.avatarFac === id}">
+        <span class="avaCircleGlyph" aria-hidden="true">${locked ? '🔒' : glyph}</span>
+        <img src="/heroes/${encodeURIComponent(id)}" alt="" loading="lazy" onload="this.parentElement.classList.add('hasImg')" onerror="this.remove()">
+      </button>`;
+    const avas = FACTION_IDS.map(f => avaCircle(f, FACTION_RU[f as Faction], FACTION_SIGIL[f], false)).join('')
+      + Object.entries(PREMIUM_AVATARS).map(([id, a]) => avaCircle(id, a.ru, a.glyph, !a.req())).join('');
     const frames = FRAME_DEFS.map(fr =>
       `<button class="btn frameBtn${meta.frame === fr.id ? ' sel' : ''}" data-fr="${fr.id}" title="${fr.ru}">${fr.req() ? '◆' : '🔒'} ${fr.ru}</button>`).join('');
     bodyHtml = `
@@ -6085,12 +7132,19 @@ function openProfile(): void {
         </section>
         <section class="profilePanel profileCustomizationPanel">
           <h3 class="profilePanelTitle">Персонализация</h3>
-          <h4 class="shopH">Аватар · 5 фракций + премиум</h4><div class="ptabs profileChoiceGrid">${avas}</div>
+          <h4 class="shopH">Аватар · 5 фракций + премиум</h4><div class="avaCircleRow">${avas}</div>
           <h4 class="shopH">Рамка · награды достижений</h4><div class="ptabs profileChoiceGrid">${frames}</div>
         </section>
       </div>
-      <section class="profilePanel profileTasksPanel"><h3 class="profilePanelTitle">Задания дня</h3>${qs}</section>
-      <section class="profilePanel profileTasksPanel"><h3 class="profilePanelTitle">Задания недели</h3>${wqs}</section>
+      <section class="questDashboard profileQuestsCompact" aria-label="Задания">
+        <header class="questDashboardHeader"><h2>Задания</h2></header>
+        <div class="questDashboardGroups">
+          <section class="questGroup"><header class="questGroupHeader"><h3>Ежедневные</h3><span class="questReset" data-quest-reset="daily" data-reset-prefix="Сброс через">—</span></header>
+            <div class="questList" role="list">${meta.quests.map(q => renderQuestTask(q, 'daily')).join('')}</div></section>
+          <section class="questGroup"><header class="questGroupHeader"><h3>Еженедельные</h3><span class="questReset" data-quest-reset="weekly" data-reset-prefix="Сброс через">—</span></header>
+            <div class="questList" role="list">${(meta.wquests ?? []).map(q => renderQuestTask(q, 'weekly')).join('')}</div></section>
+        </div>
+      </section>
       <section class="profilePanel profileTasksPanel"><h3 class="profilePanelTitle">Достижения</h3>${achs}</section>`;
   }
 
@@ -6141,58 +7195,47 @@ function openProfile(): void {
     `;
   }
   if (profTab === 'cosm') {
-    const sleeves = [
-      { id:'classic', name:'Эхо-Цитадель', owned:true },
-      { id:'arena', name:'Арена', owned:true },
-      { id:'sky', name:'Небесные острова', owned:true },
-      { id:'arena2', name:'Арена Вита', owned:true },
-      { id:'stained', name:'Витраж', owned:true },
-      { id:'forest', name:'Лесной разведчик', owned:true },
-      { id:'mage', name:'Синий маг', owned:true },
-      { id:'locked1', name:'Космическое море', owned:false },
-      { id:'locked2', name:'Горный дракон', owned:false },
-      { id:'lotus', name:'Чёрный лотос', owned:false },
-      { id:'locked3', name:'Болотный ритуал', owned:false },
-      { id:'locked4', name:'Морозный ветер', owned:false },
-    ];
-    const grid = sleeves.map(s=> `
-      <div class="sleeveCard ${meta.backEq===s.id?'sel':''}" data-sleeve="${s.id}" title="${s.name}">
-        <img src="/art/${s.id==='lotus'? 'Neutral/lotus' : 'Neutral/neu_01'}.png" alt="" loading="lazy" onerror="this.style.display='none'">
-        ${!s.owned? '<div class="lock">🔒</div>':''}
-        <div class="sleeveName">${s.name}</div>
-      </div>
-    `).join('');
+    // v3: вкладка «Косметика» — реальные рубашки из магазина/пропуска (art_raw/cosm/backs/<id>.png),
+    // без захардкоженных артов карт. Карточка-превью — рубашка в пропорции карты.
+    const eqBack = meta.backEq || 'classic';
+    const backTile = (id: string, b: { ru: string; price: number; bpOnly?: boolean; bonus?: CosmBonus }): string => {
+      const own = (meta.backsOwned ?? []).includes(id) || id === 'classic';
+      const how = own ? (eqBack === id ? 'Выбрана' : 'Выбрать') : b.bpOnly ? 'Пропуск' : `🪙${b.price}`;
+      return `<button type="button" class="cosmBackTile${eqBack === id ? ' sel' : ''}${own ? '' : ' locked'}" data-sleeve="${id}" ${own ? '' : 'data-locked="1"'} title="${esc(b.ru)}">
+        <span class="cosmBackCard cardback back-${id}">${cosmImg('backs', id, 'cbArt')}${own ? '' : '<span class="lock">🔒</span>'}</span>
+        <span class="cosmBackName">${esc(b.ru)}${bonusTag(b.bonus)}</span><span class="cosmBackState">${how}</span></button>`;
+    };
+    const grid = Object.entries(SHOP_BACKS).map(([id, b]) => backTile(id, b)).join('');
+    const eqInfo = SHOP_BACKS[eqBack] ?? SHOP_BACKS.classic;
+    const skinChip = (kind: 'table' | 'rune', id: string, ru: string, own: boolean, on: boolean, b?: CosmBonus): string =>
+      `<button type="button" class="cosmSkinChip cosmPrev${on ? ' sel' : ''}${own ? '' : ' locked'}" data-kind="${kind}" data-id="${id}" title="${own ? 'Выбрать' : 'Предпросмотр'}">${own ? '' : '🔒 '}${esc(ru)}${bonusTag(b)}</button>`;
+    const tables = Object.entries(TABLE_SKINS).map(([id, t]) => skinChip('table', id, t.ru, id === 'classic' || (meta.tablesOwned ?? []).includes(id), (meta.tableSkin ?? 'classic') === id, t.bonus)).join('');
+    const runes = Object.entries(RUNE_SKINS).map(([id, t]) => skinChip('rune', id, t.ru, id === 'classic' || (meta.runesOwned ?? []).includes(id), (meta.runeSkin ?? 'classic') === id, t.bonus)).join('');
     const borderlessProgress = Math.min(BORDERLESS_EVENT_WINS, meta.borderlessEventWins ?? 0);
     const borderlessPanel = `<section class="borderlessProfilePanel">
       <div class="borderlessProfileHead"><div><span class="profileEyebrow">ТЕ ЖЕ КАРТЫ · ТОЛЬКО БЕЗ РАМОК</span>
         <h3>Borderless <b>${ownedBorderless}<i> / ${ALL_CARDS.length}</i></b></h3></div>
         <span class="borderlessGem" aria-hidden="true">◇</span></div>
       <div class="profileMeter borderlessMeter"><i style="width:${ownedBorderless / ALL_CARDS.length * 100}%"></i></div>
-      <p>Ещё ${ALL_CARDS.length} коллекционных вариантов: те же названия и арт, но без стандартной рамки. Правила и характеристики не меняются. Получение: событие или шанс <b>0,1% на бустер</b>.</p>
+      <p>Те же названия и арт, но без стандартной рамки. Правила не меняются. Получение: событие или шанс <b>0,1% на бустер</b>.</p>
       <div class="borderlessEventMini">Событие «Галерея без границ» · рейтинговые победы: <b>${borderlessProgress}/${BORDERLESS_EVENT_WINS}</b></div>
       <button type="button" class="btn borderlessBrowse" id="btnProfileBorderlessCollection">Открыть Borderless в коллекции →</button>
     </section>`;
     bodyHtml = borderlessPanel + `
-      <div style="display:flex;gap:1rem;align-items:flex-start;flex-wrap:wrap">
-        <div class="sleeveGrid">${grid}</div>
-        <div class="sleevePreview">
-          <img src="/art/Neutral/neu_01.png" alt="Black Lotus" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:.92" onerror="this.style.display='none'">
-          <div style="position:absolute;inset:0;background:radial-gradient(60% 50% at 50% 50%,rgba(120,40,255,.18),transparent 70%)"></div>
-          <div style="position:relative;z-index:1;text-align:center;color:#ffe9b0;font-family:Philosopher,serif">
-            <div style="font-size:2.6rem">🌸</div>
-            <div style="font-size:.78rem">Black Lotus</div>
-            <div style="font-size:.62rem;color:#cbb98a">Премиум стиль — из пропуска</div>
-          </div>
-          <div style="position:absolute;right:8px;bottom:8px;display:flex;gap:6px;z-index:1">
-            <span style="width:22px;height:22px;border-radius:50%;background:radial-gradient(circle at 30% 30%,#3fd6c8,#1a5a56);border:1px solid #1a5a56"></span>
-            <span style="width:22px;height:22px;border-radius:50%;background:radial-gradient(circle at 30% 30%,#ffd87a,#8a5a12);border:1px solid #8a5a12"></span>
-            <span style="width:22px;height:22px;border-radius:50%;background:radial-gradient(circle at 30% 30%,#ff7a18,#a33a0a);border:1px solid #a33a0a"></span>
-          </div>
+      <div class="cosmProfileLayout">
+        <div class="cosmProfileMain">
+          <h4 class="cosmProfileH">Рубашки карт</h4>
+          <div class="cosmBackGrid">${grid}</div>
+          <h4 class="cosmProfileH">Стол</h4><div class="cosmSkinRow">${tables}</div>
+          <h4 class="cosmProfileH">Анимация рун</h4><div class="cosmSkinRow">${runes}</div>
         </div>
-      </div>
-      <div class="jl" style="opacity:.65">Стили карт — рубашки и скины. 🔒 открываются в магазине и пропуске. Клик по стилю — предпросмотр (как на скрине 7).</div>
-      <div style="display:flex;justify-content:flex-end;margin-top:.6rem"><button class="btn" id="btnSleeveDefault" style="background:linear-gradient(180deg,#ff9c2a,#e05a0a);color:#fff;border:none;border-radius:999px;padding:.45rem 1.1rem">Set Default</button></div>
-    `;
+        <aside class="cosmProfilePreview" aria-label="Текущая рубашка">
+          <div class="cosmBackCard big cardback back-${eqBack}">${cosmImg('backs', eqBack, 'cbArt')}</div>
+          <div class="cosmPrevName">${esc(eqInfo.ru)}</div>
+          <div class="cosmPrevSub">Рубашка в бою и при открытии бустеров</div>
+          <button class="btn" id="btnSleeveDefault">Сбросить на классику</button>
+        </aside>
+      </div>`;
   }
 
   if (profTab === 'facs') {
@@ -6253,7 +7296,8 @@ document.addEventListener('click', ev=>{
     if (style) { style.value = 'borderless'; style.dispatchEvent(new Event('change', { bubbles: true })); }
     return;
   }
-  const sc = target?.closest?.('.sleeveCard') as HTMLElement | null;
+  const sc = target?.closest?.('.sleeveCard, .cosmBackTile') as HTMLElement | null;
+  if (sc?.dataset.locked) { showToast('🔒 Рубашка открывается в магазине или боевом пропуске'); return; }
   if (sc?.dataset.sleeve && !sc.querySelector('.lock')) {
     Sfx.uiClick();
     meta.backEq = sc.dataset.sleeve;
@@ -6265,7 +7309,11 @@ document.addEventListener('click', ev=>{
   }
   if ((ev.target as HTMLElement | null)?.id === 'btnSleeveDefault') {
     Sfx.uiClick();
-    showToast('Стиль по умолчанию сохранён');
+    meta.backEq = 'classic'; metaSave();
+    document.body.dataset.back = 'classic';
+    void applyCosmArt();
+    openProfile();
+    showToast('Рубашка сброшена на классику');
   }
 });
 
@@ -6304,29 +7352,66 @@ document.addEventListener('click', ev => {
   claimQuestReward('daily', t.dataset.q);
 });
 
-const SHOP_BACKS: Record<string, { ru: string; price: number; bpOnly?: boolean }> = {
+const SHOP_BACKS: Record<string, { ru: string; price: number; bpOnly?: boolean; bonus?: CosmBonus }> = {
   classic: { ru: 'Классика (золото)', price: 0 },
-  runes: { ru: 'Руны Citadeli', price: 300 },
-  ember: { ru: 'Угли Пиромантов', price: 500 },
-  abyss: { ru: 'Бездна', price: 0, bpOnly: true },
-  verdant: { ru: 'Вердант', price: 0, bpOnly: true },
+  runes: { ru: 'Руны Цитадели', price: ECONOMY.backs.runes },
+  ember: { ru: 'Угли Пиромантов', price: ECONOMY.backs.ember, bonus: { sh: 2 } },
+  abyss: { ru: 'Бездна', price: 0, bpOnly: true, bonus: { bp: 3 } },
+  verdant: { ru: 'Вердант', price: 0, bpOnly: true, bonus: { xp: 2 } },
+  storm: { ru: 'Штормовой узор', price: 1200, bonus: { sh: 2 } },
+  frost: { ru: 'Ледяная вязь', price: 1500, bonus: { xp: 2 } },
+  gilded: { ru: 'Золочёный орнамент', price: 800, bonus: { sh: 3 } },
+  shadow: { ru: 'Покров теней', price: 1000, bonus: { xp: 3 } },
 };
-const TABLE_SKINS: Record<string, { ru: string; price: number; cur: 'sh' | 'gem' }> = {
+const TABLE_SKINS: Record<string, { ru: string; price: number; cur: 'sh' | 'gem'; bonus?: CosmBonus }> = {
   classic: { ru: 'Классический стол', price: 0, cur: 'sh' },
-  terra: { ru: 'Стол Терраморфов (мох и камень)', price: 600, cur: 'sh' },
-  necro: { ru: 'Стол Некрусов (кость и тень)', price: 200, cur: 'gem' },
+  terra: { ru: 'Стол Терраморфов (мох и камень)', ...ECONOMY.tables.terra, bonus: { sh: 2 } },
+  necro: { ru: 'Стол Некрусов (кость и тень)', ...ECONOMY.tables.necro, bonus: { bp: 3 } },
+  tide: { ru: 'Приливный стол', price: 900, cur: 'gem', bonus: { bp: 4 } },
+  ash: { ru: 'Пепелище', price: 1800, cur: 'sh', bonus: { sh: 2 } },
+  grove: { ru: 'Стол Рощи', price: 2000, cur: 'sh', bonus: { xp: 2 } },
+  aurum: { ru: 'Аурум-престиж', price: 1400, cur: 'gem', bonus: { xp: 3, sh: 2 } },
 };
-const RUNE_SKINS: Record<string, { ru: string; price: number; cur: 'sh' | 'gem' }> = {
+const RUNE_SKINS: Record<string, { ru: string; price: number; cur: 'sh' | 'gem'; bonus?: CosmBonus }> = {
   classic: { ru: 'Классические руны', price: 0, cur: 'sh' },
-  flame: { ru: 'Руны «Пламя» (анимация)', price: 150, cur: 'gem' },
+  flame: { ru: 'Руны «Пламя» (анимация)', ...ECONOMY.runes.flame, bonus: { xp: 2 } },
+  storm: { ru: 'Руны «Шторм»', price: 900, cur: 'sh', bonus: { xp: 2 } },
+  frost: { ru: 'Руны «Лёд»', price: 900, cur: 'sh', bonus: { bp: 3 } },
+  nature: { ru: 'Руны «Природа»', price: 600, cur: 'gem', bonus: { sh: 2 } },
+  void: { ru: 'Руны «Бездна»', price: 900, cur: 'gem', bonus: { xp: 4 } },
 };
-const BUNDLES = FACTION_IDS.map(f => ({ fac: f, price: 400 }));
+const BUNDLES = FACTION_IDS.map(f => ({ fac: f, price: ECONOMY.factionBundle }));
+/* v3.11: тематические наборы (ключ-арты — art_raw/cosm/sets/<id>.png) */
+const SHOP_SETS: Array<{ id: string; ru: string; sub: string; price: number; cur: 'sh' | 'gem'; packs: number; coins: number; back?: string; table?: string; rune?: string; avatar?: string }> = [
+  { id: 'set-citadel', ru: 'Набор «Цитадель»', sub: '8 бустеров + 🪙500 + рубашка «Штормовой узор»', price: 1500, cur: 'gem', packs: 8, coins: 500, back: 'storm' },
+  { id: 'set-vanguard', ru: 'Набор «Авангард»', sub: '6 бустеров + стол «Пепелище»', price: 2500, cur: 'sh', packs: 6, coins: 0, table: 'ash' },
+  { id: 'set-mythic', ru: 'Мифический набор', sub: '3 мифических бустера + руны «Бездна»', price: 2800, cur: 'gem', packs: 3, coins: 0, rune: 'void' },
+  { id: 'set-heroes', ru: 'Набор Героев', sub: '6 бустеров + 🪙300 + аватар «Феникс» 🔥', price: 3200, cur: 'sh', packs: 6, coins: 300, avatar: 'phoenix' },
+];
+function bonusTag(b?: CosmBonus): string {
+  if (!b) return '';
+  const p: string[] = [];
+  if (b.xp) p.push(`+${b.xp}% XP`);
+  if (b.sh) p.push(`+${b.sh}% 🪙`);
+  if (b.bp) p.push(`+${b.bp}% BP`);
+  return p.length ? ` <span class="cosmBonus" title="Бонус надетой косметики">${p.join(' · ')}</span>` : '';
+}
+function cosmBonusTotal(): { xp: number; sh: number; bp: number } {
+  const t = { xp: 0, sh: 0, bp: 0 };
+  const add = (b?: CosmBonus): void => { if (b) { t.xp += b.xp || 0; t.sh += b.sh || 0; t.bp += b.bp || 0; } };
+  add(SHOP_BACKS[meta.backEq || 'classic']?.bonus);
+  add(TABLE_SKINS[meta.tableSkin || 'classic']?.bonus);
+  add(RUNE_SKINS[meta.runeSkin || 'classic']?.bonus);
+  const av = PREMIUM_AVATARS[meta.avatarFac as string];
+  if (av && av.req()) add(av.bonus);
+  return t;
+}
 let shopTab = 'boosters';
 
 /* v2.5.3: пользовательский арт косметики/наборов из art_raw/cosm/<kind>/ отдаётся как
    /cosm/<kind>/<id>. img кладётся поверх CSS-фолбэка; пока файла нет — 404 → onerror
    удаляет img, и остаётся градиент/сигил/веер (правило «никаких заглушек»). */
-function cosmImg(kind: 'backs' | 'tables' | 'runes' | 'offers' | 'bundles', id: string, cls: string): string {
+function cosmImg(kind: 'backs' | 'tables' | 'runes' | 'offers' | 'bundles' | 'sets', id: string, cls: string): string {
   return `<img class="${cls}" src="/cosm/${kind}/${id}?t=${Date.now()}" alt="" loading="lazy" onerror="this.remove()">`;
 }
 
@@ -6387,6 +7472,14 @@ function ofCard(artCls: string, artInner: string, name: string, sub: string, btn
     <div class="ofName">${name}</div><div class="ofSub">${sub}</div><div class="ofBuy">${btnHtml}</div></div>`;
 }
 const OF_FAN = '<span class="ofFan"><i></i><i></i><i></i></span>';
+// v3: как только PNG оффера загрузился — контейнер теряет подложку/рамку (чистый PNG-арт)
+document.addEventListener('load', ev => {
+  const img = ev.target as HTMLElement | null;
+  if (!(img instanceof HTMLImageElement)) return;
+  if (img.classList.contains('ofArtImg')) img.closest('.ofArt')?.classList.add('hasArt');
+  else if (img.classList.contains('boosterInvArt')) img.closest('.boosterInvVisual')?.classList.add('hasArt');
+  else if (img.classList.contains('packOfferArtImg')) { img.closest('.packVis')?.classList.add('hasArt'); img.closest('.packOfferArt')?.classList.add('hasPackArt'); }
+}, true);
 function openShop(): void {
   setAppRoute('store');
   $('menu').classList.add('hidden');
@@ -6402,14 +7495,8 @@ function openShop(): void {
   let h = `<div class="shTop"><div class="shTitle">${title}</div><div class="shWallet">${wallet}</div></div>`;
   if (shopTab === 'boosters') {
     // Packs витрина как на скрине MTG New Capenna — в тёплой палитре (5 карточек, два прайса)
-    type PackOffer = { id:string; ru:string; gem:number; gold:number; qty:number; kind:'pack'|'mythic'; hl?:boolean };
-    const PACK_OFFERS: PackOffer[] = [
-      { id:'p1',  ru:'1 Бустер',        gem:200,  gold:300,  qty:1,  kind:'pack' },
-      { id:'p15', ru:'15 Бустеров',     gem:3000, gold:3900, qty:15, kind:'pack', hl:true },
-      { id:'m1',  ru:'1 Мифический',    gem:260,  gold:400,  qty:1,  kind:'mythic' },
-      { id:'m10', ru:'10 Мифических',   gem:2600, gold:3600, qty:10, kind:'mythic' },
-      { id:'p1b', ru:'1 Бустер',        gem:200,  gold:300,  qty:1,  kind:'pack' },
-    ];
+    type PackOffer = { id:string; ru:string; gem:number; gold:number; qty:number; kind:'pack'|'mythic'; hl?:boolean; save?:number };
+    const PACK_OFFERS: PackOffer[] = Object.entries(ECONOMY.offers).map(([id, o]) => ({ id, ...o }));
     const packVisHtml = (kind:string, qty:number): string => {
       // art_raw/cosm/offers/<id> — если вставишь PNG, он покажется объёмно поверх фолбэка
       const artMyth = cosmImg('offers', 'booster_premium', 'packOfferArtImg');
@@ -6428,17 +7515,17 @@ function openShop(): void {
     h += `<div class="packStoreRow">` + PACK_OFFERS.map(o => `
       <div class="packOffer ${o.hl ? 'hl' : ''}">
         <div class="packOfferArt">${o.hl ? '<span class="packBadge">★ Best Value</span>' : ''}${packVisHtml(o.kind, o.qty)}</div>
-        <div class="packOfferTitle">${o.ru}${o.qty>1?` · ${o.qty}×`:''}${freeInfo && o.id==='p1' ? freeInfo : ''}</div>
+        <div class="packOfferTitle">${o.ru}${o.save ? ` <span class="packSave">−${o.save}%</span>` : ''}${freeInfo && o.id==='p1' ? freeInfo : ''}</div>
         <div class="packOfferPrices">
           <button class="priceBtn gem buyPackOffer" data-offer="${o.id}" data-cur="gem"><span class="ico">💎</span> ${o.gem.toLocaleString('ru-RU')}</button>
           <button class="priceBtn gold buyPackOffer" data-offer="${o.id}" data-cur="gold"><span class="ico">🪙</span> ${o.gold.toLocaleString('ru-RU')}</button>
         </div>
       </div>`).join('') + `</div>`;
     // сохраняем старые быстрые покупки фракционных как скрытый ряд (для совместимости)
-    h += `<details style="margin:.4rem 0 0"><summary style="cursor:pointer;font-size:.68rem;color:#a99a7a;letter-spacing:.04em">Фракционные наборы · 🪙350</summary><div class="ofRow" style="padding-top:.5rem">` +
+    h += `<details style="margin:.4rem 0 0"><summary style="cursor:pointer;font-size:.68rem;color:#a99a7a;letter-spacing:.04em">Фракционные наборы · 🪙${ECONOMY.factionPack}</summary><div class="ofRow" style="padding-top:.5rem">` +
       FACTION_IDS.map(f => ofCard(`a-fac f-${f}`, cosmImg('offers', 'pack_' + f, 'ofArtImg') + `<span class="ofSig">${FACTION_SIGIL[f]}</span>`,
         `Набор ${FACTION_RU[f as Faction]}`, '5 карт одной фракции',
-        `<button class="btn price gold buyFacPack" data-f="${f}">🪙350</button>`)).join('') + `</div></details>`;
+        `<button class="btn price gold buyFacPack" data-f="${f}">🪙${ECONOMY.factionPack}</button>`)).join('') + `</div></details>`;
     h += `<div class="shopNavBottom"><span class="navItem">Featured</span><span class="navItem">Gems</span><span class="navItem sel">Packs</span><span class="navItem">Daily Deals</span><span class="navItem" data-goto="bundles">Bundles</span><span class="navItem">Avatars</span><span class="navItem">Sleeves</span><span class="navItem">Pets</span></div>`;
     h += `<div class="packStoreFoot">Дубликаты сверх 4 копий превращаются в монеты (1/2/5/20/100). Оплата 💎 — гемы, 🪙 — монеты. Бустеры копятся и открываются в разделе «Бустеры».</div>`;
   }
@@ -6446,7 +7533,7 @@ function openShop(): void {
     h += `<div class="ofRow">` +
       ofCard('a-starter', cosmImg('bundles', 'starter', 'ofArtImg') + '<span class="ofBig">🃏</span>', 'Набор новичка',
         '10 карт базы (кривая 1–3, по 2 на фракцию) · одна покупка на аккаунт',
-        `<button class="btn price gold" id="btnStarter" ${meta.starter ? 'disabled' : ''}>${meta.starter ? 'Куплен' : '🪙800'}</button>`) +
+        `<button class="btn price gold" id="btnStarter" ${meta.starter ? 'disabled' : ''}>${meta.starter ? 'Куплен' : `🪙${ECONOMY.starter}`}</button>`) +
       BUNDLES.map(b => {
         const bought = (meta.bundles ?? []).includes(b.fac);
         return ofCard(`a-fac f-${b.fac}`, cosmImg('bundles', b.fac, 'ofArtImg') + `<span class="ofSig">${FACTION_SIGIL[b.fac as Faction]}</span>`,
@@ -6454,7 +7541,13 @@ function openShop(): void {
           '10 бустеров + 🪙500 + эксклюзивный аватар «Архонт» ✧ · разовая покупка',
           `<button class="btn price gem buyBundle" data-f="${b.fac}" ${bought ? 'disabled' : ''}>${bought ? 'Куплен' : `💎${b.price}`}</button>`);
       }).join('') +
-      `</div><div class="jl" style="opacity:.75">В релизе стартовые наборы покупаются за реальные деньги; в прототипе — за гемы 💎.</div>`;
+      `</div><div class="ofGroup" style="margin-top:.6rem">Тематические наборы</div><div class="ofRow">` +
+      SHOP_SETS.map(st => {
+        const bought = (meta.setsOwned ?? []).includes(st.id);
+        return ofCard(`a-set s-${st.id}`, cosmImg('sets', st.id, 'ofArtImg') + '<span class="ofBig">🎁</span>', st.ru, st.sub,
+          `<button class="btn price ${st.cur === 'gem' ? 'gem' : 'gold'} buySet" data-set="${st.id}" ${bought ? 'disabled' : ''}>${bought ? 'Куплен' : (st.cur === 'gem' ? `💎${st.price}` : `🪙${st.price}`)}</button>`);
+      }).join('') +
+      `</div><div class="jl" style="opacity:.75">В релизе стартовые наборы покупаются за реальные деньги; в прототипе — за гемы 💎. Ключ-арты наборов: art_raw/cosm/sets/&lt;id&gt;.png.</div>`;
   }
   if (shopTab === 'cosm') {
     const tile = (art: string, name: string, sub: string, prev: string, buy: string): string =>
@@ -6467,23 +7560,23 @@ function openShop(): void {
       const eq = meta.backEq === id;
       const locked = !!b.bpOnly && !ownedB;
       return tile(`<i class="cardback mini back-${id}">${cosmImg('backs', id, 'cbArt')}</i>`, `Рубашка «${b.ru}»`,
-        locked ? 'награда боевого пропуска' : ownedB ? (eq ? 'надета' : 'в коллекции') : `🪙${b.price}`,
+        (locked ? 'награда боевого пропуска' : ownedB ? (eq ? 'надета' : 'в коллекции') : `🪙${b.price}`) + bonusTag(b.bonus),
         prevBtn('back', id, 'Предпросмотр: как рубашка выглядит на карте'),
         `<button class="btn price gold smBtn backBtn" data-b="${id}" ${ownedB ? (eq ? 'disabled' : '') : locked ? 'disabled' : `data-price="${b.price}"`}>${ownedB ? (eq ? 'Надета' : 'Надеть') : locked ? '🔒' : `🪙${b.price}`}</button>`);
     }).join('');
     const tables = Object.entries(TABLE_SKINS).map(([id, k]) => {
       const ownedT = id === 'classic' || (meta.tablesOwned ?? []).includes(id);
       const eq = (meta.tableSkin || 'classic') === id;
-      return tile(`<i class="ofSw t-${id}">${cosmImg('tables', id, 'ofSwImg')}</i>`, `Стол «${k.ru}»`,
-        ownedT ? (eq ? 'надет' : 'в коллекции') : k.cur === 'gem' ? `💎${k.price}` : `🪙${k.price}`,
+      return tile(`<i class="ofSw t-${id}">${cosmImg('tables', id, 'ofSwImg')}</i>`, `${k.ru}`,
+        (ownedT ? (eq ? 'надет' : 'в коллекции') : k.cur === 'gem' ? `💎${k.price}` : `🪙${k.price}`) + bonusTag(k.bonus),
         prevBtn('table', id, 'Предпросмотр: фрагмент игрового стола'),
         `<button class="btn price ${k.cur === 'gem' ? 'gem' : 'gold'} smBtn tableBtn" data-id="${id}" ${ownedT && eq ? 'disabled' : ''}>${ownedT ? (eq ? 'Надет' : 'Надеть') : k.cur === 'gem' ? `💎${k.price}` : `🪙${k.price}`}</button>`);
     }).join('');
     const runes = Object.entries(RUNE_SKINS).map(([id, k]) => {
       const ownedR = id === 'classic' || (meta.runesOwned ?? []).includes(id);
       const eq = (meta.runeSkin || 'classic') === id;
-      return tile(`<i class="ofSw r-${id}">${cosmImg('runes', id, 'rcImg')}✦</i>`, `Руны «${k.ru}»`,
-        ownedR ? (eq ? 'надеты' : 'в коллекции') : k.cur === 'gem' ? `💎${k.price}` : `🪙${k.price}`,
+      return tile(`<i class="ofSw r-${id}">${cosmImg('runes', id, 'rcImg')}✦</i>`, `${k.ru}`,
+        (ownedR ? (eq ? 'надеты' : 'в коллекции') : k.cur === 'gem' ? `💎${k.price}` : `🪙${k.price}`) + bonusTag(k.bonus),
         prevBtn('rune', id, 'Предпросмотр: анимация рун'),
         `<button class="btn price ${k.cur === 'gem' ? 'gem' : 'gold'} smBtn runeBtn" data-id="${id}" ${ownedR && eq ? 'disabled' : ''}>${ownedR ? (eq ? 'Надета' : 'Надеть') : k.cur === 'gem' ? `💎${k.price}` : `🪙${k.price}`}</button>`);
     }).join('');
@@ -6527,21 +7620,48 @@ document.addEventListener('click', ev => {
   const st = t?.closest?.('.stab') as HTMLElement | null;
   if (st?.dataset.stab) { shopTab = st.dataset.stab; openShop(); return; }
   const cp = t?.closest?.('.cosmPrev') as HTMLElement | null;
-  if (cp?.dataset.kind) { Sfx.uiClick(); openCosmPreview(cp.dataset.kind, cp.dataset.id ?? ''); return; }
+  if (cp?.dataset.kind) {
+    Sfx.uiClick();
+    const kind = cp.dataset.kind;
+    const id = cp.dataset.id ?? '';
+    /* v3.17.5: чипы столов/рун в профиле (.cosmSkinChip) — это ВЫБОР скина:
+       клик по своему надевает стол/руны (и в бою тоже), предпросмотр остаётся для 🔒 */
+    const chip = t?.closest?.('.cosmSkinChip') as HTMLElement | null;
+    if (chip) {
+      if (chip.classList.contains('locked')) { openCosmPreview(kind, id); return; }
+      if (kind === 'table' && TABLE_SKINS[id]) {
+        meta.tableSkin = id;
+        metaSave(); applySettings(); void applyCosmArt();
+        if (!$('battle').classList.contains('hidden')) applyBattleBg(battle.playerFaction);
+        openProfile();
+        showToast(`Стол «${TABLE_SKINS[id].ru}» выбран`);
+      } else if (kind === 'rune' && RUNE_SKINS[id]) {
+        meta.runeSkin = id;
+        metaSave(); applySettings(); void applyCosmArt();
+        if (!$('battle').classList.contains('hidden')) applyBattleBg(battle.playerFaction);
+        openProfile();
+        showToast(`Руны «${RUNE_SKINS[id].ru}» выбраны`);
+      } else { openCosmPreview(kind, id); }
+      return;
+    }
+    openCosmPreview(kind, id); return;
+  }
   if (t?.id === 'buyPack') {
     if (shardsGet() < PACK_PRICE) { showToast('Недостаточно монет'); return; }
     shardsAdd(-PACK_PRICE);
     meta.freeOpens = (meta.freeOpens ?? 0) + 1;
     metaSave();
-    openBoosterPanel();
-    showToast('Бустер добавлен в коллекцию паков — выберите его, чтобы вскрыть');
+    renderShards();
+    renderPackInventory();   /* v3.17.3: счётчик запаса бустеров обновляется сразу */
+    openShop();   /* v3.17.3: остаёмся в магазине, без перехода в «Бустеры» */
+    showToast('🎁 Бустер добавлен в коллекцию паков — откройте его в разделе «Бустеры»');
     return;
   }
   const fp = t?.closest?.('.buyFacPack') as HTMLElement | null;
   if (fp?.dataset.f) {
     if (pendingPack) { showToast('Сначала вскройте выбранный бустер'); return; }
-    if (shardsGet() < 350) { showToast('Нужно 350 монет'); return; }
-    shardsAdd(-350);
+    if (shardsGet() < ECONOMY.factionPack) { showToast(`Нужно ${ECONOMY.factionPack} монет`); return; }
+    shardsAdd(-ECONOMY.factionPack);
     openBoosterPanel();
     const slots = drawFactionPack(fp.dataset.f);
     renderShards();
@@ -6551,13 +7671,7 @@ document.addEventListener('click', ev => {
   const po = t?.closest?.('.buyPackOffer') as HTMLElement | null;
   if (po?.dataset.offer) {
     const id = po.dataset.offer; const cur = po.dataset.cur;
-    const MAP: Record<string,{gem:number;gold:number;qty:number;kind:'pack'|'mythic'}> = {
-      p1:{gem:200,gold:300,qty:1,kind:'pack'},
-      p15:{gem:3000,gold:3900,qty:15,kind:'pack'},
-      m1:{gem:260,gold:400,qty:1,kind:'mythic'},
-      m10:{gem:2600,gold:3600,qty:10,kind:'mythic'},
-      p1b:{gem:200,gold:300,qty:1,kind:'pack'},
-    };
+    const MAP: Record<string,{gem:number;gold:number;qty:number;kind:'pack'|'mythic'}> = ECONOMY.offers;
     const o = MAP[id]; if (!o) return;
     if (cur === 'gem') {
       if (gemsGet() < o.gem) { showToast(`Нужно 💎${o.gem}`); return; }
@@ -6569,25 +7683,32 @@ document.addEventListener('click', ev => {
     if (o.kind === 'mythic') {
       meta.premOpens = (meta.premOpens ?? 0) + o.qty;
       metaSave();
-      openBoosterPanel();
-      showToast(`✦ ${o.qty} премиум-бустеров добавлено в коллекцию паков`);
+      renderShards();
+      renderPackInventory();   /* v3.17.3: счётчик запаса бустеров обновляется сразу */
+      openShop();   /* v3.17.3: остаёмся в магазине, без перехода в «Бустеры» */
+      showToast(`✦ ${o.qty} премиум-бустера(ов) добавлено в коллекцию паков — раздел «Бустеры»`);
     } else {
       meta.freeOpens = (meta.freeOpens ?? 0) + o.qty;
       metaSave();
-      openBoosterPanel();
-      showToast(`🎁 ${o.qty} бустеров добавлено в коллекцию паков`);
+      renderShards();
+      renderPackInventory();   /* v3.17.3: счётчик запаса бустеров обновляется сразу */
+      openShop();   /* v3.17.3: остаёмся в магазине, без перехода в «Бустеры» */
+      showToast(`🎁 ${o.qty} бустер(а) добавлено в коллекцию паков — раздел «Бустеры»`);
     }
     return;
   }
   const navGo = (t?.closest?.('.navItem[data-goto]') as HTMLElement | null)?.dataset.goto;
   if (navGo) { shopTab = navGo; openShop(); return; }
   if (t?.id === 'buyBundle11') {
-    if (shardsGet() < 2700) { showToast('Нужно 2700 монет'); return; }
-    shardsAdd(-2700);
+    const b11 = ECONOMY.pack.gold * 10; // «10+1»: 11 бустеров по цене 10
+    if (shardsGet() < b11) { showToast(`Нужно ${b11} монет`); return; }
+    shardsAdd(-b11);
     meta.freeOpens = (meta.freeOpens ?? 0) + 11;
     metaSave();
-    openBoosterPanel();
-    showToast('🎁 Набор «10+1»: 11 бустеров добавлены в коллекцию паков');
+    renderShards();
+    renderPackInventory();   /* v3.17.3: счётчик запаса бустеров обновляется сразу */
+    openShop();   /* v3.17.3: остаёмся в магазине, без перехода в «Бустеры» */
+    showToast('🎁 Набор «10+1»: 11 бустеров добавлены в коллекцию паков — раздел «Бустеры»');
     return;
   }
   const bb = t?.closest?.('.backBtn') as HTMLElement | null;
@@ -6640,8 +7761,8 @@ document.addEventListener('click', ev => {
     return;
   }
   if (t?.id === 'btnStarter' && !meta.starter) {
-    if (shardsGet() < 800) return;
-    shardsAdd(-800); meta.starter = true; metaSave(); renderShards();
+    if (shardsGet() < ECONOMY.starter) { showToast(`Нужно ${ECONOMY.starter} монет`); return; }
+    shardsAdd(-ECONOMY.starter); meta.starter = true; metaSave(); renderShards();
     for (const f of FACTION_IDS) {
       const cheap = [...db.values()].filter(c => c.faction === f && c.cost <= 3 && !isExpansionId(c.id))
         .sort((a, b) => a.cost - b.cost).slice(0, 2);
@@ -6666,6 +7787,23 @@ document.addEventListener('click', ev => {
     openBoosterPanel();
     showToast(`🎁 Набор «${FACTION_RU[fac as Faction]}»: 10 бустеров добавлены в коллекцию паков`);
   }
+  const bs = t?.closest?.('.buySet') as HTMLElement | null;
+  if (bs?.dataset.set) {
+    const st = SHOP_SETS.find(x => x.id === bs.dataset.set);
+    if (!st || (meta.setsOwned ?? []).includes(st.id)) return;
+    if (st.cur === 'gem') { if (gemsGet() < st.price) { showToast(`Нужно 💎${st.price}`); return; } gemsAdd(-st.price); }
+    else { if (shardsGet() < st.price) { showToast(`Нужно 🪙${st.price}`); return; } shardsAdd(-st.price); }
+    meta.setsOwned = [...(meta.setsOwned ?? []), st.id];
+    meta.freeOpens = (meta.freeOpens ?? 0) + st.packs;
+    if (st.coins) shardsAdd(st.coins);
+    if (st.back && !(meta.backsOwned ?? []).includes(st.back)) { meta.backsOwned = [...(meta.backsOwned ?? []), st.back]; meta.backEq = st.back; }
+    if (st.table && !(meta.tablesOwned ?? []).includes(st.table)) { meta.tablesOwned = [...(meta.tablesOwned ?? []), st.table]; meta.tableSkin = st.table; }
+    if (st.rune && !(meta.runesOwned ?? []).includes(st.rune)) { meta.runesOwned = [...(meta.runesOwned ?? []), st.rune]; meta.runeSkin = st.rune; }
+    if (st.avatar && !(meta.avatarsOwned ?? []).includes(st.avatar)) meta.avatarsOwned = [...(meta.avatarsOwned ?? []), st.avatar];
+    metaSave(); applySettings(); renderShards();
+    showToast(`🎁 «${st.ru}»: +${st.packs} бустеров и косметика!`);
+    openShop();
+  }
 });
 document.body.dataset.back = meta.backEq || 'classic';
 
@@ -6674,7 +7812,7 @@ document.addEventListener('click', ev => {
   const t0 = ev.target as HTMLElement | null;
   const ptab = t0?.closest?.('.ptab:not(.stab)') as HTMLElement | null;
   if (ptab?.dataset.ptab) { profTab = ptab.dataset.ptab; openProfile(); return; }
-  const ava = t0?.closest?.('.avaBtn') as HTMLElement | null;
+  const ava = t0?.closest?.('.avaBtn, .avaCircle') as HTMLElement | null;
   if (ava?.dataset.f) {
     const id = ava.dataset.f;
     const pa = PREMIUM_AVATARS[id];
@@ -7007,6 +8145,9 @@ function openCampaign(): void {
   $('campBody').innerHTML = `<div class="jl" style="opacity:.8">Карта мира Эхо-Цитадели: 5 регионов, в каждом — цепочка из
     3 боёв и босса. Боссы: повышенное здоровье и уникальная сила героя. Сложности Нормально/Героически/Мифически —
     награды ×1/×1.5/×2 (звёзды ★). Кампания не влияет на рейтинг.</div>${loreBox}${regions}`;
+  closeAllScreens();
+  $('menu').classList.add('hidden');
+  setAppRoute('campaign');
   $('campaignModal').classList.remove('hidden');
 }
 document.addEventListener('click', ev => {
@@ -7038,105 +8179,103 @@ document.addEventListener('click', ev => {
 
 /* --- обучение: 4 интерактивных урока, тренер-панель, награда (спека «6. 🎓 Обучение», v2.5.1) --- */
 const LESSONS: Array<{ ru: string; hint: string; need: string; reward: string }> = [
-  { ru: 'Урок 1 · Основы', hint: 'По шагам: руна → существо («Ветеран Осады») → заклинание («Луч Рассвета»). Игра подсвечивает нужную карту и блокирует остальные действия.', need: 'Разыграйте руну, существо и заклинание', reward: '🪙100' },
-  { ru: 'Урок 2 · Бой', hint: 'Атакуйте цель своим существом, затем встаньте Провокацией ⛨: атаки врага обязаны бить провокатора — так работает блок.', need: 'Нанесите урон в бою', reward: '🪙100' },
-  { ru: 'Урок 3 · Ключевые механики', hint: 'Вампиризм 🩸 (урон лечит героя), Неуловимость 👁 (нельзя выбрать целью — наша «неуязвимость») и Боевой клич ✦. Карты уже в руке — разыграйте все три.', need: 'Разыграйте все три механики', reward: '🪙150' },
-  { ru: 'Урок 4 · Ресурсы', hint: 'Кривая маны: почему нельзя сыграть карту за 5✦ на 2-й ход. Мана +1 за ход; сыграйте 3+ карты к 3-му ходу — не копите дорогое.', need: '3+ карты к 3-му ходу', reward: '💎100 + 5 бустеров' },
+  { ru: 'Урок 1 · Основы', hint: 'Три хода: 1✦ — руна, 2✦ — заклинание «Луч Рассвета», 3✦ — «Ветеран Осады». Игра подсвечивает нужную карту и блокирует остальные действия.', need: 'Разыграйте руну, существо и заклинание', reward: '🪙100' },
+  { ru: 'Урок 2 · Бой', hint: 'Призовите существо с Провокацией ⛨, передайте ход (враг обязан бить провокатора), а на следующем ходу атакуйте.', need: 'Нанесите урон в бою', reward: '🪙100' },
+  { ru: 'Урок 3 · Ключевые механики', hint: 'Три хода: Неуловимость 👁 (1✦), Вампиризм 🩸 (2✦), Боевой клич ✦ (2✦) и атака Упырём.', need: 'Разыграйте все три механики', reward: '🪙150' },
+  { ru: 'Урок 4 · Ресурсы', hint: 'Кривая маны: 5✦ на 1-м ходу не сыграть. Мана +1 за ход — сыграйте по карте на 1✦, 2✦ и 3✦.', need: 'Сыграйте карту на каждом из трёх ходов', reward: '💎100 + 5 бустеров' },
 ];
 /* Зеркало unity/.../StreamingAssets/tutorial.json: те же 20 шагов, те же сообщения. */
-interface TutStep { id: number; lesson: number; message: string; hi: () => HTMLElement | null; ok: () => boolean; allow: string[] }
+interface TutStep { id: number; lesson: number; message: string; hi: () => HTMLElement | null; ok: () => boolean; allow: string[]; mana?: number }
 const tutHandSel = (id: string): string => `#hand [data-card-id="${id}"]`;
 const TUT_TGT = '#playerBoard,#enemyBoard,#playerRunes,#enemyRunes,#playerHero,#enemyHero,#enemyPortrait,#btnEndTurn';
 /** Заскриптованные руки уроков (инжектируются в стартовую руку; муллиган в уроках пропущен). */
 const TUT_HANDS: Record<number, string[]> = {
-  1: ['aur_r07', 'neu_03', 'aur_s01'],   // руна «Обетный монолит» → «Ветеран Осады» → «Луч Рассвета»
-  2: ['aur_01'],                          // «Послушник Света» — Провокация ⛨
-  3: ['nec_03', 'eth_01', 'aur_03'],      // Вампиризм / Неуловимость / Боевой клич
-  4: ['aur_09', 'aur_01'],                // «Серафим Зари» 5✦ (кривая маны) + дешёвая 1✦
+  1: ['aur_r07', 'aur_s01', 'neu_03'],    // ход 1 (1✦): руна → ход 2 (2✦): заклинание → ход 3 (3✦): существо
+  2: ['aur_01'],                          // «Послушник Света» 1✦ — Провокация ⛨
+  3: ['eth_01', 'nec_03', 'aur_03'],      // 1✦ Неуловимость → 2✦ Вампиризм → 2✦ Боевой клич
+  4: ['aur_09', 'aur_01', 'aur_03', 'aur_s01'], // 5✦ «рано» + кривая 1✦ → 2✦ → 1✦
 };
-const TUT_STEP_FIRST: Record<number, number> = { 1: 1, 2: 6, 3: 11, 4: 16 };
+/* v3: каждый шаг привязан к реальной мане хода (мана = номер вашего хода, +1 за ход).
+   Шаги «Завершите ход» ждут возврата хода игроку — нельзя попросить карту дороже текущей маны. */
+const tutE = () => battle.engine;
+const tutMana = (): number => tutE()?.p(Side.Player).mana ?? 0;
+const tutMaxMana = (): number => { const p = tutE()?.p(Side.Player); return p ? p.maxMana + p.bonusMana : 0; };
+const tutMyMain = (): boolean => tutE()?.activeSide === Side.Player && tutE()?.phase === Phase.Main;
+/** Ход передан сопернику и вернулся к игроку (основная фаза). */
+const tutTurnBack = (): boolean => (tutE()?.turn ?? 0) > battle.tutMark && tutMyMain();
+const tutStat = (k: 'runesPlayed' | 'creaturesSummoned' | 'spellsCast' | 'cardsPlayed' | 'damageDealt' | 'healingDone'): number =>
+  (tutE()?.stats[Side.Player] as unknown as Record<string, number> | undefined)?.[k] ?? 0;
+const tutOnBoard = (id: string): boolean => !!tutE()?.p(Side.Player).creatures.some(u => u.cardId === id);
+const END: string[] = ['#btnEndTurn'];
+const TUT_STEP_FIRST: Record<number, number> = { 1: 1, 2: 7, 3: 11, 4: 18 };
 const TUT_STEPS: TutStep[] = [
-  /* --- урок 1 · Основы (шаги 1-5): руна → существо → заклинание --- */
-  { id: 1, lesson: 1, message: 'Разыграйте руну «Обетный монолит» (1✦): кликните карту, затем своё поле. Руны дают Эхо — постоянные усилители.',
+  /* --- урок 1 · Основы: ход 1 → руна (1✦), ход 2 → заклинание (1✦ из 2), ход 3 → существо (3✦) --- */
+  { id: 1, lesson: 1, mana: 1, message: 'Ход 1 · у вас 1✦. Разыграйте руну «Обетный монолит» (1✦): кликните карту, затем своё поле. Руны — постоянные усилители.',
     hi: () => document.querySelector(tutHandSel('aur_r07')),
-    ok: () => (battle.engine?.stats[Side.Player].runesPlayed ?? 0) >= 1,
-    allow: [tutHandSel('aur_r07'), TUT_TGT] },
-  { id: 2, lesson: 1, message: 'Теперь разыграйте «Ветерана Осады» (3✦) — дождитесь маны, кликните карту, затем поле.',
-    hi: () => document.querySelector(tutHandSel('neu_03')),
-    ok: () => (battle.engine?.stats[Side.Player].creaturesSummoned ?? 0) >= 1,
-    allow: [tutHandSel('neu_03'), TUT_TGT] },
-  { id: 3, lesson: 1, message: 'Разыграйте заклинание «Луч Рассвета» (1✦): кликните карту, затем цель — существо или героя.',
+    ok: () => tutStat('runesPlayed') >= 1, allow: [tutHandSel('aur_r07'), TUT_TGT] },
+  { id: 2, lesson: 1, message: 'Мана потрачена (0✦). Завершите ход — в начале следующего максимум маны вырастет до 2✦.',
+    hi: () => $('btnEndTurn'), ok: tutTurnBack, allow: END },
+  { id: 3, lesson: 1, mana: 1, message: 'Ход 2 · у вас 2✦. Разыграйте заклинание «Луч Рассвета» (1✦): кликните карту, затем цель — существо или героя врага.',
     hi: () => document.querySelector(tutHandSel('aur_s01')),
-    ok: () => (battle.engine?.stats[Side.Player].spellsCast ?? 0) >= 1,
-    allow: [tutHandSel('aur_s01'), TUT_TGT] },
-  { id: 4, lesson: 1, message: 'Отлично! Завершите ход — кнопка подсвечена.',
-    hi: () => $('btnEndTurn'), ok: () => (battle.engine?.turn ?? 0) > battle.tutMark,
-    allow: ['#btnEndTurn'] },
-  { id: 5, lesson: 1, message: 'Закрепим: сыграйте любую карту или завершите ход.',
-    hi: () => null,
-    ok: () => (battle.engine?.stats[Side.Player].cardsPlayed ?? 0) > battle.tutMarkCards
-      || (battle.engine?.turn ?? 0) > battle.tutMark,
-    allow: ['#hand', TUT_TGT] },
-  /* --- урок 2 · Бой (шаги 6-10): атака, блок, Провокация --- */
-  { id: 6, lesson: 2, message: 'Бой! Призовите «Послушника Света» (1✦) — у него Провокация ⛨.',
+    ok: () => tutStat('spellsCast') >= 1, allow: [tutHandSel('aur_s01'), TUT_TGT] },
+  { id: 4, lesson: 1, message: 'Осталась 1✦ — на «Ветерана Осады» (3✦) не хватает. Завершите ход.',
+    hi: () => $('btnEndTurn'), ok: tutTurnBack, allow: END },
+  { id: 5, lesson: 1, mana: 3, message: 'Ход 3 · у вас 3✦. Теперь хватает: разыграйте «Ветерана Осады» (3✦) на своё поле.',
+    hi: () => document.querySelector(tutHandSel('neu_03')),
+    ok: () => tutStat('creaturesSummoned') >= 1, allow: [tutHandSel('neu_03'), TUT_TGT] },
+  { id: 6, lesson: 1, message: 'Руна, заклинание и существо разыграны! Завершите ход, чтобы закончить урок.',
+    hi: () => $('btnEndTurn'), ok: () => (tutE()?.turn ?? 0) > battle.tutMark || tutE()?.activeSide === Side.Opponent, allow: END },
+  /* --- урок 2 · Бой: призыв → болезнь призыва → атака на следующем ходу --- */
+  { id: 7, lesson: 2, mana: 1, message: 'Ход 1 · 1✦. Призовите «Послушника Света» (1✦) — у него Провокация ⛨.',
     hi: () => document.querySelector(tutHandSel('aur_01')),
-    ok: () => (battle.engine?.stats[Side.Player].creaturesSummoned ?? 0) >= 1,
-    allow: [tutHandSel('aur_01'), TUT_TGT] },
-  { id: 7, lesson: 2, message: 'Атакуйте: кликните своё существо (золотое свечение), затем цель — вражеское существо или героя.',
-    hi: () => document.querySelector('#playerBoard .card'),
-    ok: () => (battle.engine?.stats[Side.Player].damageDealt ?? 0) >= 1,
-    allow: [TUT_TGT] },
-  { id: 8, lesson: 2, message: 'Урон нанесён! Завершите ход — враг ОБЯЗАН бить «Послушника» ⛨: так работает блокирование.',
-    hi: () => $('btnEndTurn'), ok: () => (battle.engine?.turn ?? 0) > battle.tutMark,
-    allow: ['#btnEndTurn'] },
-  { id: 9, lesson: 2, message: 'Смотрите: атаки врага ушли в Провокацию — герой защищён. Дождитесь своего хода.',
+    ok: () => tutStat('creaturesSummoned') >= 1, allow: [tutHandSel('aur_01'), TUT_TGT] },
+  { id: 8, lesson: 2, message: 'Только что призванное существо атакует со следующего хода. Завершите ход — враг обязан бить в Провокацию ⛨.',
+    hi: () => $('btnEndTurn'), ok: tutTurnBack, allow: END },
+  { id: 9, lesson: 2, message: 'Ваш ход: кликните «Послушника» (золотое свечение), затем цель — существо или героя врага.',
     hi: () => document.querySelector('#playerBoard [data-card-id="aur_01"]') ?? document.querySelector('#playerBoard .card'),
-    ok: () => battle.engine?.activeSide === Side.Player && battle.engine?.phase === Phase.Main,
-    allow: [TUT_TGT] },
-  { id: 10, lesson: 2, message: 'Урок 2 пройден: атака, блок, Провокация. Завершите ход.',
-    hi: () => $('btnEndTurn'), ok: () => (battle.engine?.turn ?? 0) > battle.tutMark,
-    allow: ['#btnEndTurn'] },
-  /* --- урок 3 · Ключевые механики (шаги 11-15): Вампиризм, Неуловимость, Боевой клич --- */
-  { id: 11, lesson: 3, message: 'Вампиризм 🩸: разыграйте «Упыря-мародёра» (2✦) — его урон лечит вашего героя.',
-    hi: () => document.querySelector(tutHandSel('nec_03')),
-    ok: () => battle.tutPlayedPub('nec_03'),
-    allow: [tutHandSel('nec_03'), TUT_TGT] },
-  { id: 12, lesson: 3, message: 'Атакуйте Упырём: HP героя восстановится — это Вампиризм в действии. (Нет маны/атаки — завершите ход.)',
-    hi: () => document.querySelector('#playerBoard [data-card-id="nec_03"]'),
-    ok: () => (battle.engine?.stats[Side.Player].healingDone ?? 0) > 0
-      || (battle.engine?.stats[Side.Player].damageDealt ?? 0) > battle.tutMarkDmg,
-    allow: [TUT_TGT] },
-  { id: 13, lesson: 3, message: 'Неуловимость 👁 (неуязвимость): «Эфирный разведчик» (1✦) не может быть выбран целью врагом. Разыграйте его.',
+    ok: () => tutStat('damageDealt') > battle.tutMarkDmg || !(tutE()?.p(Side.Player).creatures.length),
+    allow: [TUT_TGT, '#hand'] },
+  { id: 10, lesson: 2, message: 'Урон нанесён — это атака. Завершите ход, чтобы закончить урок.',
+    hi: () => $('btnEndTurn'), ok: () => (tutE()?.turn ?? 0) > battle.tutMark || tutE()?.activeSide === Side.Opponent, allow: END },
+  /* --- урок 3 · Механики: ход 1 Неуловимость (1✦), ход 2 Вампиризм (2✦), ход 3 Боевой клич (2✦) + атака Упырём --- */
+  { id: 11, lesson: 3, mana: 1, message: 'Ход 1 · 1✦. Неуловимость 👁: «Эфирный разведчик» (1✦) не может быть выбран целью врагом. Разыграйте его.',
     hi: () => document.querySelector(tutHandSel('eth_01')),
-    ok: () => battle.tutPlayedPub('eth_01'),
-    allow: [tutHandSel('eth_01'), TUT_TGT] },
-  { id: 14, lesson: 3, message: 'Боевой клич ✦: «Рассветный капеллан» (2✦) срабатывает при выходе на поле. Разыграйте его.',
+    ok: () => battle.tutPlayedPub('eth_01'), allow: [tutHandSel('eth_01'), TUT_TGT] },
+  { id: 12, lesson: 3, message: 'Мана закончилась. Завершите ход.',
+    hi: () => $('btnEndTurn'), ok: tutTurnBack, allow: END },
+  { id: 13, lesson: 3, mana: 2, message: 'Ход 2 · 2✦. Вампиризм 🩸: разыграйте «Упыря-мародёра» (2✦) — его урон лечит вашего героя.',
+    hi: () => document.querySelector(tutHandSel('nec_03')),
+    ok: () => battle.tutPlayedPub('nec_03'), allow: [tutHandSel('nec_03'), TUT_TGT] },
+  { id: 14, lesson: 3, message: 'Мана потрачена. Завершите ход — Упырь сможет атаковать на следующем.',
+    hi: () => $('btnEndTurn'), ok: tutTurnBack, allow: END },
+  { id: 15, lesson: 3, mana: 2, message: 'Ход 3 · 3✦. Боевой клич ✦: «Рассветный капеллан» (2✦) срабатывает при выходе на поле. Разыграйте его.',
     hi: () => document.querySelector(tutHandSel('aur_03')),
-    ok: () => battle.tutPlayedPub('aur_03'),
-    allow: [tutHandSel('aur_03'), TUT_TGT] },
-  { id: 15, lesson: 3, message: 'Все три механики в деле! Завершите ход.',
-    hi: () => $('btnEndTurn'), ok: () => (battle.engine?.turn ?? 0) > battle.tutMark,
-    allow: ['#btnEndTurn'] },
-  /* --- урок 4 · Ресурсы (шаги 16-20): кривая маны --- */
-  { id: 16, lesson: 4, message: 'Мана растёт на +1 каждый ход (до 10). Кликните «Серафима Зари» (5✦) — рано, маны не хватит. Это и есть кривая маны.',
+    ok: () => battle.tutPlayedPub('aur_03'), allow: [tutHandSel('aur_03'), TUT_TGT] },
+  { id: 16, lesson: 3, message: 'Атакуйте Упырём — урон вылечит героя (Вампиризм). Если Упыря уже нет — завершите ход.',
+    hi: () => document.querySelector('#playerBoard [data-card-id="nec_03"]'),
+    ok: () => tutStat('damageDealt') > battle.tutMarkDmg || !tutOnBoard('nec_03') || (tutE()?.turn ?? 0) > battle.tutMark,
+    allow: [TUT_TGT, '#hand'] },
+  { id: 17, lesson: 3, message: 'Все три механики в деле! Завершите ход, чтобы закончить урок.',
+    hi: () => $('btnEndTurn'), ok: () => (tutE()?.turn ?? 0) > battle.tutMark || tutE()?.activeSide === Side.Opponent, allow: END },
+  /* --- урок 4 · Ресурсы: кривая маны 1✦ → 2✦ → 3✦ --- */
+  { id: 18, lesson: 4, mana: 1, message: 'Ход 1 · 1✦. Кликните «Серафима Зари» (5✦) — маны не хватит: дорогие карты ждут поздних ходов.',
     hi: () => document.querySelector(tutHandSel('aur_09')),
-    ok: () => battle.tutTapPub(),
-    allow: [tutHandSel('aur_09'), '#btnEndTurn'] },
-  { id: 17, lesson: 4, message: 'Дорогие карты — на поздний ход. Сыграйте дешёвую: «Послушник Света» (1✦).',
+    ok: () => battle.tutTapPub(), allow: [tutHandSel('aur_09')] },
+  { id: 19, lesson: 4, mana: 1, message: 'Играйте по кривой: на 1✦ — «Послушник Света» (1✦).',
     hi: () => document.querySelector(tutHandSel('aur_01')),
-    ok: () => battle.tutPlayedPub('aur_01'),
-    allow: [tutHandSel('aur_01'), TUT_TGT] },
-  { id: 18, lesson: 4, message: 'Завершите ход — маны станет больше.',
-    hi: () => $('btnEndTurn'), ok: () => (battle.engine?.turn ?? 0) > battle.tutMark,
-    allow: ['#btnEndTurn'] },
-  { id: 19, lesson: 4, message: 'Мана выросла! Сыграйте ещё 2 карты — не копите дорогое, играйте по кривой.',
-    hi: () => null,
-    ok: () => (battle.engine?.stats[Side.Player].cardsPlayed ?? 0) >= battle.tutMarkCards + 2,
-    allow: ['#hand', TUT_TGT] },
-  { id: 20, lesson: 4, message: 'Кривая маны освоена! Завершите ход — награда за все уроки ждёт в меню «🎓 Обучение».',
-    hi: () => $('btnEndTurn'), ok: () => (battle.engine?.turn ?? 0) > battle.tutMark,
-    allow: ['#btnEndTurn'] },
+    ok: () => battle.tutPlayedPub('aur_01'), allow: [tutHandSel('aur_01'), TUT_TGT] },
+  { id: 20, lesson: 4, message: 'Завершите ход — станет 2✦.',
+    hi: () => $('btnEndTurn'), ok: tutTurnBack, allow: END },
+  { id: 21, lesson: 4, mana: 2, message: 'Ход 2 · 2✦. Потратьте всю ману: «Рассветный капеллан» (2✦).',
+    hi: () => document.querySelector(tutHandSel('aur_03')),
+    ok: () => battle.tutPlayedPub('aur_03'), allow: [tutHandSel('aur_03'), TUT_TGT] },
+  { id: 22, lesson: 4, message: 'Завершите ход — станет 3✦.',
+    hi: () => $('btnEndTurn'), ok: tutTurnBack, allow: END },
+  { id: 23, lesson: 4, mana: 1, message: 'Ход 3 · 3✦. Сыграйте «Луч Рассвета» (1✦) — третья карта за три хода, кривая освоена.',
+    hi: () => document.querySelector(tutHandSel('aur_s01')),
+    ok: () => battle.tutPlayedPub('aur_s01'), allow: [tutHandSel('aur_s01'), TUT_TGT] },
 ];
+const TUT_LESSON_STEPS = (lesson: number): TutStep[] => TUT_STEPS.filter(st => st.lesson === lesson);
 function tutCoach(text: string): void {
   const n = $('tutCoach');
   if (!n) return;
@@ -7306,8 +8445,19 @@ $('settingsScrim')?.addEventListener('click', () => toggleSettings(false));
     applySettings();
   });
 });
-btn('btnMenu').addEventListener('click', () => openHomeScreen());
-btn('btnAgain').addEventListener('click', () => { $('gameover').classList.add('hidden'); battle.start().catch(err => reportFatal('restart', err)); });
+btn('btnMenu').addEventListener('click', () => {
+  if (battle.net && battle.running) {
+    if (!window.confirm('Выйти из онлайн-матча? Это засчитается как поражение.')) return;
+    battle.net.concede();
+    return;
+  }
+  openHomeScreen();
+});
+btn('btnAgain').addEventListener('click', () => {
+  $('gameover').classList.add('hidden');
+  if (battle.lastWasNet || battle.net) { battle.lastWasNet = false; openHomeScreen(); openOnline(); return; }
+  battle.start().catch(err => reportFatal('restart', err));
+});
 btn('btnGoMenu').addEventListener('click', () => openHomeScreen());
 
 /* --- коллекция: виртуализированная подгрузка оформлениями по 40 карточек --- */
@@ -7518,13 +8668,26 @@ function openAuth(mode: 'login' | 'register'): void {
   m.classList.remove('hidden');
   (document.getElementById('authLogin') as HTMLInputElement | null)?.focus();
 }
-function closeAuth(): void { document.getElementById('authModal')?.classList.add('hidden'); }
+function closeAuth(): void {
+  if (authGateOn()) return;   // v3.7: без входа в игру не попасть
+  document.getElementById('authModal')?.classList.add('hidden');
+}
+/* v3.7: вход обязателен — экран авторизации до попадания в игру */
+function authGateOn(): boolean { return !!document.getElementById('authModal')?.classList.contains('gate'); }
+function authRequired(): boolean { return !(window as unknown as { EC_NO_AUTH_GATE?: boolean }).EC_NO_AUTH_GATE; }
+function authGateCheck(): void {
+  const m = document.getElementById('authModal');
+  if (!m || !authRequired()) return;
+  if (meta.signedIn && authGet()) { m.classList.remove('gate'); return; }
+  m.classList.add('gate');
+  openAuth('login');
+}
 /** Гидрация профиля с meta-server после логина на новом устройстве. */
 async function pullProfile(pid: string): Promise<void> {
   try {
     const ctl = new AbortController();
     const t = window.setTimeout(() => ctl.abort(), 2000);
-    const r = await window.fetch(`${META_API()}/api/profile?pid=${encodeURIComponent(pid)}`, { signal: ctl.signal });
+    const r = await authFetch(`${META_API()}/api/profile?pid=${encodeURIComponent(pid)}`, { signal: ctl.signal });
     window.clearTimeout(t);
     if (!r.ok) return; // зеркала ещё нет — остаёмся на локальном прогрессе
     const gp = (await r.json()) as Record<string, unknown>;
@@ -7568,6 +8731,10 @@ async function pullProfile(pid: string): Promise<void> {
       if (c.tableSkin) meta.tableSkin = c.tableSkin;
       if (c.runeSkin) meta.runeSkin = c.runeSkin;
     }
+    /* v3.15.3: базовая точка дельт — значения СЕРВЕРА (с учётом выдач админки),
+       чтобы следующий syncProfile не прислал старые локальные числа поверх них */
+    meta.lastSynced = { shards: shardsGet(), gems: meta.gems ?? 0, freeOpens: meta.freeOpens ?? 0,
+      mmr: meta.mmr, wins: meta.wins, losses: meta.losses, bpXp: meta.bpXp ?? 0 };
     metaSave();
   } catch { /* офлайн — локальный профиль остаётся источником истины */ }
 }
@@ -7578,7 +8745,7 @@ async function authDo(): Promise<void> {
   const setErr = (s: string): void => { if (er) er.textContent = s; };
   setErr('');
   if (!/^[A-Za-z0-9_.-]{3,20}$/.test(login)) { setErr('Логин:3–20 символов, латиница/цифры/_.-'); return; }
-  if (pw.length < 4) { setErr('Пароль: минимум4 символа'); return; }
+  if (pw.length < 8) { setErr('Пароль: минимум 8 символов'); return; }
   try {
     const ctl = new AbortController();
     const t = window.setTimeout(() => ctl.abort(), 2500);
@@ -7587,17 +8754,27 @@ async function authDo(): Promise<void> {
       body: JSON.stringify({ login, password: pw, pid: meta.pid }),
     });
     window.clearTimeout(t);
-    const j = (await r.json().catch(() => ({}))) as { error?: string; login?: string; pid?: string };
+    const j = (await r.json().catch(() => ({}))) as { error?: string; login?: string; pid?: string; accessToken?: string; refreshToken?: string; expiresIn?: number };
     if (!r.ok) { setErr(j.error || `Ошибка сервера (${r.status})`); return; }
+    authSet(j);
     const accPid = String(j.pid || meta.pid);
-    if (accPid && accPid !== meta.pid) { meta.pid = accPid; await pullProfile(accPid); }
+    /* v3.15.3: ник до первого синка — иначе дефолтный «Гость» может попасть в 409 (ник занят) */
     if (meta.nick === 'Гость') meta.nick = String(j.login || login);
+    if (accPid) {
+      if (accPid !== meta.pid) meta.pid = accPid;
+      /* v3.15.3: при каждом входе — сначала отправить неподтверждённые траты (дельты),
+         затем забрать актуальный профиль с сервера, включая всё, что выдал админ */
+      await syncProfile();
+      await pullProfile(accPid);
+    }
     meta.signedIn = true;
     metaSave(); syncProfile(); syncAccountRow(); renderShards();
+    document.getElementById('authModal')?.classList.remove('gate');
     closeAuth();
+    void friendsRefresh();
     showToast(authMode === 'login' ? `🔑 Вы вошли: ${j.login}` : `🎉 Аккаунт создан: ${j.login}`);
   } catch {
-    setErr('Сервер недоступен — запусти `npm run server:meta` (:8081) или играй локально как Гость');
+    setErr('Сервер недоступен. Запустите npm run server:meta (порт 8081) и попробуйте снова.');
   }
 }
 document.getElementById('btnLoginOpen')?.addEventListener('click', () => openAuth('login'));
@@ -7610,15 +8787,22 @@ for (const id of ['authLogin', 'authPass']) {
   document.getElementById(id)?.addEventListener('keydown', ev => { if ((ev as KeyboardEvent).key === 'Enter') { ev.preventDefault(); void authDo(); } });
 }
 syncAccountRow();
+authGateCheck();
 
 const logoutB = document.getElementById('btnLogout');
 if (logoutB) logoutB.addEventListener('click', () => {
   if (!window.confirm('Выйти из аккаунта? Локальный прогресс сохранится.')) return;
+  const tok = authGet();
+  if (tok) void window.fetch(`${META_API()}/api/auth/logout`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ refreshToken: tok.refreshToken }) }).catch(() => undefined);
+  if (tok) void window.fetch(`${META_API()}/api/presence`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${tok.accessToken}` }, body: JSON.stringify({ status: 'offline' }) }).catch(() => undefined);
+  authSet(null);
   meta.signedIn = false; meta.nick = 'Гость'; metaSave();
   document.getElementById('settingsPanel')?.classList.add('hidden');
   document.getElementById('settingsScrim')?.classList.add('hidden');
   syncAccountRow();
   showToast('👋 Вы вышли из аккаунта');
+  friendsClose();
+  authGateCheck();
 });
 ['colFaction', 'colType', 'colRarity', 'colCost', 'colKw', 'colStyle'].forEach(id => sel(id).addEventListener('change', renderCollection));
 $('colOwned').addEventListener('change', renderCollection);
@@ -7681,8 +8865,7 @@ function renderCardModal(): void {
       ${c.type === CardType.Creature
         ? `<span title="Атака">⚔ ${c.attack ?? 0}</span><span title="Здоровье">❤ ${c.health ?? 0}</span>` : ''}
     </div>
-    <div class="cmText">${kws.length ? `<span class="cmKw">${kws.map(k => `<strong class="cardKeyword">${esc(k)}</strong>`).join(' · ')}.</span> ` : ''}${
-      highlightCardKeywords(cardText(c) || bi('Без текста способности.', 'No ability text.'))}</div>
+    <div class="cmText">${c.type === CardType.Creature && !isEN() ? cardBodyHtml(c) : `${kws.length ? `<span class="cmKw">${kws.map(k => `<strong class="cardKeyword">${esc(k)}</strong>`).join(' · ')}.</span> ` : ''}${highlightCardKeywords(cardText(c) || bi('Без текста способности.', 'No ability text.'))}`}</div>
     ${cardFlavor(c) ? `<div class="cmFlavor">${esc(cardFlavor(c))}</div>` : ''}`;
   $('cmStylePicker').querySelectorAll<HTMLButtonElement>('[data-cm-style]').forEach(button => {
     button.addEventListener('click', () => {
@@ -8143,95 +9326,211 @@ sel('dbFaction').innerHTML = FACTION_IDS.map(f => `<option value="${f}">${FACTIO
 
 
 /* --- правила --- */
-const RULES_HTML = `
-<h3 style="color:var(--gold-hi);letter-spacing:.1em;margin:.6rem 0">Цель и ресурсы</h3>
-<p>Снизьте здоровье героя противника с <b>30</b> до <b>0</b>. Колода — минимум <b>60</b> карт, не более <b>4</b> копий любой карты (включая легендарные); верхнего лимита и сайдборда нет. Стартовая рука — <b>5</b>,
-муллиган доступен <b>один раз</b> за игру. Максимум маны растёт на 1 каждый ход (до 10) и полностью восполняется
-в фазе «Ресурсы». <b>Неиспользованная мана сохраняется до вашего следующего хода</b> — оставляйте ману для <b>мгновенных заклинаний в ход противника</b> (как в MTG). Пустая колода → <b>усталость</b>: каждый добор наносит растущий урон.
-На доске не более <b>7</b> существ и <b>3</b> рун у каждого игрока.</p>
+/* =====================================================================
+   v3.6: ПРАВИЛА — полноценная страница (как разделы в MTG Arena), а не окно поверх игры.
+   Слева — разделы, справа — содержимое. Примеры карт берутся из базы.
+   ===================================================================== */
+const KW_ICON: Record<string, string> = {
+  Taunt: '⛨', Rush: '⚡', Windfury: '🌀', Trample: '➤', Lifesteal: '🩸', Unblockable: '👁',
+  DivineShield: '🛡', Poisonous: '☠', Freezing: '❄', SpellDamage: '✦', Battlecry: '📯', Deathrattle: '✝',
+};
+const KW_DETAIL: Record<string, string> = {
+  Taunt: 'Защитник. Пока хотя бы одно существо с Провокацией у противника живо, ваши атакующие могут бить <b>только его</b>: ни героя, ни других существ выбрать нельзя. Если провокаторов несколько — выбираете любого из них. Немота снимает Провокацию.',
+  Rush: 'Обычно существо, вышедшее на поле, «приходит в себя» до следующего хода и не может атаковать (болезнь призыва). Существо с Рывком атакует <b>сразу</b>, в тот же ход.',
+  Windfury: 'Может совершить <b>две атаки</b> за ход — по одной и той же или разным целям. После каждой атаки существо получает ответный урон как обычно.',
+  Trample: 'Когда существо с Прорывом убивает защитника, <b>лишний урон</b> уходит в героя противника. Пример: 6 атаки против существа с 2 здоровья — 4 урона получит герой.',
+  Lifesteal: 'Весь урон, который существо наносит в бою (существу или герою, включая урон Прорыва), <b>лечит вашего героя</b> на ту же величину. Здоровье не поднимается выше 30.',
+  Unblockable: 'Существа противника <b>не могут выбрать его целью атаки</b>. Убрать его можно только заклинаниями и способностями. Само оно атакует как обычно.',
+  DivineShield: 'Выходит на поле со <b>Щитом</b>: первое полученное повреждение (любое — от атаки или заклинания) полностью поглощается, после чего Щит исчезает. Не восстанавливается.',
+  Poisonous: 'Если существо с этим свойством нанесло урон другому существу и оно выжило, на цель вешается <b>Яд</b>: следующее любое повреждение её убьёт, даже 1 урон.',
+  Freezing: 'Если существо нанесло урон другому существу, цель <b>замораживается на 1 ход</b> и не может атаковать.',
+  SpellDamage: 'Пока существо на поле, <b>все ваши заклинания</b>, наносящие урон, наносят на 1 больше. Несколько таких существ складываются.',
+  Battlecry: 'Эффект срабатывает <b>один раз</b> — когда вы разыгрываете существо из руки. Если нужна цель (например, «выбранное существо противника»), её выбирают при розыгрыше. Призванные эффектами копии и токены Боевой клич не запускают.',
+  Deathrattle: 'Эффект срабатывает, когда существо <b>погибает</b> — в бою, от заклинания или Порчи. Если на существе Немота, Предсмертный хрип не сработает.',
+};
+const RULES_SECTIONS: Array<{ id: string; ico: string; title: string; html: () => string }> = [
+  { id: 'basics', ico: '🎯', title: 'Основы', html: () => `
+    <h2>Цель игры</h2>
+    <p class="rpLead">У каждого героя <b>30 здоровья</b>. Побеждает тот, кто первым снизит здоровье героя противника до <b>0</b>.</p>
+    <div class="rpGrid">
+      <div class="rpTile"><b>30</b><span>здоровья у героя</span></div>
+      <div class="rpTile"><b>5</b><span>карт в стартовой руке</span></div>
+      <div class="rpTile"><b>10</b><span>максимум маны и карт в руке</span></div>
+      <div class="rpTile"><b>7</b><span>существ на вашей стороне поля</span></div>
+      <div class="rpTile"><b>3</b><span>руны одновременно</span></div>
+      <div class="rpTile"><b>30+</b><span>карт в колоде</span></div>
+    </div>
+    <h3>Мана</h3>
+    <p>Каждая карта стоит маны — число в синем кристалле в углу. В начале каждого своего хода максимум маны растёт на 1 (до 10), и мана полностью восстанавливается. На первом ходу у вас 1 мана, на втором — 2, и так далее.</p>
+    <p>Мана, которую вы не потратили, <b>не сгорает</b> до вашего следующего хода: её можно придержать, чтобы в ход противника ответить мгновенным заклинанием.</p>
+    <h3>Муллиган</h3>
+    <p>В начале боя вы видите стартовую руку из 5 карт и можете <b>один раз</b> заменить любые из них: отмеченные карты уходят в колоду, вместо них вы берёте новые.</p>
+    <h3>Рука и колода</h3>
+    <p>Каждый ход вы берёте карту. В руке может быть не больше 10 карт — лишняя сгорает. Когда колода закончилась, каждая попытка взять карту наносит герою <b>урон усталости</b>: 1, потом 2, потом 3 и т.д.</p>` },
+  { id: 'turn', ico: '⏳', title: 'Ход', html: () => `
+    <h2>Пять фаз хода</h2>
+    <p class="rpLead">Ход идёт по фазам, текущая подсвечена на полосе вверху поля.</p>
+    <ol class="rpSteps">
+      <li><b>Начало.</b> Срабатывают руны, пассивка фракции и способности «в начале хода», тикает Горение, разрешаются ваши Ритуалы.</li>
+      <li><b>Ресурсы.</b> Максимум маны +1, мана восстанавливается, вы берёте карту.</li>
+      <li><b>Основная фаза.</b> Разыгрывайте любые карты: существа, заклинания, руны — пока хватает маны.</li>
+      <li><b>Битва.</b> Выбирайте, какие существа атакуют и кого (см. «Бой»). Кнопка «Пропустить бой» — закончить без атак.</li>
+      <li><b>Конец.</b> Истекают временные эффекты, начисляется Эхо-очко (если заработано). Ход переходит к противнику.</li>
+    </ol>
+    <p>Кнопка <b>«Завершить ход»</b> (или Пробел) пропускает оставшиеся фазы.</p>` },
+  { id: 'combat', ico: '⚔', title: 'Бой', html: () => `
+    <h2>Как атаковать</h2>
+    <p class="rpLead">В фазе Битвы готовые к атаке существа подсвечены золотом. Нажмите на своё существо, затем — на цель: существо противника или его героя.</p>
+    <h3>Кого можно атаковать</h3>
+    <ul class="rpList">
+      <li>Если у противника есть существо с <b>Провокацией</b> — атаковать можно только его.</li>
+      <li>Если провокаторов нет — любое существо или сразу героя.</li>
+      <li>Существо с <b>Неуловимостью</b> выбрать целью нельзя.</li>
+    </ul>
+    <h3>Обмен ударами</h3>
+    <p>Когда существо атакует существо, <b>оба наносят друг другу урон</b>, равный своей атаке. Существо, у которого здоровье упало до 0, погибает. Атакуя героя, существо урона в ответ не получает.</p>
+    <div class="rpExample">Пример: ваш 3/2 атакует их 2/4. Их существо получает 3 урона (остаётся 1 здоровья), ваше — 2 урона и погибает.</div>
+    <h3>Кто не может атаковать</h3>
+    <ul class="rpList">
+      <li>Существо, вышедшее на поле в этот ход (кроме <b>Рывка</b> и <b>Ярости</b>).</li>
+      <li>Существо, которое уже атаковало в этот ход (с <b>Бурей</b> — дважды).</li>
+      <li><b>Замороженное</b> существо.</li>
+      <li>Существо с атакой 0.</li>
+    </ul>
+    <p>Урон существ сохраняется между ходами — раненое существо не лечится само.</p>` },
+  { id: 'creatures', ico: '🐉', title: 'Существа и способности', html: () => {
+    const example = (k: string): string => {
+      const c = [...db.values()].find(x => x.type === CardType.Creature && !(x as { isToken?: boolean }).isToken && (x.keywords ?? []).map(String).includes(k) && (x.keywords ?? []).length === 1)
+        ?? [...db.values()].find(x => x.type === CardType.Creature && (x.keywords ?? []).map(String).includes(k));
+      return c ? `<button class="rpCardRef" data-card="${esc(c.id)}">${esc(cardName(c))} <i>${c.cost}✦ ${c.attack}/${c.health}</i></button>` : '';
+    };
+    const count = (k: string): number => [...db.values()].filter(x => x.type === CardType.Creature && (x.keywords ?? []).map(String).includes(k)).length;
+    const order = ['Taunt', 'Rush', 'Windfury', 'Trample', 'Lifesteal', 'Unblockable', 'DivineShield', 'Poisonous', 'Freezing', 'SpellDamage', 'Battlecry', 'Deathrattle'];
+    return `
+    <h2>Существа</h2>
+    <p class="rpLead">Существо остаётся на поле, пока не погибнет. Внизу карты — <b>атака</b> (⚔, слева) и <b>здоровье</b> (❤, справа).</p>
+    <p>Бывают существа <b>без способностей</b> — у них просто хорошие характеристики за свою стоимость. У остальных в тексте карты перечислены способности: каждое ключевое слово выделено жирным, а в скобках написано, что оно делает. Наведите на карту, чтобы увидеть полный текст.</p>
+    <h2>Все способности</h2>
+    <div class="rpKw">${order.map(k => `
+      <div class="rpKwItem">
+        <div class="rpKwHead"><span class="rpKwIco">${KW_ICON[k] ?? '◆'}</span><b>${esc(KW_RU[k] ?? k)}</b><span class="rpKwCnt">${count(k)} карт</span></div>
+        <p>${KW_DETAIL[k] ?? ''}</p>
+        <div class="rpKwEx">Например: ${example(k)}</div>
+      </div>`).join('')}
+    </div>`;
+  } },
+  { id: 'spells', ico: '✨', title: 'Заклинания и руны', html: () => `
+    <h2>Заклинания</h2>
+    <p class="rpLead">Заклинание срабатывает и уходит в сброс. Если нужна цель — после выбора карты подсвечиваются допустимые цели.</p>
+    <div class="rpTwo">
+      <div class="rpCard"><div class="rpCardT">⚡ Мгновенное</div>
+        <p>Можно разыграть <b>в любой момент</b>, когда у вас есть приоритет: в свой ход в любой фазе, а также <b>в ход противника</b> — перед его атакой, в ответ на его заклинание, в конце его хода. Такие карты подсвечиваются голубым.</p></div>
+      <div class="rpCard"><div class="rpCardT">◷ Ритуал</div>
+        <p>Играется только в вашу основную фазу. Цель выбирается сразу, а эффект срабатывает <b>в начале вашего следующего хода</b>. Ритуалы сильнее за ту же ману, но противник успевает подготовиться.</p></div>
+    </div>
+    <h3>Стек и ответы</h3>
+    <p>Когда разыгрывается мгновенное заклинание, у противника есть окно (круговой таймер), чтобы ответить своим мгновенным. Ответы складываются в <b>стек</b> и срабатывают в обратном порядке: последнее сыгранное — первым. Кнопка «Пас» — отказаться от ответа.</p>
+    <p class="rpNote">В онлайн-бою с живым соперником окна ответов пока отключены: мгновенные играются только в свой ход.</p>
+    <h2>Руны</h2>
+    <p>Руна — постоянный эффект, который лежит на поле и действует каждый ход: усиливает существ, защищает героя, даёт ману, карты или урон заклинаний. Одновременно у вас может быть <b>3 руны</b>, одинаковые руны не складываются. Обычный урон руны не уничтожает.</p>` },
+  { id: 'status', ico: '🌀', title: 'Статусы', html: () => `
+    <h2>Статусы на существах</h2>
+    <p class="rpLead">Статусы показаны значками на карте существа на поле. Наведите на значок — появится подсказка.</p>
+    <div class="rpKw">${[
+      ['🛡', 'Щит', 'Поглощает первое повреждение полностью. Число на значке — сколько повреждений ещё будет поглощено.'],
+      ['🔥', 'Горение', 'В начале хода владельца существо получает указанный урон. Длится несколько ходов.'],
+      ['☣', 'Яд', 'Следующее любое повреждение убивает существо, сколько бы здоровья у него ни было.'],
+      ['❄', 'Заморозка', 'Существо не может атаковать. Проходит в конце хода.'],
+      ['💢', 'Ярость', 'Существо может атаковать в тот же ход, когда вышло на поле.'],
+      ['🤐', 'Немота', 'Существо навсегда теряет все способности и ключевые слова (в том числе Провокацию и Предсмертный хрип). Атака и здоровье сохраняются.'],
+      ['🩸', 'Порча', 'Навсегда уменьшает здоровье существа. Если оно упало до 0 — существо погибает.'],
+    ].map(([i, t, d]) => `<div class="rpKwItem"><div class="rpKwHead"><span class="rpKwIco">${i}</span><b>${t}</b></div><p>${d}</p></div>`).join('')}</div>` },
+  { id: 'echo', ico: '🔁', title: 'Эхо-очки', html: () => `
+    <h2>Эхо-очки</h2>
+    <p class="rpLead">Особая механика Эхо-Цитадели: терпение вознаграждается повтором заклинания.</p>
+    <ul class="rpList">
+      <li>Если за свою основную фазу вы <b>не разыграли ни одного заклинания</b>, в конце хода получаете <b>1 Эхо-очко</b>. Некоторые существа дают Эхо-очко Боевым кличем.</li>
+      <li>В свою основную фазу потратьте очко кнопкой «Использовать Эхо»: <b>последнее разыгранное вами мгновенное заклинание</b> сработает ещё раз бесплатно.</li>
+      <li>Эхо можно использовать <b>один раз за бой</b>. Ритуалы Эхом не повторяются.</li>
+    </ul>` },
+  { id: 'factions', ico: '🏰', title: 'Фракции', html: () => `
+    <h2>Пять фракций</h2>
+    <p class="rpLead">У каждой фракции есть своя пассивная способность — она действует весь бой, если вы играете колодой этой фракции. Нейтральные карты можно класть в любую колоду.</p>
+    <div class="rpFac">${FACTION_IDS.map(f => `<div class="rpFacItem" style="--fc:${colorOf(f).primary}"><div class="rpFacHead"><span>${FACTION_SIGIL[f]}</span><b>${FACTION_RU[f]}</b></div><p>${PASSIVE_TEXT[f]}</p></div>`).join('')}</div>` },
+  { id: 'decks', ico: '🃏', title: 'Колоды и коллекция', html: () => `
+    <h2>Колоды</h2>
+    <ul class="rpList">
+      <li>В колоде <b>не меньше 30 карт</b>. Стандартные колоды фракций — ровно 30, свои можно собирать больше (40, 60…).</li>
+      <li>Не больше <b>4 копий</b> одной карты, включая легендарные.</li>
+      <li>Для игры нужны все карты колоды в вашей коллекции.</li>
+    </ul>
+    <h2>Коллекция</h2>
+    <p>Новые карты — из бустеров (магазин, награды заданий, боевой пропуск, события). Недостающую карту можно <b>создать</b> за монеты 🪙, а лишние копии — <b>разобрать</b> на монеты (клик по карте в коллекции).</p>
+    <div class="rpTable"><div><b>Редкость</b><b>Создание, 🪙</b><b>Разбор, 🪙</b></div>
+      ${['Common', 'Uncommon', 'Rare', 'Epic', 'Legendary'].map(r => `<div><span>${RARITY_RU[r as Rarity] ?? r}</span><span>${CRAFT_COST[r]}</span><span>${DISENCHANT_COINS[r]}</span></div>`).join('')}</div>` },
+  { id: 'online', ico: '🌐', title: 'Сетевая игра', html: () => `
+    <h2>Бой с живым соперником</h2>
+    <p class="rpLead">Раздел «Сетевая» → «Играть»: выберите колоду, режим и нажмите «Играть».</p>
+    <ul class="rpList">
+      <li><b>Рейтинговая</b> — соперник подбирается по рейтингу (MMR), победа и поражение меняют его по системе Elo. Ранги: Бронза → Серебро → Золото → Платина → Алмаз → Мифик.</li>
+      <li><b>Обычная</b> — без влияния на рейтинг.</li>
+      <li><b>Дружеский вызов</b> — во вкладке «Друзья» нажмите ⚔ рядом с другом в сети.</li>
+      <li>При обрыве связи игра переподключится сама, место держится <b>60 секунд</b>. Не вернулись — поражение.</li>
+      <li>Выход из боя в меню засчитывается как <b>поражение</b>.</li>
+    </ul>` },
+  { id: 'controls', ico: '⌨', title: 'Управление', html: () => `
+    <h2>Управление</h2>
+    <div class="rpTable keys">
+      <div><kbd>Клик</kbd><span>выбрать карту или существо, затем цель</span></div>
+      <div><kbd>Перетаскивание</kbd><span>разыграть карту на поле или цель</span></div>
+      <div><kbd>Esc</kbd> / <kbd>ПКМ</kbd><span>отменить выбор, назад</span></div>
+      <div><kbd>Пробел</kbd><span>завершить ход / пас в окне ответа</span></div>
+      <div><kbd>1–9</kbd><span>разыграть карту из руки по номеру</span></div>
+      <div><kbd>E</kbd><span>использовать Эхо</span></div>
+      <div><kbd>?</kbd><span>открыть правила</span></div>
+    </div>` },
+];
+let rulesSection = 'basics';
+function renderRules(): void {
+  const nav = document.getElementById('rulesNav');
+  const body = document.getElementById('rulesBody');
+  if (!nav || !body) return;
+  nav.innerHTML = RULES_SECTIONS.map(r => `<button class="${r.id === rulesSection ? 'sel' : ''}" data-rs="${r.id}"><span>${r.ico}</span>${r.title}</button>`).join('');
+  const sec = RULES_SECTIONS.find(r => r.id === rulesSection) ?? RULES_SECTIONS[0];
+  body.innerHTML = sec.html();
+  (body.parentElement as HTMLElement).scrollTop = 0;
+}
+function openRules(section?: string): void {
+  if (section) rulesSection = section;
+  const inBattle = !$('battle').classList.contains('hidden');
+  if (!inBattle) {
+    setAppRoute('rules');
+    $('menu').classList.add('hidden');
+    for (const id of ['homeScreen', 'decksScreen', 'eventsScreen', 'collection', 'shopModal', 'bpModal', 'profileModal', 'campaignModal', 'boosterModal'])
+      document.getElementById(id)?.classList.add('hidden');
+    closeOnline();
+  }
+  $('rules').classList.toggle('inBattle', inBattle);
+  $('rules').classList.remove('hidden');
+  renderRules();
+}
+function closeRules(): void {
+  const r = $('rules');
+  if (r.classList.contains('inBattle')) { r.classList.add('hidden'); return; }
+  navigateApp('back');
+  if (appRoute === 'rules') navigateApp('home');
+}
+$('rules').addEventListener('click', ev => {
+  const t = ev.target as HTMLElement;
+  const s = t.closest('[data-rs]') as HTMLElement | null;
+  if (s) { Sfx.uiClick(); rulesSection = s.dataset.rs!; renderRules(); return; }
+  const c = t.closest('[data-card]') as HTMLElement | null;
+  if (c) { const card = db.get(c.dataset.card!); if (card) { const r = c.getBoundingClientRect(); showTooltip(card, r.right, r.top); } }
+});
+$('rules').addEventListener('mouseout', ev => { if ((ev.target as HTMLElement).closest?.('[data-card]')) tooltip.classList.remove('show'); });
+btn('btnRules').addEventListener('click', () => openRules());
+btn('btnRulesClose').addEventListener('click', () => closeRules());
 
-<h3 style="color:var(--gold-hi);letter-spacing:.1em;margin:.9rem 0">Пять фаз хода</h3>
-<ol style="padding-left:1.2rem;line-height:2">
-<li><b>Начало</b> — активируются руны, пассивки и триггеры существ, тикает Горение, разрешаются ритуалы.</li>
-<li><b>Ресурсы</b> — +1 к максимуму маны, полное восполнение (<span style="color:#8ad0ff">избыток не сгорает — копите для мгновенных</span>), добор карты.</li>
-<li><b>Основная</b> — розыгрыш ЛЮБЫХ карт. <b>Мгновенные (⚡)</b> можно играть и здесь, и вне её.</li>
-<li><b>Битва</b> — <b>ручная</b>: вы объявляете атакующих стрелкой. До и после объявления атак <b>оба игрока получают приоритет для мгновенных</b>. «Пропустить бой» — закончить без атак.</li>
-<li><b>Конец</b> — начисление Эхо-очка, истечение эффектов, срок жизни рун. Мгновенные ещё можно разыграть «в конец хода».</li>
-</ol>
-
-<h3 style="color:var(--gold-hi);letter-spacing:.1em;margin:.9rem 0">⚡ Мгновенные заклинания — как в MTG (важно)</h3>
-<p><b>Мгновенное заклинание (⚡ Мгновенное, Instant)</b> при наличии маны можно разыграть <b>в любой момент, когда у вас есть приоритет</b> — не только в свой Main:</p>
-<ul style="padding-left:1.2rem;line-height:1.7;margin:.4rem 0">
-<li><b>В ваш ход:</b> в основную фазу, в фазе Битвы (до/после атак), в фазе Конца.</li>
-<li><b>В ход противника:</b> в его основную фазу, перед его атакой, в конце его хода — карты подсвечены <span style="display:inline-block;padding:0 .35em;border-radius:4px;background:rgba(120,220,255,.18);border:1px solid rgba(120,220,255,.35);color:#8ad0ff">⚡ instantReady</span> (голубая пульсация + ⚡ бейдж).</li>
-<li><b>В ответ на заклинание:</b> любое мгновенное уходит в <b>стек LIFO</b> — последнее сыгранное разрешается первым. Противник получает окно ответа.</li>
-</ul>
-<p><b>Приоритет и стек (MTG):</b></p>
-<ul style="padding-left:1.2rem;line-height:1.7;margin:.4rem 0">
-<li>Когда вы разыгрываете мгновенное, оно попадает в <b>стек</b>. Игра ждёт <b>20 с</b> (индикатор <code>◷ 20 с</code> в правом доке) — противник может ответить своим мгновенным, которое встанет выше в стеке.</li>
-<li>Если оба пасуют — стек разрешается <b>сверху вниз</b> (последний ответ срабатывает первым). Кнопка <b>«Пас»</b> в доке — вручную передать приоритет.</li>
-<li>В симуляциях и при включённом <b>Авто-пас</b> (⚙ настройки) окно пропускается автоматически. В бою — ИИ отвечает эвристикой (лечит ≤14 HP, фризит 4+ атаку, добивает).</li>
-<li>Мана не «сгорает» между фазами: оставьте 2–3 маны после своего Main — и в ход противника сможете «вспышкой» добить существо, вылечить героя или заморозить угрозу.</li>
-</ul>
-<p style="color:var(--muted);font-size:.78rem">Движок: <code>canPlay()</code> теперь <code>isInstant → instantWindow===side || instantWindow===null ? allow : wait</code>, вне окна — instant speed без проверки <code>activeSide/phase</code>. Немота/мана/цели всё ещё проверяются.</p>
-
-<h3 style="color:var(--gold-hi);letter-spacing:.1em;margin:.9rem 0">Ритуалы vs мгновенные</h3>
-<p><b>◷ Ритуал</b> — заклинание с задержкой <b>1 ход</b>: цель фиксируется при розыгрыше, разрешается <b>в начале вашего следующего хода</b> (сильнее мгновенного за ту же ману, но противник видит подготовку). <b>Нельзя</b> играть в ответ, <b>не повторяется Эхом</b>, <b>не идёт в стек</b>.</p>
-<p><b>⚡ Мгновенное</b> — срабатывает сразу, уходит в <b>сброс</b>, может быть <b>повторено Эхом</b>, идёт в <b>стек</b> и может быть сыграно <b>в ход противника</b>.</p>
-
-<h3 style="color:var(--gold-hi);letter-spacing:.1em;margin:.9rem 0">Бой — выбор цели</h3>
-<p><b>Бить существо обязательно только если</b> у противника есть <b>Провокация</b> (Taunt) или карта прямо пишет «бьёт только существо».
-Во всех остальных случаях <b>можете бить героя напрямую</b> (даже если есть существа без Провокации). Перед блоком урона оба игрока могут сыграть мгновенные (бафф, урон, лечение).</p>
-<ul style="padding-left:1.2rem;line-height:1.7;margin:.4rem 0">
-<li>Если есть провокатор (не под Немотой) — герой недоступен, подсвечиваются только провокаторы.</li>
-<li>Если провокаторов нет — подсвечиваются все существа + герой (клик по портрету).</li>
-<li>Немота отключает Провокацию.</li>
-</ul>
-<p style="color:var(--muted);font-size:.78rem">Готовые к атаке — золотой пульс <code>readyPulse</code> + ⚔, мгновенные — голубой <code>instantPulse</code> + ⚡.</p>
-
-<h3 style="color:var(--gold-hi);letter-spacing:.1em;margin:.9rem 0">Ключевые слова существ — 12 механик (расширено v2.12.2)</h3>
-<table style="width:100%;border-collapse:collapse;font-size:.82rem;line-height:1.5">
-<tr><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)"><b>Провокация</b> <span style="color:#ffd87a">⛨</span></td><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)">Противник обязан атаковать это существо; герой недоступен пока провокатор жив. Снимается Немотой. <em>65 карт</em></td></tr>
-<tr><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)"><b>Рывок</b> <span style="color:#8ad0ff">⚡</span></td><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)">Может атаковать в ход призыва (игнорирует «болезнь призыва»). <em>46 карт</em></td></tr>
-<tr><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)"><b>Буря</b> <span style="color:#8ad0ff">🌀</span></td><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)">Две атаки за ход (ветер). <em>12 карт</em></td></tr>
-<tr><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)"><b>Прорыв</b> <span style="color:#ff9a4a">➤</span></td><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)">Избыточный урон над убитым блокёром проходит в героя противника. <em>19 карт</em></td></tr>
-<tr><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)"><b>Вампиризм</b> <span style="color:#ff6b6b">🩸</span></td><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)">Весь нанесённый боевым уроном урон лечит вашего героя. <em>45 карт</em></td></tr>
-<tr><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)"><b>Неуловимость</b> <span style="color:#b0b8c8">👁</span></td><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)">Не может быть выбрано целью атаки существом (герой бьётся). <em>24 карты</em></td></tr>
-<tr><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)"><b>Божественный щит</b> <span style="color:#ffd87a">🛡</span> <span style="color:#8aff8a;font-size:.7em">NEW</span></td><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)"><b>NEW v2.12.2:</b> входит на поле со <b>Щитом (1 заряд)</b> — поглощает первое повреждение. Теряется при пробитии, не восстанавливается. <em>18 карт</em></td></tr>
-<tr><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)"><b>Ядовитый</b> <span style="color:#7aff7a">☠</span> <span style="color:#8aff8a;font-size:.7em">NEW</span></td><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)"><b>NEW:</b> при успешном уроне существу накладывает <b>Яд</b> — любая следующая рана смертельна. Срабатывает даже при 1 уроне. <em>15 карт</em></td></tr>
-<tr><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)"><b>Ледяное касание</b> <span style="color:#8ad0ff">❄</span> <span style="color:#8aff8a;font-size:.7em">NEW</span></td><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)"><b>NEW:</b> при успешном уроне <b>замораживает цель на 1 ход</b> — не атакует. Комбо с контролем доски. <em>15 карт</em></td></tr>
-<tr><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)"><b>Боевой клич</b> <span style="color:#ffd87a">! </span></td><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)">Срабатывает при входе на поле (из руки). Эффекты: урон, лечение, призыв токена, немота и т.д. <em>127 карт</em></td></tr>
-<tr><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)"><b>Предсмертный хрип</b> <span style="color:#c8b8ff">✝</span></td><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)">Срабатывает при смерти существа: призыв, урон, добор и т.д. Отключается Немотой. <em>16 карт</em></td></tr>
-<tr><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)"><b>Урон заклинаний +1</b> <span style="color:#ff8aff">✦</span></td><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)">Пассивная аура: ваши заклинания наносят на +1 больше (складывается). Элементальные бонусы учитываются. <em>13 карт</em></td></tr>
-</table>
-<p style="color:var(--muted);font-size:.75rem;margin-top:.45rem">Баланс: каждая новая механика стоит <code>+1 маны ≈ +1.5 силы</code> (power-модель). Божественный щит + Ядовитый/Ледяное касание подняли стоимость 48 существ на +1, проверено 10k симуляций — винрейт 47–52%.</p>
-
-<h3 style="color:var(--gold-hi);letter-spacing:.1em;margin:.9rem 0">Типы карт — описание и способности</h3>
-<p><b>Существо</b> — остаётся на доске, <b>атака / здоровье</b>. Способности — ключевые слова + триггеры <code>onPlay / onTurnStart / onDeath / onSpellCast</code>. Текст в <code>ctext</code> точно повторяет эффект движка.</p>
-<p><b>Заклинание — ⚡ Мгновенное</b> (101 карта): если на карте написано <b>«⚡ Мгновенное»</b> — это <b>Instant Speed</b> (как в MTG): мана → эффект сразу → в сброс → в <b>стек LIFO</b> → можно играть <b>в ход противника</b> при наличии маны. Пример: «Тлетворное касание» <b>3✦</b> (было 2✦, +1 за instant premium) — 3 урона + Яд; «Серебряная клетка» 4✦ Немота + возврат. В коллекции подсвечено голубым пульсом <code>instantReady</code>.</p>
-<p><b>Заклинание — обычное</b> (если просто «Заклинание» без ⚡) — это <b>Sorcery Speed</b>: играется <b>только в вашу основную фазу</b>, не идёт в стек мгновенных. В базе это <b>◷ Ритуал (31 карта)</b> — подтип обычного с задержкой 1 ход: мана → подготовка → резолв в начале вашего следующего хода (цель фиксируется сразу, эффект сильнее за ту же ману). Пример: «Полночный реквием» 6✦ 2 урона всем + 2 карты. Обычные без задержки (если есть) — тоже только Main. Отмечены как <b>◷ Ритуал</b> или просто <b>Заклинание</b>.</p>
-<p style="color:var(--muted);font-size:.78rem"><b>Баланс заклинаний v2.12.2:</b> мгновенные дороже на <code>+1 маны</code> за instant premium (8 переоценённых: aur_s11 1→2, pyr_s18 1→2 и т.д.). Ritual дешевле за мощность из-за задержки, но сильнее. Проверено симуляцией.</p>
-<p><b>Руна</b> — постоянная аура на 3 слота (уникальна). Даёт <code>+атака/+здоровье, –урон герою, +мана, +добор, урон заклинаний</code> либо тик. Не уничтожается обычным уроном.</p>
-
-<h3 style="color:var(--gold-hi);letter-spacing:.1em;margin:.9rem 0">Эхо-очки</h3>
-<p>Если за основную фазу вы <b>не разыграли ни одного заклинания</b>, в конце хода получаете <b>1 Эхо-очко</b>. Тратите в свой Main и <b>бесплатно</b> повторяете последнее мгновенное (ту же цель; ритуалы не повторяются). По ТЗ — <b>один раз за игру</b>.</p>
-
-<h3 style="color:var(--gold-hi);letter-spacing:.1em;margin:.9rem 0">Статусы</h3>
-<p><b>Щит</b> — поглощает урон (заряд). <b>Горение</b> — урон в начале хода. <b>Яд</b> — любая рана смертельна. <b>Заморозка</b> — не атакует. <b>Немота</b> — отключает навсегда. <b>Выжигание</b> — режет лечение. <b>Порча</b> — <code>debuffHealth</code> –HP.</p>
-
-<h3 style="color:var(--gold-hi);letter-spacing:.1em;margin:.9rem 0">Пассивки фракций (баланс 45–55%)</h3>
-${FACTION_IDS.map(f => `<p style="margin:.45rem 0"><b style="color:${colorOf(f).primary}">${FACTION_SIGIL[f]} ${FACTION_RU[f]}</b> — ${PASSIVE_TEXT[f]}</p>`).join('')}
-<p style="color:var(--muted);font-size:.78rem;margin-top:.7rem">10 000 симуляций: 46–53% винрейт. Коэффициенты: Aur 0.87 / Nec 1.14 / Ter 1.13 / Pyr 1.28 / Eth 0.85.</p>
-
-<h3 style="color:var(--gold-hi);letter-spacing:.1em;margin:.9rem 0">Коллекция и баланс</h3>
-<p>Всего <b>500</b> карт (313 существ / 101 ⚡ + 31 ◷ / 55 рун), по 30/фракцию + 70 нейтральных. 150 базы сразу, остальное — бустеры (3C+1R+1Эпик 12.5%→Лега, 20% фойл). Лимит <b>4 копии</b>. Описания cгенерированы из эффектов, стоимость — <code>power = body+kw+effects</code>.</p>
-
-<h3 style="color:var(--gold-hi);letter-spacing:.1em;margin:.9rem 0">Управление и подсказки</h3>
-<p>Карту можно <b>перетащить</b> на поле/цель или <b>кликнуть</b> — цели подсвечиваются золотом. Мгновенные — даже в ход противника (<code>instantReady</code> голубая пульсация). <b>Esc / ПКМ — отмена</b>, <b>Пробел — завершить ход / Пас в окне отклика</b>, <b>1–9 — карта из руки</b> (мгновенные работают и в чужой ход), <b>E — Эхо</b>.</p>
-<p>Док <b>Стек</b> (правый низ) показывает LIFO-очередь, <b>Окно отклика</b> — 20 с круговой индикатор и кнопка «Пас». В ⚙ — Авто-пас, Веревка 75 с, предпросмотр.</p>
-`;
-btn('btnRules').addEventListener('click', () => { $('rulesBody').innerHTML = RULES_HTML; $('rules').classList.remove('hidden'); });
-btn('btnRulesClose').addEventListener('click', () => $('rules').classList.add('hidden'));
 
 /* --- горячие клавиши --- */
 document.addEventListener('keydown', (ev: KeyboardEvent) => {
@@ -8249,7 +9548,7 @@ document.addEventListener('keydown', (ev: KeyboardEvent) => {
       if (modal && !modal.classList.contains('hidden')) { modal.classList.add('hidden'); return; }
     }
     if (!$('authModal').classList.contains('hidden')) { closeAuth(); return; }
-    if (!$('rules').classList.contains('hidden')) { $('rules').classList.add('hidden'); return; }
+    if (!$('rules').classList.contains('hidden')) { closeRules(); return; }
     if (!$('settingsPanel').classList.contains('hidden')) { $('settingsPanel').classList.add('hidden'); $('settingsScrim')?.classList.add('hidden'); return; }
     if (['boosterModal','profileModal','shopModal','bpModal','campaignModal','tutModal'].some(id => !$(id).classList.contains('hidden'))
         || ['collection','decksScreen','eventsScreen'].some(id => !$(id).classList.contains('hidden'))) {
@@ -8265,8 +9564,7 @@ document.addEventListener('keydown', (ev: KeyboardEvent) => {
   }
   if (ev.key === '?' || (ev.key === '/' && ev.shiftKey)) {
     ev.preventDefault();
-    $('rulesBody').innerHTML = RULES_HTML;
-    $('rules').classList.remove('hidden');
+    openRules();
     return;
   }
   if (ev.key.toLowerCase() === 'h' || ev.key.toLowerCase() === 'р') {   // «р» = H в русской раскладке
@@ -8304,3 +9602,574 @@ console.log('[Эхо-Цитадель] прототип готов. Карт в 
 
 // объёмные объекты — первый проход после загрузки
 try { window.setTimeout(()=> attachVolumetric(document.body), 600); } catch {}
+
+/* v3.2: арт маны (кристаллы в бою) — art_raw/cosm/mana/*.png → /cosm/mana/<id>.
+   crystal — значок маны на панели героя (свой/противника), cost — подложка стоимости карты.
+   Нет файла → остаётся текущий глиф ✦ и CSS-кристалл. */
+(function initManaArt(): void {
+  const probe = (id: string, ok: (url: string) => void): void => {
+    const url = `/cosm/mana/${id}`;
+    const im = new Image();
+    im.onload = () => ok(url);
+    im.src = url;
+  };
+  probe('crystal', url => {
+    document.querySelectorAll<HTMLElement>('.stat.mana .ico').forEach(ico => {
+      ico.classList.add('manaArt');
+      ico.innerHTML = `<img src="${url}" alt="✦">`;
+    });
+  });
+  probe('cost', url => {
+    document.documentElement.style.setProperty('--mana-cost-art', `url("${url}")`);
+    document.body.classList.add('hasManaCostArt');
+  });
+})();
+
+/* =====================================================================
+   v3.3: ОНЛАЙН — «Сетевая»: рейтинговый/обычный поиск, друзья, вызовы, лидеры.
+   Бэкенд: server/social.ts (meta-server) + server/match_server.ts (билеты).
+   Спека: docs/ONLINE_SPEC.md
+   ===================================================================== */
+type OnlineUser = { login: string; nick: string; avatarFac: string; status: string; mmr: number; rank: string; wins: number; losses: number; friend?: boolean; pending?: boolean; id?: string; place?: number; games?: number };
+let onlineTab: 'play' | 'friends' | 'top' = 'play';
+let onlinePoll = 0;
+let onlineSearch: { mode: string; since: number } | null = null;
+let onlineFound: { match: string; seat: number; mode: string; opponent: OnlineUser; ticket: string; wsUrl?: string } | null = null;
+let onlineLastChallenges = new Set<string>();
+let onlineResultsHtml = '';
+const ONLINE_STATUS_RU: Record<string, string> = { online: 'в сети', searching: 'ищет матч', in_match: 'в матче', offline: 'не в сети' };
+async function onApi<T = Record<string, unknown>>(method: 'GET' | 'POST', path: string, body?: unknown): Promise<{ ok: boolean; status: number; j: T & { error?: string } }> {
+  try {
+    const r = await authFetch(`${META_API()}${path}`, { method, headers: { 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+    const j = await r.json().catch(() => ({})) as T & { error?: string };
+    return { ok: r.ok, status: r.status, j };
+  } catch { return { ok: false, status: 0, j: { error: 'Сервер недоступен (npm run server:meta, порт 8081)' } as T & { error?: string } }; }
+}
+function onlineEnsureModal(): HTMLElement {
+  let m = document.getElementById('onlineModal');
+  if (m) return m;
+  m = document.createElement('div');
+  m.id = 'onlineModal'; m.className = 'hidden'; m.setAttribute('role', 'dialog'); m.setAttribute('aria-label', 'Сетевая игра');
+  m.innerHTML = `<div class="onPanel">
+    <div class="onHead"><div class="onTitle">СЕТЕВАЯ ИГРА</div><div id="onMe" class="onMe"></div>
+      <button class="onClose" id="onClose" title="Закрыть">✕</button></div>
+    <div class="onTabs">
+      <button data-ot="play">Играть</button><button data-ot="friends">Друзья <b id="onFrBadge"></b></button><button data-ot="top">Лидеры</button>
+      <span style="flex:1"></span><button id="onEvents" class="onGhost">События ›</button>
+    </div>
+    <div id="onChall"></div>
+    <div id="onBody" class="onBody"></div>
+  </div>`;
+  document.body.appendChild(m);
+  m.addEventListener('click', ev => {
+    const t = ev.target as HTMLElement;
+    if (t === m || t.closest('#onClose')) { closeOnline(); return; }
+    if (t.closest('#onEvents')) { closeOnline(); openEventsScreen(); return; }
+    const tab = t.closest('[data-ot]') as HTMLElement | null;
+    if (tab) { Sfx.uiClick(); onlineTab = tab.dataset.ot as typeof onlineTab; void renderOnline(); return; }
+    const act = t.closest('[data-on]') as HTMLElement | null;
+    if (act) { Sfx.uiClick(); void onlineAction(act.dataset.on!, act.dataset.arg ?? ''); }
+  });
+  m.addEventListener('keydown', ev => {
+    const t = ev.target as HTMLElement;
+    if (t.id === 'onSearch' && (ev as KeyboardEvent).key === 'Enter') void onlineAction('search', '');
+  });
+  return m;
+}
+function onlineDeckId(): string { return menuSelectedDeckId || (document.getElementById('deckPick') as HTMLSelectElement | null)?.value || String(picked); }
+
+/* ---------------- v3.5: лобби «Играть» в стиле MTG Arena ----------------
+   Слева — плитки колод, справа — переключатель режима, выбранная колода,
+   большая кнопка «ИГРАТЬ». Во время поиска кнопка становится таймером с отменой. */
+let onlineMode: 'ranked' | 'casual' = 'ranked';
+function onlineDeckArts(deck: { faction: string; cards: string[]; avatarCardId?: string }): string {
+  const f = deck.faction;
+  const av = deck.avatarCardId && deck.cards.includes(deck.avatarCardId) ? db.get(deck.avatarCardId) : undefined;
+  const c = av ?? suggestedDeckArt(deck.cards);
+  const urls = c ? [`/art/${encodeURIComponent(c.faction)}/${encodeURIComponent(c.id)}.png`] : [];
+  urls.push(`/heroes/${encodeURIComponent(f)}`, `img/menu_${f.toLowerCase()}.jpg`);
+  return urls.join('|');
+}
+function fmtClock(sec: number): string { return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`; }
+function onlineLobbyHtml(me: { season: number; mmr: number; rank: { label: string; tier: string } }): string {
+  const decks = getAllDecksForGrid();
+  const selId = onlineDeckId();
+  const sel = decks.find(d => d.id === selId) ?? decks[0];
+  const busy = !!(onlineSearch || onlineFound);
+  const problem = sel ? deckPlayProblem(sel as unknown as DeckLike) : 'Нет колоды';
+  const tiles = decks.map(d => `<button data-f="${esc(d.faction)}" class="alDeck${d.id === sel?.id ? ' sel' : ''}" data-on="deck" data-arg="${esc(d.id)}" ${busy ? 'disabled' : ''} title="${esc(d.name)} · ${d.cards.length} карт">
+      <img data-arts="${esc(onlineDeckArts(d))}" alt="" loading="lazy">
+      <span class="alDeckName">${esc(d.name)}</span>
+      <span class="alDeckSub">${esc(FACTION_RU[d.faction as Faction] ?? d.faction)} · ${d.cards.length}</span>
+      ${d.isPrecon ? '' : '<span class="alDeckMine">МОЯ</span>'}
+    </button>`).join('');
+  const mode = onlineSearch?.mode ?? onlineFound?.mode ?? onlineMode;
+  const modeInfo: Record<string, string> = {
+    ranked: `Сезон ${me.season} · Elo · ранги Бронза → Мифик`,
+    casual: 'Без влияния на рейтинг · быстрый подбор',
+    friendly: 'Дружеский вызов · без рейтинга',
+  };
+  let action: string;
+  if (onlineFound) {
+    const o = onlineFound.opponent;
+    action = `<div class="alVs"><span>${esc(String(meta.nick || 'Вы'))}</span><b>VS</b><span>${esc(o.nick)}</span></div>
+      <div class="alVsSub">${esc(String(o.rank ?? ''))} · подключение к бою…</div>
+      <button class="alPlay found" data-on="playNow">В БОЙ</button>`;
+  } else if (onlineSearch) {
+    const sec = Math.round((Date.now() - onlineSearch.since) / 1000);
+    action = `<div class="alSearchInfo" id="onMmInfo">Поиск соперника…</div>
+      <button class="alPlay searching" data-on="cancel" title="Отменить поиск"><span class="alSpin"></span><span class="onTimer">${fmtClock(sec)}</span><i>Отмена</i></button>`;
+  } else {
+    action = `${problem ? `<div class="alWarn">⚠ ${esc(problem)}</div>` : ''}
+      <button class="alPlay" data-on="queue" data-arg="${mode}" ${problem ? 'disabled' : ''}>ИГРАТЬ</button>`;
+  }
+  return `<div class="alWrap">
+    <div class="alLeft"><div class="alHead">МОИ КОЛОДЫ <span>${decks.length}</span></div><div class="alGrid">${tiles}</div></div>
+    <div class="alRight">
+      <div class="alModes">
+        <button class="${mode === 'ranked' ? 'sel' : ''}" data-on="mode" data-arg="ranked" ${busy ? 'disabled' : ''}>Рейтинговая</button>
+        <button class="${mode === 'casual' ? 'sel' : ''}" data-on="mode" data-arg="casual" ${busy ? 'disabled' : ''}>Обычная</button>
+      </div>
+      <div class="alModeInfo">${esc(modeInfo[mode] ?? '')}</div>
+      ${mode === 'ranked' ? `<div class="alRank"><span class="onTier t-${esc(me.rank.tier)}">${esc(me.rank.label)}</span><b>${me.mmr}</b> MMR</div>` : ''}
+      ${sel ? `<div class="alSel" data-f="${esc(sel.faction)}"><img data-arts="${esc(onlineDeckArts(sel))}" alt=""><div class="alSelTxt"><b>${esc(sel.name)}</b><span>${esc(FACTION_RU[sel.faction as Faction] ?? sel.faction)} · ${sel.cards.length} карт</span></div></div>` : ''}
+      <div class="alAction">${action}</div>
+    </div>
+  </div>`;
+}
+function onlineUserRow(u: OnlineUser, actions: string): string {
+  return `<div class="onUser"><span class="onDot s-${esc(u.status)}" title="${esc(ONLINE_STATUS_RU[u.status] ?? u.status)}"></span>
+    <span class="onAva f-${esc(u.avatarFac)}">${esc((u.nick || u.login).slice(0, 1).toUpperCase())}</span>
+    <span class="onName"><b>${esc(u.nick || u.login)}</b><i>@${esc(u.login)} · ${esc(ONLINE_STATUS_RU[u.status] ?? '')}</i></span>
+    <span class="onRank">${esc(u.rank)}<i>${u.wins}–${u.losses}</i></span>
+    <span class="onActs">${actions}</span></div>`;
+}
+async function renderOnline(): Promise<void> {
+  const m = onlineEnsureModal();
+  m.querySelectorAll('[data-ot]').forEach(b => b.classList.toggle('sel', (b as HTMLElement).dataset.ot === onlineTab));
+  const body = m.querySelector('#onBody') as HTMLElement;
+  const meBox = m.querySelector('#onMe') as HTMLElement;
+  if (!meta.signedIn || !authGet()) {
+    meBox.innerHTML = '';
+    body.innerHTML = `<div class="onEmpty"><div class="onBig">🔒</div><p>Онлайн-режимы доступны после входа в аккаунт:<br>рейтинговая лестница, друзья и дружеские вызовы.</p>
+      <div class="onRow"><button class="btn gold" data-on="login">Войти</button><button class="btn" data-on="register">Регистрация</button></div></div>`;
+    return;
+  }
+  const me = await onApi<{ mmr: number; rank: { label: string; tier: string }; wins: number; losses: number; place: number | null; season: number }>('GET', '/api/rating/me');
+  if (!me.ok) {
+    meBox.innerHTML = '';
+    body.innerHTML = `<div class="onEmpty"><div class="onBig">⚠</div><p>${esc(me.j.error ?? 'Ошибка сервера')}</p></div>`;
+    return;
+  }
+  meBox.innerHTML = `<span class="onTier t-${esc(me.j.rank.tier)}">${esc(me.j.rank.label)}</span><span>${me.j.mmr} MMR</span><span>${me.j.wins}–${me.j.losses}</span>${me.j.place ? `<span>#${me.j.place}</span>` : ''}`;
+  const fr = await onApi<{ friends: OnlineUser[]; incoming: OnlineUser[]; outgoing: OnlineUser[]; challenges: OnlineUser[] }>('GET', '/api/friends');
+  const badge = m.querySelector('#onFrBadge') as HTMLElement;
+  if (badge) badge.textContent = fr.ok && fr.j.incoming.length ? String(fr.j.incoming.length) : '';
+  const ch = m.querySelector('#onChall') as HTMLElement;
+  ch.innerHTML = fr.ok ? fr.j.challenges.map(c => `<div class="onChallenge">⚔ <b>${esc(c.nick)}</b> вызывает вас на дружеский матч
+    <button class="btn gold smBtn" data-on="chAccept" data-arg="${esc(c.id ?? '')}">Принять</button><button class="btn smBtn" data-on="chDecline" data-arg="${esc(c.id ?? '')}">Отклонить</button></div>`).join('') : '';
+
+  m.classList.toggle('arena', onlineTab === 'play');
+  if (onlineTab === 'play') {
+    body.innerHTML = onlineLobbyHtml(me.j);
+    body.querySelectorAll<HTMLImageElement>('img[data-arts]').forEach(img => artChain(img, img.dataset.arts!.split('|')));
+  } else if (onlineTab === 'friends') {
+    if (!fr.ok) { body.innerHTML = `<div class="onEmpty">${esc(fr.j.error ?? '')}</div>`; return; }
+    const q = (document.getElementById('onSearch') as HTMLInputElement | null)?.value ?? '';
+    body.innerHTML = `<div class="onRow"><input id="onSearch" class="authInp" placeholder="Логин или ник игрока" value="${esc(q)}" maxlength="20"><button class="btn gold" data-on="search">Найти</button></div>
+      <div id="onResults">${onlineResultsHtml}</div>
+      ${fr.j.incoming.length ? `<div class="onSec">ЗАЯВКИ В ДРУЗЬЯ</div>` + fr.j.incoming.map(u => onlineUserRow(u, `<button class="btn gold smBtn" data-on="accept" data-arg="${esc(u.login)}">Принять</button><button class="btn smBtn" data-on="decline" data-arg="${esc(u.login)}">✕</button>`)).join('') : ''}
+      <div class="onSec">ДРУЗЬЯ · ${fr.j.friends.filter(f => f.status !== 'offline').length}/${fr.j.friends.length} в сети</div>
+      ${fr.j.friends.length ? fr.j.friends.map(u => onlineUserRow(u, `<button class="btn smBtn" data-on="challenge" data-arg="${esc(u.login)}" ${u.status === 'online' ? '' : 'disabled'} title="Дружеский матч">⚔</button><button class="btn smBtn" data-on="remove" data-arg="${esc(u.login)}" title="Удалить из друзей">✕</button>`)).join('') : '<div class="onNote">Пока никого — найдите игрока по логину выше.</div>'}
+      ${fr.j.outgoing.length ? `<div class="onSec">ОТПРАВЛЕННЫЕ</div>` + fr.j.outgoing.map(u => onlineUserRow(u, `<button class="btn smBtn" data-on="cancelReq" data-arg="${esc(u.login)}">Отменить</button>`)).join('') : ''}`;
+  } else {
+    const lb = await onApi<{ season: number; top: OnlineUser[] }>('GET', '/api/leaderboard');
+    const my = String(meta.nick);
+    body.innerHTML = lb.ok && lb.j.top.length
+      ? `<div class="onSec">СЕЗОН ${lb.j.season} · ТОП-100</div><div class="onTop">` + lb.j.top.map(u =>
+        `<div class="onTopRow${u.nick === my ? ' me' : ''}"><span class="p">${u.place}</span><span class="onDot s-${esc(u.status)}"></span><b>${esc(u.nick)}</b><span class="r">${esc(u.rank)}</span><span class="w">${u.wins}–${u.losses}</span></div>`).join('') + '</div>'
+      : '<div class="onEmpty">Рейтинговых матчей в этом сезоне ещё нет.</div>';
+  }
+}
+async function onlineAction(a: string, arg: string): Promise<void> {
+  const fail = (r: { ok: boolean; j: { error?: string } }): boolean => { if (!r.ok) showToast(`⚠ ${r.j.error ?? 'Ошибка'}`); return !r.ok; };
+  if (a === 'login' || a === 'register') { closeOnline(); openAuth(a); return; }
+  if (a === 'queue') {
+    const r = await onApi<{ state: string }>('POST', '/api/mm/queue', { mode: arg, deckId: onlineDeckId() });
+    if (fail(r)) return;
+    onlineSearch = { mode: arg, since: Date.now() };
+  }
+  if (a === 'cancel') { await onApi('POST', '/api/mm/cancel'); onlineSearch = null; }
+  if (a === 'mode') { onlineMode = arg === 'casual' ? 'casual' : 'ranked'; await renderOnline(); return; }
+  if (a === 'deck') { selectMainMenuDeck(arg); await renderOnline(); return; }
+  if (a === 'foundOk') onlineFound = null;
+  if (a === 'playNow' && onlineFound?.ticket) { void startOnlineBattle(onlineFound.ticket, onlineFound.wsUrl); return; }
+  if (a === 'search') {
+    const q = (document.getElementById('onSearch') as HTMLInputElement | null)?.value.trim() ?? '';
+    const r = await onApi<{ users: OnlineUser[] }>('GET', `/api/users/search?q=${encodeURIComponent(q)}`);
+    if (fail(r)) return;
+    const box = document.getElementById('onResults');
+    onlineResultsHtml = r.j.users.length ? r.j.users.map(u => onlineUserRow(u, u.friend ? '<span class="onNote">в друзьях</span>'
+      : u.pending ? '<span class="onNote">заявка</span>' : `<button class="btn gold smBtn" data-on="add" data-arg="${esc(u.login)}">+ В друзья</button>`)).join('')
+      : `<div class="onNote">${q.length < 2 ? 'Введите минимум 2 символа' : 'Никого не нашли'}</div>`;
+    if (box) box.innerHTML = onlineResultsHtml;
+    return;
+  }
+  if (a === 'add') { const r = await onApi<{ friends?: boolean }>('POST', '/api/friends/request', { to: arg }); if (fail(r)) return; onlineResultsHtml = ''; showToast(r.j.friends ? '🤝 Теперь вы друзья' : '📨 Заявка отправлена'); }
+  if (a === 'accept') { if (fail(await onApi('POST', '/api/friends/accept', { from: arg }))) return; showToast('🤝 Заявка принята'); }
+  if (a === 'decline') await onApi('POST', '/api/friends/decline', { from: arg });
+  if (a === 'cancelReq') await onApi('POST', '/api/friends/cancel', { to: arg });
+  if (a === 'remove') { if (!window.confirm(`Удалить ${arg} из друзей?`)) return; await onApi('POST', '/api/friends/remove', { login: arg }); }
+  if (a === 'challenge') { if (fail(await onApi('POST', '/api/challenge', { to: arg, deckId: onlineDeckId() }))) return; showToast(`⚔ Вызов отправлен: ${arg}`); onlineTab = 'play'; onlineSearch = { mode: 'friendly', since: Date.now() }; }
+  if (a === 'chAccept') { if (fail(await onApi('POST', '/api/challenge/accept', { id: arg, deckId: onlineDeckId() }))) return; onlineTab = 'play'; }
+  if (a === 'chDecline') await onApi('POST', '/api/challenge/decline', { id: arg });
+  await onlinePollTick(true);
+}
+async function onlinePollTick(forceRender = false): Promise<void> {
+  if (!meta.signedIn || !authGet()) return;
+  const st = await onApi<{ state: string; match?: string; seat?: number; mode?: string; opponent?: OnlineUser; ticket?: string; wsUrl?: string; waited?: number; window?: number; inQueue?: number }>('GET', '/api/mm/status');
+  if (st.ok && st.j.state === 'found' && st.j.opponent) {
+    onlineSearch = null;
+    onlineFound = { match: st.j.match!, seat: st.j.seat!, mode: st.j.mode!, opponent: st.j.opponent, ticket: st.j.ticket ?? '', wsUrl: st.j.wsUrl };
+    const tk = onlineFound.ticket;
+    const wu = onlineFound.wsUrl;
+    window.setTimeout(() => { if (onlineFound?.ticket === tk) void startOnlineBattle(tk, wu); }, 1800);
+    onlineTab = 'play';
+    Sfx.uiClick(); showToast(`⚔ Соперник найден: ${st.j.opponent.nick}`);
+    forceRender = true;
+  } else if (st.ok && st.j.state === 'idle' && onlineSearch && onlineSearch.mode !== 'friendly') { onlineSearch = null; forceRender = true; }
+  const open = !document.getElementById('onlineModal')?.classList.contains('hidden') && !!document.getElementById('onlineModal');
+  const typing = document.activeElement?.id === 'onSearch';
+  if (open && !typing && (forceRender || onlineTab !== 'play')) await renderOnline();
+  else if (open && onlineSearch) {
+    const t = document.querySelector('#onlineModal .onTimer');
+    const sec = Math.round((Date.now() - onlineSearch.since) / 1000);
+    if (t) t.textContent = `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+    const inf = document.getElementById('onMmInfo');
+    if (inf && st.ok && st.j.state === 'searching') inf.textContent = `Окно подбора ±${st.j.window} MMR · в очереди: ${st.j.inQueue}`;
+  }
+}
+function openOnline(): void {
+  closeAllScreens();
+  $('menu').classList.add('hidden');
+  setAppRoute('online');
+  const m = onlineEnsureModal();
+  m.classList.remove('hidden');
+  void renderOnline();
+  window.clearInterval(onlinePoll);
+  onlinePoll = window.setInterval(() => { void onlinePollTick(); }, 2500);
+}
+function closeOnline(): void {
+  document.getElementById('onlineModal')?.classList.add('hidden');
+  window.clearInterval(onlinePoll); onlinePoll = 0;
+}
+/* v3.12: баннер входящего вызова на главной + быстрые CTA панели боя */
+function renderHomeChallengeBanner(): void {
+  const b = document.getElementById('ecChBanner');
+  if (!b) return;
+  if (!homeChallengeList.length) { b.classList.add('hidden'); b.innerHTML = ''; return; }
+  const c = homeChallengeList[0];
+  b.classList.remove('hidden');
+  b.innerHTML = `<span class="ecChBTxt">⚔ <b>${esc(c.nick)}</b> вызывает вас на дружеский матч</span>
+    <span class="ecChBBtns"><button class="btn primary smBtn" data-chaccept="${esc(c.id)}">Принять</button>
+    <button class="btn smBtn" data-chdecline="${esc(c.id)}">Отклонить</button></span>`;
+}
+document.addEventListener('click', ev => {
+  const t = ev.target as HTMLElement | null;
+  const acc = t?.closest?.('[data-chaccept]') as HTMLElement | null;
+  const dec = t?.closest?.('[data-chdecline]') as HTMLElement | null;
+  if (acc?.dataset.chaccept !== undefined && acc) {
+    void onApi('POST', '/api/challenge/accept', { id: acc.dataset.chaccept, deckId: onlineDeckId() }).then(r => {
+      if (r.ok) { homeChallengeList = []; renderHomeChallengeBanner(); updateChallengePanel(); openOnline(); }
+      else showToast('Не удалось принять вызов');
+    });
+  }
+  if (dec?.dataset.chdecline !== undefined && dec) {
+    void onApi('POST', '/api/challenge/decline', { id: dec.dataset.chdecline });
+    homeChallengeList = []; renderHomeChallengeBanner(); updateChallengePanel(); showToast('Вызов отклонён');
+  }
+  if ((t?.closest?.('#btnChOnline') as HTMLElement | null)) { document.getElementById('btnNavMulti')?.click(); }
+  if ((t?.closest?.('#btnChFriends') as HTMLElement | null)) { document.getElementById('btnFriends')?.click(); }
+});
+
+/* фоновое присутствие + уведомление о вызовах друзей (раз в 30 с, только если вошли) */
+window.setInterval(() => {
+  if (!meta.signedIn || !authGet() || typeof window.fetch !== 'function') return;
+  /* v3.15.4: фоновый синк профиля — idle-игрок получает выдачи админки ≤30 с без
+     каких-либо действий (раньше выдача становилась видна только после его следующей
+     metaSave). Цикла не образуется: success-хендлер пересинкает только при изменении. */
+  void syncProfile();
+  void onApi('POST', '/api/presence', { status: 'online' });
+  void onApi<{ challenges: OnlineUser[] }>('GET', '/api/friends').then(r => {
+    if (!r.ok) return;
+    const ids = new Set(r.j.challenges.map(c => String(c.id)));
+    for (const c of r.j.challenges) if (!onlineLastChallenges.has(String(c.id))) showToast(`⚔ ${c.nick} вызывает вас`);
+    onlineLastChallenges = ids;
+    homeChallengeList = (r.j.challenges as Array<{ id?: string | number; nick?: string }>).map(c => ({ id: String(c.id ?? ''), nick: String(c.nick ?? '') }));
+    renderHomeChallengeBanner(); updateChallengePanel();
+  });
+  if (onlineSearch && !onlinePoll) void onlinePollTick();
+}, 30_000);
+(window as unknown as { openOnline: () => void }).openOnline = openOnline;
+
+/* =====================================================================
+   v3.4: NetLink — WebSocket к матч-серверу. Очередь входящих ходов соперника,
+   автопереподключение (сервер держит место 60 с), сдача.
+   ===================================================================== */
+type NetSeatInfo = { login: string; deck: string[]; faction: string; name: string };
+type NetMsg = Record<string, unknown> & { k: string };
+class NetLink {
+  seat: 0 | 1 = 0;
+  mode = 'casual';
+  match = '';
+  you!: NetSeatInfo;
+  opp!: NetSeatInfo;
+  overInfo: { winnerSeat: number | null; reason: string } | null = null;
+  onNeedSync: (() => void) | null = null;
+  private ws: WebSocket | null = null;
+  private queue: NetMsg[] = [];
+  private waiters: Array<{ kind?: string; res: (m: NetMsg | null) => void }> = [];
+  private closed = false;
+  private started: ((ok: boolean, err?: string) => void) | null = null;
+  private retries = 0;
+  private urlIdx = 0;
+  constructor(private urls: string[], private ticket: string, private joinInfo: { deck: string[]; faction: string; name: string }) {}
+
+  connect(timeoutMs = 20000): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const t = window.setTimeout(() => { this.started = null; reject(new Error('Соперник не подключился вовремя')); }, timeoutMs);
+      this.started = (ok, err) => { window.clearTimeout(t); this.started = null; if (ok) resolve(); else reject(new Error(err || 'Ошибка подключения')); };
+      this.open();
+    });
+  }
+  private open(): void {
+    let ws: WebSocket;
+    try { ws = new WebSocket(this.urls[this.urlIdx]); } catch { this.started?.(false, 'Матч-сервер недоступен'); return; }
+    this.ws = ws;
+    let opened = false;
+    ws.onopen = () => { opened = true; this.retries = 0; ws.send(JSON.stringify({ t: 'join', ticket: this.ticket, ...this.joinInfo })); };
+    ws.onmessage = ev => {
+      let m: Record<string, unknown>;
+      try { m = JSON.parse(String(ev.data)); } catch { return; }
+      if (m.t === 'start') {
+        this.seat = m.seat === 1 ? 1 : 0; this.mode = String(m.mode ?? 'casual'); this.match = String(m.match ?? '');
+        this.you = m.you as NetSeatInfo; this.opp = m.opp as NetSeatInfo;
+        if (m.resume) { pushLog('📡 Соединение восстановлено', 'phase'); return; }
+        this.started?.(true);
+      } else if (m.t === 'joined') {
+        if (m.waiting) setOnlineConnecting('Ждём соперника…');
+      } else if (m.t === 'net') {
+        const nm = m.m as NetMsg;
+        if (nm?.k === 'needSync') { this.onNeedSync?.(); return; }
+        this.push(nm);
+      } else if (m.t === 'oppLeft') {
+        pushLog(`📡 Соперник отключился — ждём до ${m.graceSec ?? 60} с`, 'big'); showToast('📡 Соперник отключился');
+      } else if (m.t === 'oppBack') {
+        pushLog('📡 Соперник вернулся', 'phase');
+      } else if (m.t === 'over') {
+        this.overInfo = { winnerSeat: (m.winnerSeat as number | null) ?? null, reason: String(m.reason ?? '') };
+        battle.netServerOver(this.overInfo.winnerSeat, this.overInfo.reason);
+        this.flush();
+      } else if (m.t === 'err') {
+        showToast(`⚠ ${m.msg}`);
+        this.started?.(false, String(m.msg));
+      }
+    };
+    ws.onclose = () => {
+      this.ws = null;
+      if (this.closed || this.overInfo) return;
+      if (this.started && !opened && this.urlIdx < this.urls.length - 1) { this.urlIdx++; this.open(); return; }
+      if (this.started) { this.started(false, 'Сервер недоступен — запустите npm run server:meta'); return; }
+      // обрыв посреди матча: переподключаемся тем же билетом (сервер держит место 60 с)
+      if (this.retries++ < 20) { pushLog('📡 Связь потеряна — переподключение…', 'big'); window.setTimeout(() => this.open(), 1500); }
+    };
+  }
+  private push(m: NetMsg): void {
+    const i = this.waiters.findIndex(w => !w.kind || w.kind === m.k);
+    if (i >= 0) { const w = this.waiters.splice(i, 1)[0]; w.res(m); } else this.queue.push(m);
+  }
+  private flush(): void { for (const w of this.waiters.splice(0)) w.res(null); }
+  /** следующий ход соперника (null — матч завершён) */
+  next(): Promise<NetMsg | null> {
+    if (this.queue.length) return Promise.resolve(this.queue.shift()!);
+    if (this.overInfo || this.closed) return Promise.resolve(null);
+    return new Promise(res => this.waiters.push({ res }));
+  }
+  nextOf(kind: string): Promise<NetMsg | null> {
+    const i = this.queue.findIndex(m => m.k === kind);
+    if (i >= 0) return Promise.resolve(this.queue.splice(i, 1)[0]);
+    if (this.overInfo || this.closed) return Promise.resolve(null);
+    return new Promise(res => this.waiters.push({ kind, res }));
+  }
+  send(m: Record<string, unknown>): void { this.sendRaw({ t: 'net', m }); }
+  sendRaw(m: Record<string, unknown>): void { if (this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(m)); }
+  concede(): void { this.sendRaw({ t: 'concede' }); }
+  close(): void { this.closed = true; this.flush(); try { this.ws?.close(); } catch { void 0; } }
+}
+/** PvP-сокет: по умолчанию встроен в meta-server (порт 8081, путь /match). */
+const MATCH_WS = (): string[] => [META_API().replace(/^http/, 'ws') + '/match', `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.hostname}:8080`];
+
+function setOnlineConnecting(text: string | null): void {
+  let o = document.getElementById('onlineConnecting');
+  if (!text) { o?.remove(); return; }
+  if (!o) {
+    o = document.createElement('div'); o.id = 'onlineConnecting';
+    o.innerHTML = '<div class="onSpinner"></div><div class="t"></div>';
+    document.body.appendChild(o);
+  }
+  (o.querySelector('.t') as HTMLElement).textContent = text;
+}
+/** Найден матч → подключаемся к матч-серверу и запускаем бой с живым соперником.
+    v3.16: wsUrl — адрес конкретного шарда матч-тиера (если задан MATCH_SHARDS на
+    meta-server): ставим его ПЕРВЫМ в списке попыток, фолбэк на штатные адреса. */
+async function startOnlineBattle(ticket: string, wsUrl?: string): Promise<void> {
+  const deckId = onlineDeckId();
+  const def = resolveDeck(deckId, deckList as unknown as DeckLike[]) ?? starterDeckForFaction(picked) ?? deckById.get(picked)!;
+  const urls = wsUrl ? [wsUrl, ...MATCH_WS()] : MATCH_WS();
+  const link = new NetLink(urls, ticket, { deck: def.cards.slice(), faction: String(def.faction), name: String(meta.nick || 'Игрок') });
+  closeOnline();
+  setOnlineConnecting('Подключение к матчу…');
+  try {
+    await link.connect(25000);
+  } catch (err) {
+    setOnlineConnecting(null);
+    link.close();
+    showToast(`⚠ ${(err as Error).message}`);
+    openOnline();
+    return;
+  }
+  setOnlineConnecting(null);
+  onlineFound = null;
+  audioUnlock(); musicStart();
+  battle.net = link;
+  battle.launchMode = 'online';
+  battle.playerFaction = link.you.faction as Faction;
+  battle.enemyFaction = link.opp.faction as Faction;
+  battle.playerDeckId = deckId;
+  battle.practice = true;               // локальный MMR не трогаем — рейтинг считает сервер
+  battle.friendFoe = null; battle.bossPower = null; battle.bossHp = 0; battle.tutLesson = 0; battle.campNode = null; battle.eventId = null;
+  battle.matchId = link.match;
+  applyBattleBg(battle.playerFaction);
+  battle.start().catch(err => reportFatal('online-start', err));
+}
+async function onlineRefreshAfterMatch(): Promise<void> {
+  const r = await onApi<{ mmr: number; rank: { label: string }; history: Array<{ delta: number; result: string }> }>('GET', '/api/rating/me');
+  if (r.ok && r.j.history?.[0]?.delta) {
+    const d = r.j.history[0].delta;
+    showToast(`${d > 0 ? '📈' : '📉'} Рейтинг: ${d > 0 ? '+' : ''}${d} → ${r.j.mmr} (${r.j.rank.label})`);
+  }
+}
+
+/* =====================================================================
+   v3.7: ДРУЗЬЯ — иконка в верхней панели + боковая панель (как соц-панель MTG Arena).
+   В сети / не в сети, заявки, вызовы, дружеский матч, добавление по логину.
+   ===================================================================== */
+type FriendUser = OnlineUser & { lastSeen?: number };
+let friendsTimer = 0;
+function agoRu(ts?: number): string {
+  if (!ts) return 'не в сети';
+  const m = Math.floor((Date.now() - ts) / 60000);
+  if (m < 1) return 'был(а) только что';
+  if (m < 60) return `был(а) ${m} мин назад`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `был(а) ${h} ч назад`;
+  return `был(а) ${Math.floor(h / 24)} дн назад`;
+}
+function friendRow(u: FriendUser, acts: string): string {
+  const st = u.status === 'offline' ? agoRu(u.lastSeen) : (ONLINE_STATUS_RU[u.status] ?? u.status);
+  return `<div class="fpUser s-${esc(u.status)}">
+    <span class="fpAva f-${esc(u.avatarFac)}">${esc((u.nick || u.login).slice(0, 1).toUpperCase())}<i class="fpDot"></i></span>
+    <span class="fpName"><b>${esc(u.nick || u.login)}</b><i>${esc(st)}</i></span>
+    <span class="fpActs">${acts}</span></div>`;
+}
+async function friendsRefresh(): Promise<void> {
+  const badge = document.getElementById('friendsBadge');
+  const body = document.getElementById('fpBody');
+  const cnt = document.getElementById('fpCount');
+  if (!meta.signedIn || !authGet()) { badge?.classList.add('hidden'); return; }
+  const r = await onApi<{ friends: FriendUser[]; incoming: FriendUser[]; outgoing: FriendUser[]; challenges: FriendUser[] }>('GET', '/api/friends');
+  if (!r.ok) { if (body) body.innerHTML = `<div class="fpEmpty">${esc(r.j.error ?? 'Сервер недоступен')}</div>`; return; }
+  const on = r.j.friends.filter(f => f.status !== 'offline').sort((a, b) => a.nick.localeCompare(b.nick, 'ru'));
+  const off = r.j.friends.filter(f => f.status === 'offline').sort((a, b) => (b.lastSeen ?? 0) - (a.lastSeen ?? 0));
+  const alerts = r.j.incoming.length + r.j.challenges.length;
+  if (badge) {
+    badge.textContent = alerts ? String(alerts) : String(on.length);
+    badge.classList.toggle('hidden', !alerts && !on.length);
+    badge.classList.toggle('alert', !!alerts);
+  }
+  if (cnt) cnt.textContent = `${on.length} в сети`;
+  if (!body || document.getElementById('friendsPanel')?.classList.contains('hidden')) return;
+  const sec = (t: string, n: number, html: string, cls = ''): string => `<div class="fpSec ${cls}"><div class="fpSecT">${t}<span>${n}</span></div>${html}</div>`;
+  let h = '';
+  if (r.j.challenges.length) h += sec('ВЫЗОВЫ', r.j.challenges.length, r.j.challenges.map(u => friendRow(u,
+    `<button class="fpBtn gold" data-fp="chAccept" data-arg="${esc(u.id ?? '')}" title="Принять вызов">⚔</button><button class="fpBtn" data-fp="chDecline" data-arg="${esc(u.id ?? '')}" title="Отклонить">✕</button>`)).join(''), 'hl');
+  if (r.j.incoming.length) h += sec('ЗАЯВКИ', r.j.incoming.length, r.j.incoming.map(u => friendRow(u,
+    `<button class="fpBtn gold" data-fp="accept" data-arg="${esc(u.login)}" title="Принять">✓</button><button class="fpBtn" data-fp="decline" data-arg="${esc(u.login)}" title="Отклонить">✕</button>`)).join(''), 'hl');
+  h += sec('В СЕТИ', on.length, on.length ? on.map(u => friendRow(u,
+    `<button class="fpBtn" data-fp="challenge" data-arg="${esc(u.login)}" ${u.status === 'online' ? '' : 'disabled'} title="Вызвать на дружеский матч">⚔</button><button class="fpBtn ghost" data-fp="remove" data-arg="${esc(u.login)}" title="Удалить из друзей">⋯</button>`)).join('') : '<div class="fpEmpty">Никого из друзей нет в сети</div>');
+  h += sec('НЕ В СЕТИ', off.length, off.length ? off.map(u => friendRow(u,
+    `<button class="fpBtn ghost" data-fp="remove" data-arg="${esc(u.login)}" title="Удалить из друзей">⋯</button>`)).join('') : (r.j.friends.length ? '' : '<div class="fpEmpty">Пока нет друзей — добавьте по логину выше</div>'), 'off');
+  if (r.j.outgoing.length) h += sec('ОТПРАВЛЕННЫЕ', r.j.outgoing.length, r.j.outgoing.map(u => friendRow(u,
+    `<button class="fpBtn ghost" data-fp="cancelReq" data-arg="${esc(u.login)}" title="Отменить заявку">✕</button>`)).join(''), 'off');
+  body.innerHTML = h;
+}
+function friendsOpen(): void {
+  const p = document.getElementById('friendsPanel');
+  if (!p) return;
+  p.classList.remove('hidden');
+  document.getElementById('btnFriends')?.classList.add('active');
+  void friendsRefresh();
+  window.clearInterval(friendsTimer);
+  friendsTimer = window.setInterval(() => { void friendsRefresh(); }, 10_000);
+}
+function friendsClose(): void {
+  document.getElementById('friendsPanel')?.classList.add('hidden');
+  document.getElementById('btnFriends')?.classList.remove('active');
+  window.clearInterval(friendsTimer); friendsTimer = 0;
+}
+document.getElementById('btnFriends')?.addEventListener('click', () => {
+  Sfx.uiClick();
+  if (document.getElementById('friendsPanel')?.classList.contains('hidden')) friendsOpen(); else friendsClose();
+});
+document.getElementById('fpClose')?.addEventListener('click', () => friendsClose());
+async function friendsAdd(): Promise<void> {
+  const inp = document.getElementById('fpInput') as HTMLInputElement | null;
+  const login = inp?.value.trim() ?? '';
+  if (login.length < 3) { showToast('Введите логин друга (минимум 3 символа)'); return; }
+  const r = await onApi<{ friends?: boolean }>('POST', '/api/friends/request', { to: login });
+  if (!r.ok) { showToast(`⚠ ${r.j.error ?? 'Не удалось'}`); return; }
+  if (inp) inp.value = '';
+  showToast(r.j.friends ? '🤝 Теперь вы друзья' : '📨 Заявка отправлена');
+  void friendsRefresh();
+}
+document.getElementById('fpAddBtn')?.addEventListener('click', () => { void friendsAdd(); });
+document.getElementById('fpInput')?.addEventListener('keydown', ev => { if ((ev as KeyboardEvent).key === 'Enter') void friendsAdd(); });
+document.getElementById('fpBody')?.addEventListener('click', ev => {
+  const b = (ev.target as HTMLElement).closest('[data-fp]') as HTMLButtonElement | null;
+  if (!b || b.disabled) return;
+  Sfx.uiClick();
+  const a = b.dataset.fp!, arg = b.dataset.arg ?? '';
+  void (async () => {
+    if (a === 'accept') await onApi('POST', '/api/friends/accept', { from: arg });
+    if (a === 'decline') await onApi('POST', '/api/friends/decline', { from: arg });
+    if (a === 'cancelReq') await onApi('POST', '/api/friends/cancel', { to: arg });
+    if (a === 'remove') { if (!window.confirm(`Удалить ${arg} из друзей?`)) return; await onApi('POST', '/api/friends/remove', { login: arg }); }
+    if (a === 'challenge' || a === 'chAccept') {
+      // вызов/принятие — через сетевой хаб (там колода, поиск и запуск боя)
+      friendsClose();
+      openOnline();
+      await onlineAction(a, arg);
+      return;
+    }
+    if (a === 'chDecline') await onApi('POST', '/api/challenge/decline', { id: arg });
+    void friendsRefresh();
+  })();
+});
+window.setInterval(() => { void friendsRefresh(); }, 30_000);
+void friendsRefresh();
+/* закрыл вкладку — друзья сразу видят «не в сети» */
+window.addEventListener('pagehide', () => {
+  const tok = authGet();
+  if (!meta.signedIn || !tok) return;
+  try { void window.fetch(`${META_API()}/api/presence`, { method: 'POST', keepalive: true, headers: { 'content-type': 'application/json', authorization: `Bearer ${tok.accessToken}` }, body: JSON.stringify({ status: 'offline' }) }); } catch { void 0; }
+});

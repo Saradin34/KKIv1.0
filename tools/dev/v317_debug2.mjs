@@ -1,0 +1,13 @@
+import { chromium } from 'playwright';
+const b = await chromium.launch();
+const pg = await b.newPage({ viewport: { width: 1600, height: 900 } });
+pg.on('pageerror', e => console.log('PAGEERROR:', e.message.slice(0, 300)));
+pg.on('requestfailed', r => console.log('REQFAIL:', r.url().slice(0, 120), r.failure()?.errorText));
+pg.on('response', r => { if (r.status() >= 400) console.log('HTTP', r.status(), r.url().slice(0, 120)); });
+await pg.addInitScript('window.EC_NO_AUTH_GATE=true');
+await pg.goto('http://localhost:5173/', { waitUntil: 'domcontentloaded' });
+await pg.waitForTimeout(2500);
+console.log('title:', await pg.title());
+console.log('eval1:', JSON.stringify(await pg.evaluate('document.title + " | bodyChildren=" + document.body.children.length')));
+console.log('eval2:', JSON.stringify(await pg.evaluate('!!document.getElementById("menu")')));
+await b.close();

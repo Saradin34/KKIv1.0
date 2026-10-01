@@ -20,7 +20,8 @@
     "server:meta": "esbuild server/meta_server.ts --bundle --platform=node --format=cjs --external:pg-native --outfile=build/meta_server.js --log-level=error && node build/meta_server.js",
     "balance": "esbuild tools/balance/run_balance.ts --bundle --platform=node --format=cjs --outfile=build/run_balance.js --log-level=error && node build/run_balance.js --matches 10000 --seed 20260903",
     "autonerf": "python3 tools/autonerf.py",
-    "dashboard": "python3 tools/make_dashboard.py"
+    "dashboard": "python3 tools/make_dashboard.py",
+    "audit:combat": "esbuild tools/audit_combat.ts --bundle --platform=node --format=cjs --outfile=build/audit_combat.js --log-level=error && node build/audit_combat.js"
   },
   "keywords": [],
   "author": "",
@@ -31,8 +32,8 @@
     "@types/ws": "^8.5.12",
     "esbuild": "^0.28.2",
     "jsdom": "^29.1.1",
-    "playwright": "^1.63.0",
-    "typescript": "^7.0.2"
+    "playwright": "^1.49.1",
+    "typescript": "^5.6.3"
   },
   "private": true,
   "dependencies": {

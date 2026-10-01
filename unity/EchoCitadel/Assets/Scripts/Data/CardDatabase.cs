@@ -123,7 +123,7 @@ namespace EchoCitadel.Data
         /// только для встроенного starter-формата=30), без верхнего лимита, ID,
         /// фракция/Neutral и playset ×4.
         /// </summary>
-        public List<string> ValidateDeck(IList<string> deck, int minSize = 60, Faction? faction = null)
+        public List<string> ValidateDeck(IList<string> deck, int minSize = 30, Faction? faction = null)
         {
             var errs = new List<string>();
             if (deck.Count < minSize) errs.Add($"Размер колоды {deck.Count}, минимум {minSize}");

@@ -1,0 +1,25 @@
+import { chromium } from 'playwright';
+const b = await chromium.launch();
+const pg = await b.newPage({ viewport: { width: 1600, height: 900 } });
+await pg.addInitScript('window.EC_NO_AUTH_GATE=true');
+await pg.goto('http://localhost:5173/');
+await pg.waitForTimeout(800);
+await pg.evaluate(() => { const m = JSON.parse(localStorage.getItem('ec_meta_v1') || '{}'); m.tutDone = true; localStorage.setItem('ec_meta_v1', JSON.stringify(m)); });
+await pg.reload(); await pg.waitForTimeout(1500);
+const r = await pg.evaluate(async () => {
+  const $ = id => document.getElementById(id);
+  const log = [];
+  const who = () => { const a = document.activeElement; return a ? (a.id || a.className || a.tagName) + ' | inMenu:' + !!a.closest('#menu') + ' menuHidden:' + $('menu').classList.contains('hidden') : 'null'; };
+  $('btnMenu')?.click(); await new Promise(r => setTimeout(r, 100));
+  $('btnBoosters')?.click(); await new Promise(r => setTimeout(r, 100));
+  log.push('after open: ' + who());
+  $('btnPackNew')?.click(); await new Promise(r => setTimeout(r, 100));
+  log.push('after shop: ' + who() + ' | boosterHidden:' + $('boosterModal').classList.contains('hidden'));
+  document.querySelector('.buyPackOffer[data-offer="p1"][data-cur="gold"]')?.click(); await new Promise(r => setTimeout(r, 100));
+  log.push('after buy: ' + who() + ' | boosterHidden:' + $('boosterModal').classList.contains('hidden'));
+  $('btnPackClose')?.click(); await new Promise(r => setTimeout(r, 100));
+  log.push('after close: ' + who() + ' | menuHidden:' + $('menu').classList.contains('hidden') + ' | btnBoosters exists:' + !!$('btnBoosters'));
+  return log;
+});
+console.log(r.join('\n'));
+await b.close();

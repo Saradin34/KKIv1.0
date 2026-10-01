@@ -225,7 +225,7 @@ namespace EchoCitadel.Core
 
     public sealed class DeckFileMeta
     {
-        [JsonPropertyName("deckSize")] public int DeckSize { get; set; } = 60;
+        [JsonPropertyName("deckSize")] public int DeckSize { get; set; } = 30;
         [JsonPropertyName("starterDeckSize")] public int StarterDeckSize { get; set; } = 30;
         [JsonPropertyName("copyLimit")] public int CopyLimit { get; set; } = 4;
         [JsonPropertyName("legendaryCopyLimit")] public int LegendaryCopyLimit { get; set; } = 4;
@@ -427,7 +427,7 @@ namespace EchoCitadel.Core
     /// <summary>Параметры партии. Значения по умолчанию — ТЗ п.2.1–2.3.</summary>
     public sealed class GameConfig
     {
-        public int DeckSize = 60;
+        public int DeckSize = 30;
         public int StartingHand = 5;
         public int MaxHand = 10;             // излишек сгорает
         public int HeroHealth = 30;

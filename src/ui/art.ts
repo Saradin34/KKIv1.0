@@ -413,11 +413,11 @@ export function tableBackdrop(faction: string): string[] {
   const uid = 'bg' + faction;
   const far = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" preserveAspectRatio="xMidYMid slice">
 <defs><radialGradient id="${uid}sky" cx="50%" cy="18%" r="82%">
-  <stop offset="0%" stop-color="${p.accent}" stop-opacity=".42"/>
-  <stop offset="48%" stop-color="#141a2e" stop-opacity=".9"/>
-  <stop offset="100%" stop-color="#0a0e1a" stop-opacity="1"/></radialGradient></defs>
+  <stop offset="0%" stop-color="${p.accent}" stop-opacity=".5"/>
+  <stop offset="48%" stop-color="#2a3564" stop-opacity=".85"/>
+  <stop offset="100%" stop-color="#161f42" stop-opacity="1"/></radialGradient></defs>
 <rect width="1600" height="900" fill="url(#${uid}sky)"/>
-<g fill="${p.secondary}" opacity=".18">
+<g fill="${p.secondary}" opacity=".28">
   ${Array.from({ length: 60 }, (_, i) => {
     const x = ((i * 137) % 1600), y = ((i * 71) % 420);
     const r = ((i % 5) * 0.4 + 0.5).toFixed(1);
@@ -426,7 +426,7 @@ export function tableBackdrop(faction: string): string[] {
 </g></svg>`;
 
   const citadel = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" preserveAspectRatio="xMidYMid slice">
-<g fill="#111527" opacity=".88">
+<g fill="#232e5c" opacity=".8">
   <path d="M520 470 L560 300 L600 470 Z"/>
   <path d="M590 470 L640 240 L690 470 Z"/>
   <path d="M680 470 L760 180 L840 470 Z"/>
@@ -440,13 +440,13 @@ export function tableBackdrop(faction: string): string[] {
 </g></svg>`;
 
   const pillars = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" preserveAspectRatio="xMidYMid slice">
-<g fill="#0e1220" opacity=".92">
+<g fill="#1c2650" opacity=".85">
   <rect x="60" y="120" width="86" height="780"/><rect x="40" y="120" width="126" height="26"/>
   <rect x="1454" y="120" width="86" height="780"/><rect x="1434" y="120" width="126" height="26"/>
   <rect x="250" y="240" width="52" height="660" opacity=".8"/>
   <rect x="1298" y="240" width="52" height="660" opacity=".8"/>
 </g>
-<g fill="${p.primary}" opacity=".22">
+<g fill="${p.primary}" opacity=".3">
   <rect x="96" y="200" width="14" height="620"/><rect x="1490" y="200" width="14" height="620"/>
 </g></svg>`;
 
@@ -466,24 +466,24 @@ export function tableSurface(): string {
 <defs>
   <filter id="tblStone" x="0" y="0" width="100%" height="100%">
     <feTurbulence type="fractalNoise" baseFrequency="0.035 0.06" numOctaves="5" seed="4" result="n"/>
-    <feColorMatrix in="n" type="matrix" values="0 0 0 0 0.16  0 0 0 0 0.18  0 0 0 0 0.26  0 0 0 .9 0" result="c"/>
+    <feColorMatrix in="n" type="matrix" values="0 0 0 0 0.30  0 0 0 0 0.33  0 0 0 0 0.45  0 0 0 .9 0" result="c"/>
     <feComposite in="c" in2="SourceGraphic" operator="in"/>
   </filter>
   <linearGradient id="tblLight" x1="0" y1="0" x2="0" y2="1">
-    <stop offset="0%" stop-color="#d8b45a" stop-opacity=".16"/>
-    <stop offset="42%" stop-color="#ffffff" stop-opacity=".05"/>
-    <stop offset="100%" stop-color="#000000" stop-opacity=".28"/>
+    <stop offset="0%" stop-color="#d8b45a" stop-opacity=".18"/>
+    <stop offset="42%" stop-color="#ffffff" stop-opacity=".06"/>
+    <stop offset="100%" stop-color="#000000" stop-opacity=".12"/>
   </linearGradient>
 </defs>
-<rect width="800" height="500" fill="#262c3d"/>
-<rect width="800" height="500" filter="url(#tblStone)" opacity=".5"/>
+<rect width="800" height="500" fill="#3a4463"/>
+<rect width="800" height="500" filter="url(#tblStone)" opacity=".42"/>
 <rect width="800" height="500" fill="url(#tblLight)"/>
 <radialGradient id="tblCenter" cx="50%" cy="46%" r="62%">
-  <stop offset="0%" stop-color="#ffffff" stop-opacity=".07"/>
+  <stop offset="0%" stop-color="#ffffff" stop-opacity=".12"/>
   <stop offset="70%" stop-color="#ffffff" stop-opacity="0"/>
 </radialGradient>
 <rect width="800" height="500" fill="url(#tblCenter)"/>
-<g fill="none" stroke="#d8b45a" stroke-width="1.2" opacity=".38">
+<g fill="none" stroke="#d8b45a" stroke-width="1.2" opacity=".48">
   <rect x="14" y="12" width="772" height="476" rx="6"/>
   <rect x="26" y="24" width="748" height="452" rx="4" stroke-width=".6" opacity=".7"/>
 </g>

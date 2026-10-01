@@ -1,5 +1,5 @@
 // TutorialController — пошаговое обучение (зеркало спеки «6. 🎓 Обучение», Промпт 1).
-//  1. Сценарий грузится из StreamingAssets/tutorial.json (20 шагов × 4 урока: id, message,
+//  1. Сценарий грузится из StreamingAssets/tutorial.json (23 шага × 4 урока, шаги привязаны к мане хода: id, message, required_mana,
 //     highlight, required_action, next_step; next_step=0 — урок завершён, on_complete=reward — финал).
 //  2. На каждом шаге — подсветка нужной карты/кнопки (реестр RegisterHighlight или поиск по имени)
 //     и текст подсказки в messageText.
@@ -319,6 +319,8 @@ namespace EchoCitadel.UI
             [JsonPropertyName("highlight")] public string Highlight { get; set; } = "";
             [JsonPropertyName("required_action")] public string RequiredAction { get; set; } = "";
             [JsonPropertyName("next_step")] public int NextStep { get; set; }
+            /// <summary>Сколько маны нужно на шаге (мана = номер хода игрока); 0 — не требуется.</summary>
+            [JsonPropertyName("required_mana")] public int RequiredMana { get; set; }
             [JsonPropertyName("on_complete")] public string? OnComplete { get; set; }
         }
 

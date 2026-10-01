@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Эхо-Цитадель — прототип</title>
-<link rel="stylesheet" href="./prototype.css?v=2.48.0">
+<link rel="stylesheet" href="./prototype.css?v=3.17.6">
 <style>
 /* =====================================================================
    ЭХО-ЦИТАДЕЛЬ — стили прототипа (ТЗ раздел 4 и 6.1)
@@ -109,7 +109,7 @@ select option:checked{background-color:#2c4059;color:#fff5d9}
   border:1px solid var(--gold-dim);padding:.24rem .7rem;border-radius:2px;background:rgba(216,180,90,.07)}
 
 /* --- игровое поле --- */
-#board{position:relative;display:grid;grid-template-rows:auto 1fr auto 1fr;align-content:stretch;
+#board{position:relative;display:grid;grid-template-columns:1fr;grid-template-rows:auto 1fr auto 1fr;align-content:stretch;
   gap:.3rem;padding:.45rem .8rem;min-height:0;overflow:hidden}
 .zoneWrap{display:flex;flex-direction:column;gap:.25rem;min-height:0}
 .sideRow{display:grid;grid-template-columns:170px 1fr;gap:.5rem;align-items:center;min-height:0}
@@ -130,18 +130,26 @@ select option:checked{background-color:#2c4059;color:#fff5d9}
 .heroPanel.healed{box-shadow:0 0 26px rgba(95,199,122,.5)}
 
 .zone{display:flex;gap:.55rem;align-items:center;justify-content:center;padding:.35rem;min-height:calc(var(--uw) * 1.40625 + 12px);position:relative;
-  border:1px dashed transparent;border-radius:5px;transition:.2s;min-width:0;overflow:hidden}
+  border:1px dashed transparent;border-radius:5px;transition:.2s;min-width:0;overflow:hidden;
+  background:rgba(255,236,190,.05)}   /* v3.15: зоны читаются на светлой сцене */
 .zone.droppable{border-color:rgba(216,180,90,.55);background:rgba(216,180,90,.06);box-shadow:0 0 24px rgba(216,180,90,.14) inset}
 .zone.enemyZone{align-items:center}
 .zoneLabel{position:absolute;left:.6rem;top:.15rem;z-index:1;pointer-events:none;
-  font-size:.6rem;letter-spacing:.2em;text-transform:uppercase;color:#8b93ab}
+  font-size:.6rem;letter-spacing:.2em;text-transform:uppercase;color:#aab4cf}
 /* подпись зоны не должна наслаиваться на существ: видна только на пустой зоне */
 .zone:has(.unit) .zoneLabel{display:none}
+#playerBoard .zoneLabel{top:auto;bottom:.15rem}   /* v3.14: зеркально противнику */
 
-#backdrop .bgArt{position:absolute;inset:0;background:url('img/board_arena.png') center/cover no-repeat;opacity:1;
-  animation:bgBreath 74s ease-in-out infinite alternate}
+#backdrop .bgArt{position:absolute;inset:0;background:url('img/board_arena.jpg') center/cover no-repeat,
+  radial-gradient(115% 95% at 50% 42%,#aa9f85 0%,#8d8571 40%,#6f695c 75%,#56534c 100%);opacity:1;
+  /* v3.16.1: стандартный фон — светлый тёплый камень, БЕЗ пересвета:
+     1.42 выжигал картину в желтовато-молочный тан; 1.18 даёт чёткую
+     светлую сцену, где и тёмные рубашки, и светлые тексты читаются */
+  filter:brightness(1.18) saturate(1.08);
+  animation:none}   /* v3.15.2: сцена полностью светлая, анимации фона выключены */
 #backdrop .vignette{position:absolute;inset:0;pointer-events:none;
-  background:radial-gradient(ellipse at 50% 46%,transparent 46%,rgba(46,28,8,.30) 78%,rgba(16,9,2,.58) 100%)}
+  background:radial-gradient(ellipse at 50% 46%,rgba(255,238,200,.13) 0%,rgba(255,230,180,.07) 55%,rgba(120,90,60,.04) 100%);
+  mix-blend-mode:screen}   /* v3.16.1: мягкая подсветка центрa (меньше, чем в 1.15.2) */
 #tableSurface{display:none !important}
 @keyframes bgBreath{from{transform:scale(1)}to{transform:scale(1.07)}}
 body.fxLite #backdrop .bgArt{animation:none}
@@ -151,7 +159,7 @@ body.fxLite #backdrop .bgArt{animation:none}
   background:linear-gradient(90deg,rgba(10,12,19,.55),rgba(10,12,19,.12));border:1px dashed rgba(120,128,150,.28)}
 .graveRow:hover{border-color:rgba(216,180,90,.5)}
 .graveRow .glabel{font-size:.56rem;letter-spacing:.14em;color:#8b93ab;text-transform:uppercase}
-.graveRow .cardback{width:20px;height:28px;margin-left:-12px;border-radius:3px}
+.graveRow .cardback{width:28px;height:40px;margin-left:-18px;border-radius:4px}
 .graveRow .cardback:first-of-type{margin-left:0}
 .graveRow .gcount{font-size:.62rem;color:var(--muted)}
 #centerLine{height:1px;background:linear-gradient(90deg,transparent,var(--gold-dim),transparent);opacity:.5;margin:.1rem 0}
@@ -276,7 +284,7 @@ body.fxLite #backdrop .bgArt{animation:none}
 @keyframes readyPulse{0%,100%{box-shadow:0 0 0 0 rgba(216,180,90,0)}50%{box-shadow:0 0 10px 2px rgba(216,180,90,.45)}}
 /* рубашки карт руки противника */
 #enemyBacks{display:flex;align-items:center;margin-right:.4rem;min-width:8px}
-.cardback{width:30px;height:42px;border-radius:4px;margin-left:-16px;position:relative;flex:0 0 auto;
+.cardback{width:46px;height:64px;border-radius:5px;margin-left:-26px;position:relative;flex:0 0 auto;
   border:1px solid #6d5a2e;
   background:radial-gradient(circle at 50% 42%,rgba(216,180,90,.28),transparent 62%),
     repeating-linear-gradient(45deg,#241d33 0 4px,#1b1626 4px 8px),
@@ -355,7 +363,8 @@ body.fxLite #aimLayer path[marker-end]{animation:none}
 
 /* --- муллиган --- */
 #mulligan{position:fixed;inset:0;z-index:200;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1rem;
-  background:rgba(4,5,9,.90);backdrop-filter:blur(3px)}
+  /* v3.17: сцена просвечивает — «тёмная подложка», а не чёрный экран */
+  background:radial-gradient(1100px 700px at 50% 40%,rgba(12,14,22,.55),rgba(6,7,12,.72));backdrop-filter:blur(5px) saturate(.9)}
 #mulligan h2{font-size:1.5rem;letter-spacing:.2em;text-transform:uppercase;color:var(--gold-hi)}
 #mulligan .hint{max-width:700px}
 #mullCards{display:flex;gap:.7rem;flex-wrap:wrap;justify-content:center;padding:0 1rem}
@@ -368,7 +377,8 @@ body.fxLite #aimLayer path[marker-end]{animation:none}
 
 /* --- конец игры --- */
 #gameover{position:fixed;inset:0;z-index:210;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1.1rem;
-  background:rgba(4,5,9,.93);backdrop-filter:blur(4px)}
+  /* v3.17: сцена просвечивает — «тёмная подложка», а не чёрный экран */
+  background:radial-gradient(1100px 700px at 50% 40%,rgba(12,14,22,.60),rgba(6,7,12,.76));backdrop-filter:blur(5px) saturate(.9)}
 #gameover h2{font-size:clamp(2rem,6vw,3.6rem);letter-spacing:.24em;text-transform:uppercase}
 #gameover h2.win{color:#ffe9a8;text-shadow:0 0 44px rgba(216,180,90,.7)}
 #gameover h2.lose{color:#ffb3a6;text-shadow:0 0 40px rgba(214,69,69,.6)}
@@ -399,6 +409,10 @@ body.fxLite #aimLayer path[marker-end]{animation:none}
 .heroBar{background:transparent !important;border:none !important;box-shadow:none !important;
   display:flex;align-items:center;justify-content:center;gap:1.1rem;padding:.15rem .5rem;position:relative;z-index:6}
 .hbSide{display:flex;align-items:center;gap:.45rem}
+/* v3.14: медальон строго по центру — боковые группы равной ширины, зеркально */
+.heroBar .hbSide{flex:1;min-width:0}
+.heroBar .hbSide:first-child{justify-content:flex-end}
+.heroBar .hbSide:last-child{justify-content:flex-start}
 :root{--medal:clamp(84px,11vh,120px)}
 .medalWrap{position:relative;display:flex;flex-direction:column;align-items:center;width:150px}
 .medal{position:relative;width:var(--medal);height:var(--medal);border-radius:50%;
@@ -419,6 +433,7 @@ body.fxLite #aimLayer path[marker-end]{animation:none}
   font-weight:800;font-size:1.3rem;box-shadow:0 2px 8px rgba(0,0,0,.6);z-index:2}
 .hbHp .ico{display:none}
 .hbHp.me{color:#ffe9b0}
+.hbHp.neg{color:#ff5a45;border-color:#d64545;text-shadow:0 0 10px rgba(255,70,50,.8);font-size:1.15rem}
 .medalName{margin-top:.72rem;font-size:.72rem;letter-spacing:.06em;color:#f0dfae;text-shadow:0 1px 3px #000;
   display:flex;gap:.3rem;align-items:center;white-space:nowrap}
 .medalName .dot{opacity:.6}
@@ -428,7 +443,7 @@ body.fxLite #aimLayer path[marker-end]{animation:none}
   margin:calc(var(--medal) * -1.05) 0 0 calc(var(--medal) * -1.05);border-radius:50%;
   pointer-events:none;mix-blend-mode:screen;filter:blur(.5px);
   background:repeating-conic-gradient(rgba(140,200,255,.20) 0deg 3deg,transparent 3deg 15deg);
-  animation:raysSpin 46s linear infinite}
+  animation:none}   /* v3.15.1: вращение лучей выключено */
 .rays.mine{background:repeating-conic-gradient(rgba(255,205,110,.20) 0deg 3deg,transparent 3deg 15deg)}
 @keyframes raysSpin{to{transform:rotate(360deg)}}
 body.fxLite .rays{animation:none;opacity:.5}
@@ -438,7 +453,7 @@ body.fxLite .rays{animation:none;opacity:.5}
 .corner.bl{bottom:196px;left:10px}
 .pile{display:flex;flex-direction:column;align-items:center;gap:.15rem}
 .pbacks{position:relative;width:calc(var(--uw) * .84);height:calc(var(--uw) * 1.40625 * .84 + 7px)}
-.pbacks .cardback{position:absolute !important;width:calc(var(--uw) * .84) !important;
+.pbacks .cardback{position:absolute !important;width:calc(var(--uw) * .97) !important;
   height:calc(var(--uw) * 1.40625 * .84) !important;border-radius:6px;
   left:0;top:0;margin:0 !important;box-shadow:0 3px 8px rgba(0,0,0,.55)}
 .pbacks .cardback:nth-child(2){left:3px;top:-3px}
@@ -501,7 +516,7 @@ body,button,select,input,textarea{font-family:'Alegreya',Georgia,'Times New Roma
 .btn{letter-spacing:.05em}
 /* красивое стартовое меню: стол Arena фоном, золотая рамка, аватары героев */
 #menu{overflow:auto}
-.menuBg{position:fixed;inset:0;z-index:0;background:url('img/board_arena.png') center/cover no-repeat;
+.menuBg{position:fixed;inset:0;z-index:0;background:url('img/board_arena.jpg') center/cover no-repeat;
   filter:brightness(.42) saturate(1.12) blur(2px)}
 .menuBg::after{content:'';position:absolute;inset:0;
   background:radial-gradient(ellipse at 50% 38%,rgba(20,12,2,.18),rgba(8,5,1,.82) 86%)}
@@ -929,7 +944,7 @@ body[data-back="ember"] #hand .cardback,body[data-back="ember"] #enemyBacks .car
 .ofCard{flex:0 0 auto;width:192px;scroll-snap-align:start;background:linear-gradient(180deg,#232028,#141218 60%,#0e0c11);border:1px solid #3a3442;border-radius:10px;padding:0 0 .7rem;display:flex;flex-direction:column;box-shadow:0 6px 18px -8px #000}
 .ofCard.sm{width:172px}
 .ofCard:hover{border-color:rgba(255,216,122,.45);transform:translateY(-2px);transition:transform .18s ease,border-color .18s ease}
-.ofArt{height:108px;border-radius:9px 9px 0 0;margin-bottom:.15rem;display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden;background:radial-gradient(circle at 50% 30%,#33303c,#17151c 78%)}
+.ofArt{height:138px;border-radius:9px 9px 0 0;margin-bottom:.15rem;display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden;background:radial-gradient(circle at 50% 30%,#33303c,#17151c 78%)}
 .ofArt.a-pack{background:radial-gradient(circle at 50% 25%,#4a3a18,#191410 75%)}
 .ofArt.a-bundle{background:radial-gradient(circle at 50% 30%,#4a2a10,#170f08 78%)}
 .ofArt.a-starter{background:radial-gradient(circle at 50% 30%,#2a3a4a,#10161c 78%)}
@@ -964,7 +979,7 @@ body[data-back="ember"] #hand .cardback,body[data-back="ember"] #enemyBacks .car
 .ofSw.t-classic{background:linear-gradient(135deg,#20242e,#14161f 60%,#0a0c12)}
 .ofSw.r-flame{background:radial-gradient(circle at 50% 65%,#ff9a4d,#8a2d0c 75%)}
 .ofSw.r-classic{background:linear-gradient(180deg,#20242e,#0a0c12)}
-.ofArt .cardback.mini{width:46px;height:64px}
+.ofArt .cardback.mini{width:92px;height:129px}
 .cfRow{display:flex;justify-content:space-between;align-items:center;gap:.6rem;padding:.36rem .6rem;border-bottom:1px solid rgba(255,255,255,.07);font-size:.74rem;color:#e6d6ac}
 .cfName{flex:1}
 /* --- лента пропуска (Mastery-манера) --- */
@@ -1052,8 +1067,7 @@ body[data-q="low"] .rays{display:none}
 body[data-q="low"] .packSlot.foil .face::after{animation:none}
 body[data-q="low"] .medal{box-shadow:none}
 body[data-q="med"] .rays{animation:none;opacity:.5}
-body[data-table="terra"] #board{background:radial-gradient(120% 90% at 50% 0%,#1d2a1c 0%,#121a12 55%,#0b0f0b 100%)}
-body[data-table="necro"] #board{background:radial-gradient(120% 90% at 50% 0%,#241a2c 0%,#150f1a 55%,#0b080e 100%)}
+/* v3.3: скины стола тонируют ВЕСЬ фон сцены (#backdrop), см. prototype.css «v3.3» */
 body[data-rune="flame"] .runeChip{box-shadow:0 0 12px rgba(255,140,60,.8);border-color:#ff9a4d}
 
 /* =====================================================================
@@ -1463,7 +1477,7 @@ body[data-cb="1"] .card.f-Ethereal .artBox::before,body[data-cb="1"] .unit.f-Eth
 #menu{background:radial-gradient(900px 600px at 50% 28%, rgba(18,24,42,.62), transparent 62%),radial-gradient(700px 700px at 50% 52%, rgba(10,18,36,.45), transparent 70%),linear-gradient(180deg,#050a1a 0%,#070a14 100%) !important}
 #menu .menuBg{opacity:.38 !important;filter:brightness(.42) saturate(1.08) !important}
 #menu .menuBg::after{background:radial-gradient(ellipse at 50% 44%, transparent 38%, rgba(5,8,18,.92) 78%), radial-gradient(circle at 50% 50%, transparent 42%, rgba(5,8,18,.55) 100%) !important}
-#menu .menuBg::before{content:'';position:absolute;inset:0;background:url('img/board_arena.png') center/cover no-repeat;opacity:.07;pointer-events:none;mix-blend-mode:overlay}
+#menu .menuBg::before{content:'';position:absolute;inset:0;background:url('img/board_arena.jpg') center/cover no-repeat;opacity:.07;pointer-events:none;mix-blend-mode:overlay}
 .arenaMenu{background:transparent !important;border:none !important;box-shadow:none !important;backdrop-filter:none !important;padding:0 !important;gap:0 !important}
 .arenaHeader{background:linear-gradient(180deg,rgba(12,16,30,.94),rgba(8,10,20,.96))!important;border:1px solid rgba(255,216,122,.14)!important;box-shadow:0 4px 18px rgba(0,0,0,.55),inset 0 1px 0 rgba(255,255,255,.06)!important}
 #menu .heroRow.facCarousel{position:relative;gap:0 !important;padding:1.2rem 1rem 1.8rem !important;justify-content:center !important;background:transparent}
@@ -1509,7 +1523,7 @@ body[data-cb="1"] .card.f-Ethereal .artBox::before,body[data-cb="1"] .unit.f-Eth
 /* ── PATCH v2.21.0: фоновые слои с поддержкой IMG/VIDEO drop-in ── */
 .menuBg img#menuBgImg.show{opacity:1 !important}
 .menuBg video#menuBgVideo.show{opacity:.92 !important;display:block !important}
-#backdrop img#battleBgImg.show{opacity:.92 !important}
+#backdrop img#battleBgImg.show{opacity:1 !important}
 #backdrop video#battleBgVideo.show{opacity:.92 !important;display:block !important}
 #backdrop .bgArt{transition:opacity .6s}
 #backdrop.hasCustomBg .bgArt{opacity:0 !important}
@@ -1685,14 +1699,14 @@ body[data-cb="1"] .card.f-Ethereal .artBox::before,body[data-cb="1"] .unit.f-Eth
 #menu .ecOrbs .heroChip{
   position:relative!important;z-index:1;display:flex!important;flex-direction:column;
   align-items:center;justify-content:center!important;gap:.5rem;
-  width:92px!important;min-width:92px!important;min-height:0!important;height:auto!important;flex:0 0 auto!important;
+  width:clamp(64px,17vw,96px)!important;min-width:0!important;min-height:0!important;height:auto!important;flex:0 0 auto!important;
   background:none!important;border:none!important;box-shadow:none!important;
   border-radius:0!important;overflow:visible!important;padding:0!important;
   font-size:0!important;color:transparent!important;transform:none!important;
   transition:transform .16s!important;outline-offset:4px;
 }
 #menu .ecOrbs .heroChip .orbCore{
-  position:relative;width:78px;height:78px;border-radius:50%;
+  position:relative;width:clamp(54px,14.5vw,80px);height:clamp(54px,14.5vw,80px);border-radius:14px;
   display:flex;align-items:center;justify-content:center;
   background:radial-gradient(circle at 32% 26%,#fffbe8,#f5d76e 55%,#b8862f 100%);
   border:3px solid rgba(255,244,214,.85);
@@ -1700,14 +1714,14 @@ body[data-cb="1"] .card.f-Ethereal .artBox::before,body[data-cb="1"] .unit.f-Eth
   transition:transform .16s,box-shadow .16s;
 }
 #menu .ecOrbs .heroChip .orbCore::after{
-  content:'';position:absolute;inset:5px;border-radius:50%;
+  content:'';position:absolute;inset:5px;border-radius:10px;
   background:radial-gradient(circle at 34% 26%,rgba(255,255,255,.55),transparent 55%);
   pointer-events:none;
 }
 #menu .ecOrbs .orbIcon,#menu .ecOrbs .heroChip img.orbIcon,#menu .ecOrbs .heroChip img{
-  position:static!important;inset:auto!important;transform:none!important;
-  width:46px!important;height:46px!important;max-width:46px!important;max-height:46px!important;
-  border-radius:0!important;object-fit:contain!important;display:block!important;opacity:1!important;
+  position:absolute!important;inset:0!important;transform:none!important;
+  width:100%!important;height:100%!important;max-width:100%!important;max-height:100%!important;
+  border-radius:14px!important;object-fit:cover!important;display:block!important;
   filter:drop-shadow(0 2px 4px rgba(0,0,0,.65));margin:0!important;
 }
 #menu .ecOrbs .chipName{
@@ -3227,11 +3241,27 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
   <button id="btnBurger" class="ecBurger" type="button" aria-label="Разделы игры" aria-controls="ecDrawer" aria-expanded="false" title="Разделы игры">
     <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
   </button>
-  <div class="ecLogoPlate" title="Эхо-Цитадель — коллекционная карточная игра">
+  <div class="ecLogoPlate" title="Эхо-Цитадель — на главную" role="link" tabindex="0">
+    <img class="ecLogoImg" src="assets/ui/logo.png" alt="Echo Citadel" onerror="this.remove()" onload="this.parentElement.classList.add('hasImg')">
     <span class="ecLogoRunes" aria-hidden="true">ᚱ ᛃ ᚲ ✦ ᚲ ᛃ ᚱ</span>
     <div class="ecLogoTitle">ECHO CITADEL</div>
     <span class="ecLogoSub">ЭХО-ЦИТАДЕЛЬ · ККИ</span>
   </div>
+
+  <!-- v4.0: навигация значками (десктоп). PNG кладутся в prototype/assets/icons/<id>.png -->
+  <div id="ecIconNav" role="navigation" aria-label="Разделы игры">
+    <button type="button" class="ecIco" data-icon="home" data-route="home" data-proxy="btnNavHome" title="Главная" aria-label="Главная"><span class="ecIcoArt"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 11.5 12 4l8 7.5V20H14.5v-5.5h-5V20H4z"/></svg><img src="assets/icons/home.png" alt="" onerror="this.remove()" onload="this.parentElement.classList.add('hasImg')"></span><span class="ecIcoLbl">Главная</span></button>
+    <button type="button" class="ecIco" data-icon="collection" data-route="collection" data-proxy="btnCollection" title="Коллекция" aria-label="Коллекция"><span class="ecIcoArt"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="11" height="15" rx="1.5"/><path d="M8 20h10.5a1.5 1.5 0 0 0 1.5-1.5V7"/></svg><img src="assets/icons/collection.png" alt="" onerror="this.remove()" onload="this.parentElement.classList.add('hasImg')"></span><span class="ecIcoLbl">Коллекция</span></button>
+    <button type="button" class="ecIco" data-icon="decks" data-route="decks" data-proxy="btnNavDecks" title="Колоды" aria-label="Колоды"><span class="ecIcoArt"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="3" width="11" height="15" rx="1.5"/><path d="M4 7v12.5A1.5 1.5 0 0 0 5.5 21H15"/></svg><img src="assets/icons/decks.png" alt="" onerror="this.remove()" onload="this.parentElement.classList.add('hasImg')"></span><span class="ecIcoLbl">Колоды</span></button>
+    <button type="button" class="ecIco" data-icon="packs" data-route="packs" data-proxy="btnBoosters" title="Бустеры" aria-label="Бустеры"><span class="ecIcoArt"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 20 7.5v9L12 21l-8-4.5v-9z"/><path d="M12 8.5l2 3.5-2 3.5-2-3.5z"/></svg><img src="assets/icons/packs.png" alt="" onerror="this.remove()" onload="this.parentElement.classList.add('hasImg')"></span><span class="ecIcoLbl">Бустеры</span></button>
+    <button type="button" class="ecIco" data-icon="store" data-route="store" data-proxy="btnShop" title="Магазин" aria-label="Магазин"><span class="ecIcoArt"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 8h14l-1.2 11.5H6.2z"/><path d="M9 8V6.5a3 3 0 0 1 6 0V8"/></svg><img src="assets/icons/store.png" alt="" onerror="this.remove()" onload="this.parentElement.classList.add('hasImg')"></span><span class="ecIcoLbl">Магазин</span></button>
+    <button type="button" class="ecIco" data-icon="events" data-route="events" title="События" aria-label="События"><span class="ecIcoArt"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 21V4"/><path d="M6 4h11l-2.5 4L17 12H6"/></svg><img src="assets/icons/events.png" alt="" onerror="this.remove()" onload="this.parentElement.classList.add('hasImg')"></span><span class="ecIcoLbl">События</span></button>
+    <button type="button" class="ecIco" data-icon="campaign" data-route="campaign" data-proxy="btnCampaign" title="Кампания" aria-label="Кампания"><span class="ecIcoArt"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 19 19 5M15 5h4v4"/><path d="M5 5l6 6M13 13l6 6"/></svg><img src="assets/icons/campaign.png" alt="" onerror="this.remove()" onload="this.parentElement.classList.add('hasImg')"></span><span class="ecIcoLbl">Кампания</span></button>
+    <button type="button" class="ecIco" data-icon="online" data-route="online" data-proxy="btnNavMulti" title="Сетевая" aria-label="Сетевая"><span class="ecIcoArt"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M4 12h16M12 4c2.5 2.5 2.5 13.5 0 16M12 4c-2.5 2.5-2.5 13.5 0 16"/></svg><img src="assets/icons/online.png" alt="" onerror="this.remove()" onload="this.parentElement.classList.add('hasImg')"></span><span class="ecIcoLbl">Сетевая</span></button>
+    <button type="button" class="ecIco" data-icon="mastery" data-route="mastery" data-proxy="btnBP" title="Пропуск" aria-label="Пропуск"><span class="ecIcoArt"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h8v6a4 4 0 0 1-8 0z"/><path d="M12 13v4M8 21h8M9 17h6"/></svg><img src="assets/icons/mastery.png" alt="" onerror="this.remove()" onload="this.parentElement.classList.add('hasImg')"></span><span class="ecIcoLbl">Пропуск</span></button>
+    <button type="button" class="ecIco" data-icon="quests" data-route="quests" data-proxy="btnNavQuests" title="Задания" aria-label="Задания"><span class="ecIcoArt"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="3.5" width="14" height="17" rx="1.5"/><path d="M9 8.5h6M9 12h6M9 15.5h4"/></svg><img src="assets/icons/quests.png" alt="" onerror="this.remove()" onload="this.parentElement.classList.add('hasImg')"></span><span class="ecIcoLbl">Задания</span></button>
+    <button type="button" class="ecIco" data-icon="rules" data-route="rules" data-proxy="btnRules" title="Правила" aria-label="Правила"><span class="ecIcoArt"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4h9l3 3v13H6z"/><path d="M9 10h6M9 13.5h6M9 17h4"/></svg><img src="assets/icons/rules.png" alt="" onerror="this.remove()" onload="this.parentElement.classList.add('hasImg')"></span><span class="ecIcoLbl">Правила</span></button>
+    </div>
 
   <div class="ecDrawer" id="ecDrawer" role="region" aria-labelledby="ecDrawerLabel">
     <div class="ecDrawerHead" id="ecDrawerLabel">Разделы игры</div>
@@ -3250,10 +3280,17 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
       <button class="btn ecDrawerBtn" id="btnTour" title="Пройти обучение интерфейсу снова">🎓 Обучение</button>
       <button class="btn ecDrawerBtn" id="btnBP" title="Боевой пропуск сезона: 50 уровней наград">🎖 Пропуск</button>
       <button class="btn ecDrawerBtn" id="btnRules" title="Правила, пассивки фракций и словарь ключевых слов">📜 Правила</button>
+      <button class="btn ecDrawerBtn" data-route="events" title="События">⚑ События</button>
+      <button class="btn ecDrawerBtn" data-proxy="btnCampaign" title="Кампания">⚔ Кампания</button>
+      <button class="btn ecDrawerBtn" data-proxy="btnNavMulti" title="Сетевая игра">🌐 Сетевая</button>
+      <button class="btn ecDrawerBtn" data-proxy="btnNavQuests" title="Задания">📋 Задания</button>
+      <button class="btn ecDrawerBtn" data-proxy="btnTopSettings" title="Настройки">⚙ Настройки</button>
+      <button class="btn ecDrawerBtn" data-proxy="btnNavExit" title="Выход">⎋ Выход</button>
       <button class="btn ecDrawerBtn" id="btnAdminMenu" title="Админка">🛡 Админка</button>
     </div>
   </div>
 
+  <div id="ecRightCluster">
   <div id="topWallet">
     <span class="shardPill ecPill ecPillGold" title="Монеты: бустеры, крафт и разбор; дубликаты сверх 4 копий дают монеты"><img class="curIco" src="img/ico_cur_0.png" alt="🪙" onerror="this.outerHTML='🪙 '"><b id="shardBal">0</b></span>
     <span class="shardPill ecPill ecPillGem" title="Гемы: премиум-валюта (достижения, пропуск, кампания, стартовые наборы)"><img class="curIco" src="img/ico_cur_2.png" alt="💎" onerror="this.outerHTML='💎 '"><b id="gemBal">0</b></span>
@@ -3261,6 +3298,16 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
     <button class="btn" id="btnAdmin" title="Админка — управление аккаунтами" style="padding:.28rem .5rem;font-size:.72rem;display:none">🛡 Админ</button>
   </div>
 
+  <div id="ecUtilNav" aria-label="Служебные действия">
+    <button type="button" class="ecIco util" data-icon="tutorial" data-proxy="btnTour" title="Обучение" aria-label="Обучение"><span class="ecIcoArt"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 9l9-4 9 4-9 4z"/><path d="M7 11v4.5c3 2 7 2 10 0V11"/></svg><img src="assets/icons/tutorial.png" alt="" onerror="this.remove()" onload="this.parentElement.classList.add('hasImg')"></span></button>
+    <button type="button" class="ecIco util" data-icon="settings" data-proxy="btnTopSettings" title="Настройки" aria-label="Настройки"><span class="ecIcoArt"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 3v2.5M12 18.5V21M3 12h2.5M18.5 12H21M5.6 5.6l1.8 1.8M16.6 16.6l1.8 1.8M5.6 18.4l1.8-1.8M16.6 7.4l1.8-1.8"/></svg><img src="assets/icons/settings.png" alt="" onerror="this.remove()" onload="this.parentElement.classList.add('hasImg')"></span></button>
+    <button type="button" class="ecIco util" data-icon="exit" data-proxy="btnNavExit" title="Выход" aria-label="Выход"><span class="ecIcoArt"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h5v16h-5"/><path d="M10 8l-4 4 4 4M6 12h9"/></svg><img src="assets/icons/exit.png" alt="" onerror="this.remove()" onload="this.parentElement.classList.add('hasImg')"></span></button>
+  </div>
+
+  <button id="btnFriends" type="button" title="Друзья" aria-label="Друзья" aria-controls="friendsPanel">
+    <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="3.2"/><path d="M3 20c.5-3.6 3-5.6 6-5.6s5.5 2 6 5.6"/><circle cx="17" cy="9" r="2.5"/><path d="M16 14.6c2.6.3 4.4 2 4.9 5"/></svg>
+    <b id="friendsBadge" class="hidden">0</b>
+  </button>
   <div id="ecProfile" role="button" tabindex="0" title="Профиль: уровень, задания, история боёв">
     <div class="ecProfTxt">
       <b id="ecProfNick">Гость</b>
@@ -3271,6 +3318,7 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
       <img id="ecProfImg" src="" alt="" onerror="this.style.opacity='0'">
       <span class="ecAvaLvl" id="ecProfLvl">1</span>
     </div>
+  </div>
   </div>
 </nav>
 <div class="ecScrim" id="ecScrim" aria-hidden="true"></div>
@@ -3288,6 +3336,7 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
   <button type="button" data-route="store" title="Магазин и косметика" aria-label="Магазин"><span class="ecQuickIcon" aria-hidden="true">🛒</span><span class="ecQuickLabel">Магазин</span></button>
   <button type="button" data-route="events" title="События" aria-label="События"><span class="ecQuickIcon" aria-hidden="true">⚑</span><span class="ecQuickLabel">События</span></button>
   <button type="button" data-route="mastery" title="Боевой пропуск" aria-label="Пропуск"><span class="ecQuickIcon" aria-hidden="true">✧</span><span class="ecQuickLabel">Пропуск</span></button>
+  <button type="button" data-route="rules" title="Правила игры" aria-label="Правила"><span class="ecQuickIcon" aria-hidden="true">📜</span><span class="ecQuickLabel">Правила</span></button>
   <button type="button" data-route="profile" title="Профиль" aria-label="Профиль"><span class="ecQuickIcon" aria-hidden="true">◉</span><span class="ecQuickLabel">Профиль</span></button>
 </nav>
 
@@ -3335,8 +3384,9 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
     <div class="ecMain">
       <div class="ecCards" id="playerFactions" role="group" aria-label="Архетипы фракций: открыть описание и выбрать фракцию"></div>
 
-      <aside class="ecChallenge" aria-label="Активный вызов">
-        <div class="ecChTitle">Активный вызов</div>
+      <aside class="ecChallenge" aria-label="Панель боя">
+        <div class="ecChTitle" id="ecChTitle">Подготовка к бою</div>
+        <div class="ecChBanner hidden" id="ecChBanner" role="alert"></div>
 
         <div class="ecOpp">
           <div class="ecOppAva" id="ecOppAva">
@@ -3350,21 +3400,30 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
           </div>
         </div>
 
-        <label class="ecField"><span>Фракция соперника</span><select id="enemyFaction"></select></label>
-        <div class="ecField"><span>Режим</span><span class="ecModeVal" id="ecModeText">Рейтинговая лестница · Сезон 4</span></div>
-        <label class="ecChkWrap" title="Тренировка доступна после 🎓 обучения — матчи против ИИ без влияния на рейтинг"><input type="checkbox" id="chkPractice"><span>Тренировка — без влияния на рейтинг · доступна после 🎓 обучения</span></label>
-        <label class="ecField"><span>Сложность ИИ</span>
-          <select id="difficulty">
-            <option value="0.6">Ученик (ошибается часто)</option>
-            <option value="0.8" selected>Адепт (обычный)</option>
-            <option value="0.95">Магистр (почти не ошибается)</option>
-            <option value="1.05">Мифический (lookahead, без ошибок)</option>
-          </select>
-        </label>
-        <div class="ecField"><span>Колода</span>
-          <span class="ecDeckRow"><select id="deckPick" aria-label="Выберите колоду для матча"></select><button class="btn ecMiniBtn" id="btnMakeDeck" aria-label="Открыть конструктор колод" title="Открыть конструктор колод (вкладка «Конструктор» в коллекции)">＋</button></span>
+        <div class="ecChGroup">
+          <div class="ecChGrpT">Противник и режим</div>
+          <label class="ecField"><span>Фракция соперника</span><select id="enemyFaction"></select></label>
+          <div class="ecField"><span>Режим</span><span class="ecModeVal" id="ecModeText">Рейтинговая лестница · Сезон 4</span></div>
+          <label class="ecChkWrap" title="Тренировка доступна после 🎓 обучения — матчи против ИИ без влияния на рейтинг"><input type="checkbox" id="chkPractice"><span>Тренировка — без влияния на рейтинг · доступна после 🎓 обучения</span></label>
+          <label class="ecField ecAiOnly"><span>Сложность ИИ</span>
+            <select id="difficulty">
+              <option value="0.6">Ученик (ошибается часто)</option>
+              <option value="0.8" selected>Адепт (обычный)</option>
+              <option value="0.95">Магистр (почти не ошибается)</option>
+              <option value="1.05">Мифический (lookahead, без ошибок)</option>
+            </select>
+          </label>
         </div>
 
+        <div class="ecChGroup">
+          <div class="ecChGrpT">Ваша колода</div>
+          <div class="ecField"><span>Колода</span>
+            <span class="ecDeckRow"><select id="deckPick" aria-label="Выберите колоду для матча"></select><button class="btn ecMiniBtn" id="btnMakeDeck" aria-label="Открыть конструктор колод" title="Открыть конструктор колод (вкладка «Конструктор» в коллекции)">＋</button></span>
+          </div>
+        </div>
+
+        <div class="ecChGroup">
+          <div class="ecChGrpT">Награды сезона</div>
         <div class="ecProgress" id="ecProgress" title="Каждые 5 побед в рейтинге — сундук с наградой">
           <svg class="ecChest" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M4 10V8.6C4 5.8 7.6 4 12 4s8 1.8 8 4.6V10" fill="none" stroke="currentColor" stroke-width="1.7"/>
@@ -3376,7 +3435,12 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
           <span class="ecProgTxt" id="ecProgTxt">0/5 побед</span>
           <span class="ecProgInfo" title="Каждые 5 побед в рейтинге — сундук с наградой (демо-прогресс)">i</span>
         </div>
+        </div>
 
+        <div class="ecChCtas">
+          <button class="btn ecChCta" id="btnChOnline" title="Сетевая игра: рейтинг или дружеский матч">🌐 Сетевая</button>
+          <button class="btn ecChCta" id="btnChFriends" title="Друзья: вызвать на матч">👥 Друзья</button>
+        </div>
         <button class="btn primary ecPlay" id="btnPlay" data-i18n="ui_menu_play">В БОЙ <span class="ecPlayMode" id="ecPlayMode">(Рейтинг)</span></button>
         <div class="ecPlayHint" id="playHint" hidden></div>
       </aside>
@@ -3691,7 +3755,6 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
       <div class="hbSide right">
         <div class="stat mana" title="Ваша мана"><span class="ico">✦</span><span id="playerMana">0/0</span></div>
         <div class="stat deck" title="Карт в руке"><span class="ico">🂠</span><span id="playerHand">0</span></div>
-        <div class="stat echo" title="Эхо-очки"><span class="ico">◈</span><span id="playerEcho">0</span></div>
       </div>
       <div class="medalWrap">
         <div class="rays mine"></div>
@@ -3701,7 +3764,9 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
         </div>
         <div class="medalName"><span id="playerName">Вы</span><span class="dot">·</span><span id="playerFac">—</span></div>
       </div>
-      <div class="hbSide"></div>
+      <div class="hbSide">
+        <div class="stat echo" title="Эхо-очки"><span class="ico">◈</span><span id="playerEcho">0</span></div>
+      </div>
     </div>
 
   <!-- правая нижняя панель в духе MTG: аккуратные кнопки, чат боя убран -->
@@ -3714,8 +3779,9 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
     <button class="btn" id="btnJournal" data-i18n="ui_battle_journal" title="Журнал боя (J)">📜 Журнал</button>
     <button class="btn" id="btnEcho">◈ Эхо</button>
     <button class="btn" id="btnSkip">Пропустить</button>
-    <button class="btn hidden" id="btnAutoBattle" title="Доиграть оставшиеся атаки автоматически">⚔ Авто-бой</button>
-    <button class="btn hidden" id="btnSkipCombat" title="Пропустить фазу боя — не атаковать никого и завершить ход">⏭ Пропустить бой</button>
+    <button class="btn inv" id="btnAutoBattle" title="Доиграть оставшиеся атаки автоматически">⚔ Авто-бой</button>
+    <button class="btn inv" id="btnAttackAll" title="Атаковать каждым готовым существом по очереди — цель для каждого выбираете вы: клик по существу противника или по его герою">⚔️ Атака всеми</button>
+    <button class="btn inv" id="btnSkipCombat" title="Пропустить фазу боя — не атаковать никого и завершить ход">⏭ Пропустить бой</button>
     <span id="actionHint">Перетащите карту на поле или на цель.</span>
   </div>
 </div>
@@ -4083,15 +4149,14 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
 </div>
 
 <!-- ======================= ПРАВИЛА ======================= -->
-<div id="rules" class="hidden" style="position:fixed;inset:0;z-index:150;background:rgba(4,5,9,.97);overflow-y:auto">
-  <div style="max-width:860px;margin:0 auto;padding:1.4rem 1.2rem 3rem">
-    <div style="display:flex;align-items:center;gap:.8rem;margin-bottom:1rem">
-      <h2 style="font-size:1.3rem;letter-spacing:.18em;text-transform:uppercase;color:var(--gold-hi);flex:1">Правила и пассивки</h2>
-      <button class="btn" id="btnRulesClose">Закрыть</button>
-    </div>
-    <div id="rulesBody" style="font-size:.86rem;line-height:1.75;color:#cfd3e0"></div>
-  </div>
-</div>
+<section id="rules" class="rulesPage hidden" aria-label="Правила игры">
+  <aside class="rpSide">
+    <div class="rpTitle">ПРАВИЛА</div>
+    <nav id="rulesNav" class="rpNav"></nav>
+    <button class="rpBack" id="btnRulesClose">← Назад</button>
+  </aside>
+  <main class="rpMain"><article id="rulesBody" class="rpBody"></article></main>
+</section>
 
 <!-- ======================= КОНЕЦ ИГРЫ ======================= -->
 <div id="gameover" class="hidden">
@@ -4135,6 +4200,11 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
     </div>
   </div>
 </div>
+<aside id="friendsPanel" class="hidden" aria-label="Друзья">
+  <div class="fpHead"><b>ДРУЗЬЯ</b><span id="fpCount"></span><button id="fpClose" title="Закрыть">✕</button></div>
+  <div class="fpAdd"><input id="fpInput" placeholder="Добавить по логину" maxlength="20" autocomplete="off"><button id="fpAddBtn" title="Отправить заявку">＋</button></div>
+  <div id="fpBody" class="fpBody"></div>
+</aside>
 <div id="authModal" class="hidden" role="dialog" aria-label="Аккаунт">
   <div class="packPanel admLoginPanel authPanel">
     <h3 id="authTitle">Вход в аккаунт</h3>
@@ -4167,6 +4237,6 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
 </div>
 
 <script>window.addEventListener("error",function(e){var n=document.getElementById("subsLine");if(n){n.textContent="\u26A0 Ошибка интерфейса: "+(e.message||e.error||"");n.classList.add("on");setTimeout(function(){n.classList.remove("on")},5000);}});</script>
-<script src="./prototype.js?v=2.48.0"></script>
+<script src="./prototype.js?v=3.17.6"></script>
 </body>
 </html>

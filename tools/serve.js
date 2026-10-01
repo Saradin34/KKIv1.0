@@ -139,7 +139,7 @@ const server = http.createServer((req, res) => {
   // Ищем: art_raw/cosm/<kind>/<id>.<ext> (регистр НЕ важен) → подпапка <id>/ (первый кадр)
   // → Unity-зеркало Assets/Resources/Cosm/<Kind>/. Имя файла берётся из readdir — traversal исключён.
   if (urlPath.startsWith('/cosm/')) {
-    const COSM_KINDS = ['backs', 'tables', 'runes', 'offers', 'bundles', 'bp', 'quests'];
+    const COSM_KINDS = ['backs', 'tables', 'runes', 'offers', 'bundles', 'bp', 'quests', 'events', 'mana', 'sets'];
     const parts = urlPath.slice('/cosm/'.length).split('/');
     const kind = (parts[0] || '').replace(/[^a-z]/g, '');
     const id = (parts[1] || '').replace(/[^a-zA-Z0-9_-]/g, '');
@@ -256,5 +256,5 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`[Эхо-Цитадель] прототип: http://0.0.0.0:${PORT}/  (корень ${ROOT})`);
   console.log(`[Эхо-Цитадель] арты:     http://0.0.0.0:${PORT}/art/<Faction>/<id>.png  (${ART_ROOT})`);
   console.log(`[Эхо-Цитадель] drop-in:  art_raw/<id>.png подхватывается сразу  (${RAW_DIRS.join(' | ')})`);
-  console.log(`[Эхо-Цитадель] косметика: /cosm/<kind>/<id>  (art_raw/cosm/{backs,tables,runes,offers,bundles,bp,quests})`);
+  console.log(`[Эхо-Цитадель] косметика: /cosm/<kind>/<id>  (art_raw/cosm/{backs,tables,runes,offers,bundles,bp,quests,events})`);
 });

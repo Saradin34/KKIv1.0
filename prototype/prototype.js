@@ -16,7 +16,7 @@
     ["End" /* End */]: "\u041A\u043E\u043D\u0435\u0446"
   };
   var DEFAULT_CONFIG = {
-    deckSize: 60,
+    deckSize: 30,
     startingHand: 5,
     maxHand: 10,
     heroHealth: 30,
@@ -48,6 +48,14 @@
       this.s0 = seed | 0 || 2654435769;
       this.s1 = this.s0 * 1812433253 + 12345 | 0;
       if (this.s1 === 0) this.s1 = 1831565813;
+    }
+    /** v3.4 (онлайн): снимок/восстановление состояния генератора для синхронизации клиентов. */
+    getState() {
+      return [this.s0, this.s1];
+    }
+    setState(st) {
+      this.s0 = st[0] | 0;
+      this.s1 = st[1] | 0;
     }
     /** [0,1) */
     next() {
@@ -208,6 +216,70 @@
         incomingDamageReductionTurns: 0
       };
     }
+    /* ----------------------------- ОНЛАЙН (v3.4) -----------------------------
+       Полный снимок состояния партии для сетевой синхронизации. Каждый клиент видит
+       себя стороной Player, поэтому снимок соперника применяется ЗЕРКАЛЬНО:
+       игроки меняются местами, owner/side/activeSide/result — инвертируются. */
+    exportState() {
+      return JSON.parse(JSON.stringify({
+        players: this.players,
+        turn: this.turn,
+        turnsTaken: this.turnsTaken,
+        activeSide: this.activeSide,
+        phase: this.phase,
+        result: this.result,
+        stats: this.stats,
+        uidCounter: this.uidCounter,
+        rng: this.rng.getState()
+      }));
+    }
+    importState(src, mirror) {
+      const s = JSON.parse(JSON.stringify(src));
+      const flip = (x) => x === void 0 || x === null ? x : x === 0 /* Player */ ? 1 /* Opponent */ : 0 /* Player */;
+      if (mirror) {
+        s.players = [s.players[1], s.players[0]];
+        s.turnsTaken = [s.turnsTaken[1], s.turnsTaken[0]];
+        s.stats = [s.stats[1], s.stats[0]];
+        s.activeSide = flip(s.activeSide);
+        s.result = s.result === "PlayerWin" /* PlayerWin */ ? "OpponentWin" /* OpponentWin */ : s.result === "OpponentWin" /* OpponentWin */ ? "PlayerWin" /* PlayerWin */ : s.result;
+        for (const pl of s.players) {
+          pl.side = flip(pl.side);
+          for (const c of pl.creatures) c.owner = flip(c.owner);
+          for (const r of pl.runes) r.owner = flip(r.owner);
+          for (const r of pl.rituals) {
+            r.owner = flip(r.owner);
+            if (r.targetSide !== void 0) r.targetSide = flip(r.targetSide);
+          }
+          if (pl.lastSpellCast?.targetSide !== void 0) pl.lastSpellCast.targetSide = flip(pl.lastSpellCast.targetSide);
+        }
+      }
+      this.players = s.players;
+      this.turn = s.turn;
+      this.turnsTaken = s.turnsTaken;
+      this.activeSide = s.activeSide;
+      this.phase = s.phase;
+      this.result = s.result;
+      this.stats = s.stats;
+      this.uidCounter = s.uidCounter;
+      this.rng.setState(s.rng);
+      this.uidMap.clear();
+      for (const pl of this.players) for (const c of pl.creatures) this.uidMap.set(c.uid, c);
+      this.pendingDeaths = [];
+      this.eventQueue = [];
+      this.stack = [];
+      this.instantWindow = null;
+    }
+    /** Короткий отпечаток состояния (сверка клиентов, диагностика рассинхрона). */
+    stateHash() {
+      const p = this.players.map((pl) => [
+        pl.health,
+        pl.hand.length,
+        pl.deck.length,
+        pl.mana,
+        pl.creatures.map((c) => `${c.uid}:${c.attack}/${c.health}`).join(",")
+      ].join("|"));
+      return `${this.turn}#${this.activeSide}#${p.join("~")}`;
+    }
     /** Раздача стартовой руки. Возвращает true, если нужен муллиган. */
     setup() {
       this.emit({ type: "GameStarted" /* GameStarted */, text: "\u0411\u043E\u0439 \u043D\u0430\u0447\u0430\u043B\u0441\u044F" });
@@ -326,8 +398,7 @@
       else this.stats[0 /* Player */].damageDealt += dmg;
       this.stats[side].damageTaken += dmg;
       if (pl.health <= 0) {
-        pl.health = 0;
-        this.emit({ type: "PlayerDeath" /* PlayerDeath */, side, text: `${pl.name} \u043F\u0430\u043B` });
+        this.emit({ type: "PlayerDeath" /* PlayerDeath */, side, text: `${pl.name} \u043F\u0430\u043B (${pl.health} HP)` });
         this.endGame(side === 0 /* Player */ ? "OpponentWin" /* OpponentWin */ : "PlayerWin" /* PlayerWin */);
       }
       return dmg;
@@ -1321,6 +1392,7 @@
       const t = targetUid !== void 0 ? this.findCreature(targetUid) : void 0;
       if (!t || t.owner === side) return false;
       if (hasTaunt && !taunts.includes(t)) return false;
+      if (t.unblockableThisTurn || !t.silenced && t.keywords.includes("Unblockable" /* Unblockable */)) return false;
       this.resolveAttack(c, t);
       c.attacksThisTurn++;
       this.checkDeaths();
@@ -2202,7 +2274,54 @@
     c.element = c.element ?? "None";
     c.target = c.target ?? "None";
     c.tags = c.tags ?? [];
+    if (c.keywords.includes("Deathrattle") && !(c.onDeath && c.onDeath.length)) {
+      const od = deathrattleFromText(c);
+      if (od.length) c.onDeath = od;
+    }
     map.set(c.id, c);
+  }
+  function tokenOf(src, name, atk, hp) {
+    const slug = name.toLowerCase().replace(/[^a-zа-яё0-9]+/gi, "_");
+    return {
+      id: `tkn_${slug}_${atk}_${hp}`,
+      name,
+      faction: src.faction,
+      type: "Creature",
+      rarity: "Common",
+      cost: 1,
+      attack: atk,
+      health: hp,
+      element: src.element,
+      keywords: [],
+      target: "None",
+      effects: [],
+      abilityText: "\u0422\u043E\u043A\u0435\u043D",
+      flavor: "",
+      isToken: true,
+      tags: ["token"]
+    };
+  }
+  function deathrattleFromText(c) {
+    const txt = String(c.abilityText ?? "");
+    const m = /Предсмертный хрип:\s*([^]*?)(?:\.\s|\.$|$)/i.exec(txt);
+    if (!m) return [];
+    const t = m[1];
+    const out = [];
+    const sum = /[Пп]ризовите «([^»]+)» (\d+)\/(\d+)/g;
+    let sm;
+    while (sm = sum.exec(t)) out.push({ op: "summonToken", token: tokenOf(c, sm[1], +sm[2], +sm[3]) });
+    let x;
+    if (x = /Возьмите (\d+) карт/i.exec(t)) out.push({ op: "draw", value: +x[1] });
+    if (x = /Нанесите (\d+) урона всем вражеским существам/i.exec(t)) out.push({ op: "damageAllEnemyCreatures", value: +x[1] });
+    if (x = /Восстановите (\d+) здоровья/i.exec(t)) out.push({ op: "heal", value: +x[1], to: "FriendlyHero" });
+    if (x = /все ваши существа получают \+(\d+)\/\+(\d+)/i.exec(t)) {
+      out.push({ op: "buffAttack", value: +x[1], to: "AllFriendlies" }, { op: "buffHealth", value: +x[2], to: "AllFriendlies" });
+    }
+    if (/Яд на случайное существо противника/i.test(t)) {
+      out.push({ op: "applyStatus", status: "Poison", value: -1, statusValue: 1, to: "EnemyCreature", filter: { random: true, count: 1 } });
+    }
+    if (x = /все существа противника получают -(\d+) здоровья/i.exec(t)) out.push({ op: "debuffHealth", value: +x[1], to: "AllEnemies" });
+    return out;
   }
 
   // unity/EchoCitadel/Assets/StreamingAssets/Cards.json
@@ -20453,7 +20572,7 @@
   // unity/EchoCitadel/Assets/StreamingAssets/Decks.json
   var Decks_default = {
     meta: {
-      deckSize: 60,
+      deckSize: 30,
       copyLimit: 4,
       legendaryCopyLimit: 4,
       updated: "2026-09-28",
@@ -20468,18 +20587,11 @@
         faction: "Aurites",
         cards: [
           "meh_01",
-          "meh_01",
-          "meh_02",
           "meh_02",
           "pal_01",
-          "pal_01",
-          "pal_13",
           "pal_13",
           "meh_03",
-          "meh_03",
           "meh_04",
-          "meh_04",
-          "meh_13",
           "meh_13",
           "meh_14",
           "pal_12",
@@ -20502,31 +20614,8 @@
           "aur_s06",
           "aur_r02",
           "aur_r03",
-          "aur_r04",
-          "aur_r05",
           "aur_01",
-          "aur_s09",
-          "aur_r01",
-          "aur_01",
-          "aur_03",
-          "aur_04",
-          "meh_06",
-          "meh_08",
-          "aur_08",
-          "pal_08",
-          "meh_10",
-          "aur_09",
-          "aur_35",
-          "aur_33",
-          "aur_13",
-          "meh_11",
-          "aur_s14",
-          "aur_s04",
-          "aur_s05",
-          "aur_s15",
-          "aur_s06",
-          "aur_r01",
-          "aur_r02"
+          "aur_r01"
         ]
       },
       {
@@ -20537,16 +20626,11 @@
           "wtc_13",
           "wtc_13",
           "vmp_01",
-          "vmp_01",
-          "vmp_04",
           "vmp_04",
           "vmp_13",
           "vmp_13",
           "wtc_01",
-          "wtc_01",
           "wtc_06",
-          "wtc_06",
-          "wtc_14",
           "wtc_14",
           "vmp_12",
           "wtc_12",
@@ -20562,38 +20646,13 @@
           "nec_s05",
           "nec_r02",
           "nec_r03",
-          "nec_r04",
-          "neu_01",
           "neu_01",
           "nec_s06",
           "nec_r05",
-          "nec_r05",
           "wtc_11",
           "nec_s09",
-          "nec_s09",
           "neu_06",
-          "vmp_14",
-          "vmp_14",
-          "nec_41",
-          "nec_06",
-          "nec_08",
-          "nec_09",
-          "nec_10",
-          "neu_06",
-          "nec_44",
-          "nec_12",
-          "vmp_12",
-          "wtc_12",
-          "nec_s01",
-          "nec_s05",
-          "nec_s12",
-          "nec_s06",
-          "wtc_11",
-          "nec_s01",
-          "wtc_13",
-          "vmp_13",
-          "nec_r02",
-          "nec_r03"
+          "vmp_14"
         ]
       },
       {
@@ -20604,15 +20663,10 @@
           "asp_01",
           "asp_01",
           "asp_13",
-          "asp_13",
-          "asp_02",
           "asp_02",
           "asp_03",
-          "asp_03",
-          "ent_01",
           "ent_01",
           "ent_13",
-          "asp_04",
           "asp_04",
           "asp_12",
           "ent_12",
@@ -20629,38 +20683,13 @@
           "ter_s04",
           "ter_s15",
           "ter_s05",
-          "ter_s06",
           "ter_r04",
-          "ter_r06",
           "neu_01",
           "neu_02",
           "sbd_10",
-          "neu_01",
-          "sbd_10",
           "neu_06",
           "ter_31",
-          "ent_02",
-          "ent_02",
-          "ter_31",
-          "neu_02",
-          "ter_05",
-          "neu_06",
-          "ter_04",
-          "ter_06",
-          "ter_07",
-          "ter_08",
-          "ter_10",
-          "ter_11",
-          "ter_12",
-          "ter_13",
-          "asp_12",
-          "ent_12",
-          "asp_01",
-          "ent_13",
-          "ter_s04",
-          "nec_s10",
-          "ter_s05",
-          "ter_r04"
+          "ent_02"
         ]
       },
       {
@@ -20669,18 +20698,11 @@
         faction: "Pyromancer",
         cards: [
           "cnb_01",
-          "cnb_01",
-          "cnb_13",
           "cnb_13",
           "grm_01",
-          "grm_01",
-          "grm_02",
           "grm_02",
           "grm_13",
-          "grm_13",
           "cnb_02",
-          "cnb_02",
-          "cnb_06",
           "cnb_06",
           "grm_12",
           "cnb_12",
@@ -20703,31 +20725,8 @@
           "pyr_r02",
           "pyr_r03",
           "pyr_r04",
-          "pyr_r05",
-          "pyr_r06",
           "neu_01",
-          "pyr_s08",
-          "pyr_s08",
-          "neu_01",
-          "cnb_03",
-          "pyr_03",
-          "pyr_05",
-          "cnb_08",
-          "pyr_08",
-          "pyr_09",
-          "cnb_04",
-          "cnb_05",
-          "grm_10",
-          "pyr_11",
-          "grm_12",
-          "eth_s13",
-          "pyr_s10",
-          "pyr_s04",
-          "cnb_14",
-          "aur_s10",
-          "ter_s10",
-          "pyr_r02",
-          "pyr_r03"
+          "pyr_s08"
         ]
       },
       {
@@ -20736,18 +20735,11 @@
         faction: "Ethereal",
         cards: [
           "scc_01",
-          "scc_01",
-          "spr_01",
           "spr_01",
           "spr_02",
-          "spr_02",
-          "scc_02",
           "scc_02",
           "scc_11",
-          "scc_11",
           "spr_03",
-          "spr_03",
-          "spr_04",
           "spr_04",
           "spr_12",
           "scc_13",
@@ -20767,34 +20759,11 @@
           "eth_r04",
           "eth_r06",
           "eth_02",
-          "aur_s12",
-          "eth_04",
+          "eth_02",
           "eth_04",
           "sbd_10",
-          "sbd_10",
           "neu_01",
-          "spr_07",
-          "eth_r06",
-          "eth_02",
-          "neu_01",
-          "eth_05",
-          "eth_06",
-          "spr_05",
-          "spr_07",
-          "eth_07",
-          "spr_08",
-          "eth_10",
-          "spr_12",
-          "eth_15",
-          "scc_13",
-          "eth_02",
-          "neu_01",
-          "spr_11",
-          "eth_s07",
-          "scc_14",
-          "eth_s08",
-          "eth_r03",
-          "eth_r04"
+          "spr_07"
         ]
       },
       {
@@ -20811,57 +20780,27 @@
           "aur_05",
           "aur_04",
           "aur_02",
-          "aur_s08",
           "aur_03",
-          "aur_09",
           "aur_r06",
           "aur_06",
-          "aur_05",
-          "aur_06",
-          "aur_r04",
           "aur_r04",
           "aur_11",
           "aur_13",
           "aur_01",
-          "aur_02",
           "pyr_s04",
           "nec_s09",
           "pyr_08",
           "pyr_02",
           "nec_14",
-          "eth_s09",
           "ter_s04",
           "pyr_r05",
-          "ter_s08",
           "eth_s07",
-          "ter_s07",
           "nec_r05",
           "ter_r02",
           "eth_s02",
           "neu_01",
-          "neu_01",
           "neu_03",
-          "neu_02",
-          "aur_01",
-          "pyr_02",
-          "aur_03",
-          "neu_02",
-          "aur_04",
-          "neu_03",
-          "pyr_08",
-          "aur_11",
-          "aur_12",
-          "aur_13",
-          "nec_14",
-          "aur_s02",
-          "aur_s03",
-          "eth_s02",
-          "pyr_s04",
-          "ter_s04",
-          "eth_s07",
-          "ter_r02",
-          "nec_r05",
-          "pyr_r05"
+          "neu_02"
         ]
       },
       {
@@ -21596,106 +21535,21 @@
     }
   }
   var ambient = [];
-  var ambientColor = "#d8b45a";
-  var parallaxLayers = [];
-  var parallaxTarget = { x: 0, y: 0 };
-  var parallaxCur = { x: 0, y: 0 };
-  function startAmbient(color, count = 70) {
-    ambientColor = color;
-    if (ambientRunning) {
-      setAmbientColor(color);
-      return;
-    }
-    if (!ctx || typeof requestAnimationFrame !== "function") return;
-    ambientRunning = true;
-    const w = window.innerWidth, h = window.innerHeight;
-    for (let i = 0; i < count; i++) {
-      ambient.push({
-        x: rnd(0, w),
-        y: rnd(0, h),
-        vx: rnd(-0.14, 0.14),
-        vy: rnd(-0.3, -0.05),
-        r: rnd(0.6, 2.4),
-        a: rnd(0.1, 0.42),
-        hue: color,
-        tw: rnd(0.4, 2.2)
-      });
-    }
-    requestAnimationFrame(ambientFrame);
-  }
-  function ambientFrame(t) {
-    if (!ambientRunning || !ctx || !canvas) return;
-    const w = window.innerWidth, h = window.innerHeight;
-    ctx.clearRect(0, 0, w, h);
-    for (const p of ambient) {
-      p.x += p.vx + Math.sin(t / 2600 + p.tw) * 0.16;
-      p.y += p.vy;
-      if (p.y < -12) {
-        p.y = h + 10;
-        p.x = rnd(0, w);
-      }
-      if (p.x < -12) p.x = w + 10;
-      if (p.x > w + 12) p.x = -10;
-      const tw = 0.55 + 0.45 * Math.sin(t / 620 * p.tw + p.x * 0.01);
-      ctx.globalAlpha = p.a * tw;
-      ctx.fillStyle = p.hue;
-      ctx.shadowBlur = 10;
-      ctx.shadowColor = p.hue;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    ctx.globalAlpha = 1;
-    ctx.shadowBlur = 0;
-    requestAnimationFrame(ambientFrame);
-  }
-  function setAmbientColor(color) {
-    ambientColor = color;
-    for (const p of ambient) p.hue = color;
-  }
-  function startParallax(layers) {
-    parallaxLayers = layers;
-    if (reducedMotion || layers.length === 0) return;
-    window.addEventListener("pointermove", (ev) => {
-      parallaxTarget.x = (ev.clientX / window.innerWidth - 0.5) * 2;
-      parallaxTarget.y = (ev.clientY / window.innerHeight - 0.5) * 2;
-    });
-    requestAnimationFrame(parallaxFrame);
-  }
-  function parallaxFrame() {
-    parallaxCur.x += (parallaxTarget.x - parallaxCur.x) * 0.055;
-    parallaxCur.y += (parallaxTarget.y - parallaxCur.y) * 0.055;
-    parallaxLayers.forEach((l, i) => {
-      const depth = (i + 1) * 7;
-      l.style.transform = `translate3d(${(-parallaxCur.x * depth).toFixed(2)}px, ${(-parallaxCur.y * depth * 0.6).toFixed(2)}px, 0) scale(${(1.06 + i * 5e-3).toFixed(3)})`;
-    });
-    requestAnimationFrame(parallaxFrame);
+  function stopAmbient() {
+    ambientRunning = false;
+    ambient = [];
+    if (ctx && canvas) ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
   }
   function mountPostLayers(host) {
     if (host.querySelector("#postVignette")) return;
     const vig = document.createElement("div");
     vig.id = "postVignette";
-    vig.style.cssText = "position:fixed;inset:0;pointer-events:none;z-index:110;background:radial-gradient(ellipse at 50% 46%, transparent 40%, rgba(5,6,10,.62) 100%);mix-blend-mode:multiply";
-    const grain = document.createElement("div");
-    grain.id = "postGrain";
-    grain.style.cssText = "position:fixed;inset:-50%;pointer-events:none;z-index:111;opacity:.055;filter:url(#vfxGrain);background:#fff;mix-blend-mode:overlay;animation:grainShift 1.1s steps(3,end) infinite";
+    vig.style.cssText = "position:fixed;inset:0;pointer-events:none;z-index:110;background:radial-gradient(ellipse at 50% 46%, transparent 58%, rgba(5,6,10,.22) 100%);mix-blend-mode:multiply";
     const grade = document.createElement("div");
     grade.id = "postGrade";
     grade.style.cssText = "position:fixed;inset:0;pointer-events:none;z-index:109;background:linear-gradient(180deg, rgba(42,36,56,.30) 0%, rgba(0,0,0,0) 38%, rgba(216,180,90,.07) 100%);mix-blend-mode:soft-light";
-    const st = document.createElement("style");
-    st.textContent = "@keyframes grainShift{0%{transform:translate(0,0)}33%{transform:translate(-2%,1.5%)}66%{transform:translate(1.5%,-1%)}}";
-    host.appendChild(st);
     host.appendChild(grade);
     host.appendChild(vig);
-    host.appendChild(grain);
-  }
-  function candleFlicker(host) {
-    if (reducedMotion || !host) return;
-    const n = document.createElement("div");
-    n.style.cssText = `position:absolute;inset:0;pointer-events:none;mix-blend-mode:screen;background:radial-gradient(ellipse at ${rnd(18, 82)}% ${rnd(12, 42)}%, ${ambientColor}33 0%, transparent 55%)`;
-    host.appendChild(n);
-    n.animate?.([{ opacity: 0 }, { opacity: 0.85 }, { opacity: 0 }], { duration: rnd(700, 1500) });
-    setTimeout(() => n.remove(), 1600);
   }
 
   // src/ui/audio.ts
@@ -21995,11 +21849,11 @@
     const uid = "bg" + faction;
     const far = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" preserveAspectRatio="xMidYMid slice">
 <defs><radialGradient id="${uid}sky" cx="50%" cy="18%" r="82%">
-  <stop offset="0%" stop-color="${p.accent}" stop-opacity=".42"/>
-  <stop offset="48%" stop-color="#141a2e" stop-opacity=".9"/>
-  <stop offset="100%" stop-color="#0a0e1a" stop-opacity="1"/></radialGradient></defs>
+  <stop offset="0%" stop-color="${p.accent}" stop-opacity=".5"/>
+  <stop offset="48%" stop-color="#2a3564" stop-opacity=".85"/>
+  <stop offset="100%" stop-color="#161f42" stop-opacity="1"/></radialGradient></defs>
 <rect width="1600" height="900" fill="url(#${uid}sky)"/>
-<g fill="${p.secondary}" opacity=".18">
+<g fill="${p.secondary}" opacity=".28">
   ${Array.from({ length: 60 }, (_, i) => {
       const x = i * 137 % 1600, y = i * 71 % 420;
       const r = (i % 5 * 0.4 + 0.5).toFixed(1);
@@ -22007,7 +21861,7 @@
     }).join("")}
 </g></svg>`;
     const citadel = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" preserveAspectRatio="xMidYMid slice">
-<g fill="#111527" opacity=".88">
+<g fill="#232e5c" opacity=".8">
   <path d="M520 470 L560 300 L600 470 Z"/>
   <path d="M590 470 L640 240 L690 470 Z"/>
   <path d="M680 470 L760 180 L840 470 Z"/>
@@ -22020,13 +21874,13 @@
   ${[560, 640, 760, 890, 990].map((x, i) => `<rect x="${x - 3}" y="${250 + i * 14}" width="6" height="16" rx="3"/>`).join("")}
 </g></svg>`;
     const pillars = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" preserveAspectRatio="xMidYMid slice">
-<g fill="#0e1220" opacity=".92">
+<g fill="#1c2650" opacity=".85">
   <rect x="60" y="120" width="86" height="780"/><rect x="40" y="120" width="126" height="26"/>
   <rect x="1454" y="120" width="86" height="780"/><rect x="1434" y="120" width="126" height="26"/>
   <rect x="250" y="240" width="52" height="660" opacity=".8"/>
   <rect x="1298" y="240" width="52" height="660" opacity=".8"/>
 </g>
-<g fill="${p.primary}" opacity=".22">
+<g fill="${p.primary}" opacity=".3">
   <rect x="96" y="200" width="14" height="620"/><rect x="1490" y="200" width="14" height="620"/>
 </g></svg>`;
     const dust = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" preserveAspectRatio="xMidYMid slice">
@@ -22042,24 +21896,24 @@
 <defs>
   <filter id="tblStone" x="0" y="0" width="100%" height="100%">
     <feTurbulence type="fractalNoise" baseFrequency="0.035 0.06" numOctaves="5" seed="4" result="n"/>
-    <feColorMatrix in="n" type="matrix" values="0 0 0 0 0.16  0 0 0 0 0.18  0 0 0 0 0.26  0 0 0 .9 0" result="c"/>
+    <feColorMatrix in="n" type="matrix" values="0 0 0 0 0.30  0 0 0 0 0.33  0 0 0 0 0.45  0 0 0 .9 0" result="c"/>
     <feComposite in="c" in2="SourceGraphic" operator="in"/>
   </filter>
   <linearGradient id="tblLight" x1="0" y1="0" x2="0" y2="1">
-    <stop offset="0%" stop-color="#d8b45a" stop-opacity=".16"/>
-    <stop offset="42%" stop-color="#ffffff" stop-opacity=".05"/>
-    <stop offset="100%" stop-color="#000000" stop-opacity=".28"/>
+    <stop offset="0%" stop-color="#d8b45a" stop-opacity=".18"/>
+    <stop offset="42%" stop-color="#ffffff" stop-opacity=".06"/>
+    <stop offset="100%" stop-color="#000000" stop-opacity=".12"/>
   </linearGradient>
 </defs>
-<rect width="800" height="500" fill="#262c3d"/>
-<rect width="800" height="500" filter="url(#tblStone)" opacity=".5"/>
+<rect width="800" height="500" fill="#3a4463"/>
+<rect width="800" height="500" filter="url(#tblStone)" opacity=".42"/>
 <rect width="800" height="500" fill="url(#tblLight)"/>
 <radialGradient id="tblCenter" cx="50%" cy="46%" r="62%">
-  <stop offset="0%" stop-color="#ffffff" stop-opacity=".07"/>
+  <stop offset="0%" stop-color="#ffffff" stop-opacity=".12"/>
   <stop offset="70%" stop-color="#ffffff" stop-opacity="0"/>
 </radialGradient>
 <rect width="800" height="500" fill="url(#tblCenter)"/>
-<g fill="none" stroke="#d8b45a" stroke-width="1.2" opacity=".38">
+<g fill="none" stroke="#d8b45a" stroke-width="1.2" opacity=".48">
   <rect x="14" y="12" width="772" height="476" rx="6"/>
   <rect x="26" y="24" width="748" height="452" rx="4" stroke-width=".6" opacity=".7"/>
 </g>
@@ -22067,7 +21921,7 @@
   }
 
   // src/ui/deckstore.ts
-  var MIN_DECK_SIZE = 60;
+  var MIN_DECK_SIZE = 30;
   var MAX_COPIES = 4;
   var MAX_LEGENDARY_COPIES = 4;
   var KEY = "echo-citadel.decks.v1";
@@ -22175,6 +22029,8 @@
       appRoute = next;
     }
     document.body.dataset.appRoute = next;
+    if (next !== "rules") document.getElementById("rules")?.classList.add("hidden");
+    if (typeof closeOnline === "function" && document.getElementById("onlineModal") && !document.getElementById("onlineModal").classList.contains("hidden")) closeOnline();
     const dock = document.getElementById("ecQuickNav");
     const show = next !== "home" && next !== "battle";
     dock?.classList.toggle("hidden", !show);
@@ -22220,6 +22076,9 @@
       case "mastery":
         openBP();
         break;
+      case "rules":
+        openRules();
+        break;
       case "battle":
         setAppRoute("battle");
         $("menu").classList.add("hidden");
@@ -22229,10 +22088,67 @@
         break;
     }
   }
+  window.ecNavigate = navigateApp;
+  function closeAllScreens() {
+    for (const id of ["homeScreen", "eventsScreen", "decksScreen", "collection", "shopModal", "bpModal", "profileModal", "boosterModal", "campaignModal", "onlineModal"])
+      document.getElementById(id)?.classList.add("hidden");
+  }
+  function syncIconNav() {
+    const vis = (id) => {
+      const n = document.getElementById(id);
+      return !!n && !n.classList.contains("hidden");
+    };
+    let cur = appRoute;
+    if (vis("onlineModal")) cur = "online";
+    else if (vis("campaignModal")) cur = "campaign";
+    document.querySelectorAll("#ecIconNav .ecIco[data-route]").forEach((b) => {
+      const on = b.dataset.route === cur;
+      b.classList.toggle("active", on);
+      if (on) b.setAttribute("aria-current", "page");
+      else b.removeAttribute("aria-current");
+    });
+  }
+  function iconNavActivate(t) {
+    const px = t.dataset.proxy, route = t.dataset.route;
+    Audio_.uiClick();
+    document.getElementById("arenaTopNav")?.classList.remove("ecOpen");
+    document.getElementById("btnBurger")?.setAttribute("aria-expanded", "false");
+    if (px) document.getElementById(px)?.click();
+    else if (route) navigateApp(route);
+    window.setTimeout(syncIconNav, 60);
+  }
+  document.addEventListener("click", (ev) => {
+    const t = ev.target?.closest?.("#ecIconNav [data-proxy], #ecIconNav [data-route], #ecUtilNav [data-proxy], #ecUtilNav [data-route], #ecDrawer [data-proxy], #ecDrawer [data-route]");
+    if (!t) return;
+    ev.preventDefault();
+    iconNavActivate(t);
+  });
+  (() => {
+    const logo = document.querySelector("#arenaTopNav .ecLogoPlate");
+    const home = () => {
+      if (!document.getElementById("battle")?.classList.contains("hidden")) return;
+      Audio_.uiClick();
+      navigateApp("home");
+      syncIconNav();
+    };
+    logo?.addEventListener("click", home);
+    logo?.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" || ev.key === " ") {
+        ev.preventDefault();
+        home();
+      }
+    });
+    new MutationObserver(syncIconNav).observe(document.body, { attributes: true, attributeFilter: ["data-app-route"] });
+    for (const id of ["onlineModal", "campaignModal"]) {
+      const n = document.getElementById(id);
+      if (n) new MutationObserver(syncIconNav).observe(n, { attributes: true, attributeFilter: ["class"] });
+    }
+    syncIconNav();
+  })();
   document.getElementById("ecQuickNav")?.addEventListener("click", (ev) => {
     const route = ev.target?.closest?.("[data-route]");
     const value = route?.dataset.route;
-    if (value && ["back", "home", "collection", "decks", "store", "profile", "events", "packs", "mastery"].includes(value)) {
+    if (value && ["back", "home", "collection", "decks", "store", "profile", "events", "packs", "mastery", "rules"].includes(value)) {
       Audio_.uiClick();
       navigateApp(value);
     }
@@ -22400,7 +22316,7 @@
     node.insertAdjacentHTML("afterbegin", '<img class="frameOv" src="img/card_frame.png" alt="" draggable="false" onerror="this.remove()">');
     node.dataset.cardId = card.id;
     node.dataset.rarity = card.rarity;
-    const ability = highlightCardKeywords(cardText(card));
+    const ability = cardBodyHtml(card, false);
     node.innerHTML = `
     <div class="banner" style="background:linear-gradient(90deg,${col.primary},${col.accent})"></div>
     <div class="innerframe"></div>
@@ -22414,7 +22330,7 @@
       </div>
       <div class="ctype">${typeName(card.type)}${card.element !== "None" /* None */ ? " \xB7 " + elemName(card.element) : ""}</div>
       <div class="cart">${artSvg(card, 200, 190)}</div>
-      <div class="ctext">${keywordsLine(card)}${ability}</div>
+      <div class="ctext">${ability}</div>
       <div class="cfoot">
         <span class="rar" style="background:${rarCol};color:${rarCol}" title="${RARITY_RU[card.rarity]}"></span>
         <span class="cstats">${card.type === "Creature" /* Creature */ ? `<span class="catk">${card.attack ?? 0}</span><span class="chp">${card.health ?? 0}</span>` : `<span style="color:#767c8e">${FACTION_SIGIL[card.faction]}</span>`}</span>
@@ -22434,7 +22350,7 @@
     <div class="ttName" style="color:${col.primary}">${cardName(card)}</div>
     <div class="ttType">${typeName(card.type)} \xB7 ${factionName(card.faction)} \xB7 ${rarityName(card.rarity)} \xB7 ${card.cost} ${bi("\u043C\u0430\u043D\u044B", "Mana")}${card.element !== "None" /* None */ ? " \xB7 " + elemName(card.element) : ""}</div>
     ${card.type === "Creature" /* Creature */ ? `<div style="color:#ffd98a;font-size:.92rem">\u2694 ${card.attack ?? 0} &nbsp; \u2764 ${card.health ?? 0}</div>` : ""}
-    <div class="ttText">${highlightCardKeywords(cardText(card)) || "\u2014"}</div>
+    <div class="ttText">${cardBodyHtml(card)}</div>
     ${cardFlavor(card) ? `<div class="ttFlavor">${cardFlavor(card)}</div>` : ""}`;
     tooltip.classList.add("show");
     const w = 238;
@@ -22574,7 +22490,7 @@
       </div>
       <div class="ctype">${typeName(card.type)}${card.element !== "None" /* None */ ? " \xB7 " + elemName(card.element) : ""}</div>
       <div class="cart">${artSvg(card, size === "xxl" ? 340 : 300, size === "xxl" ? 330 : 290)}</div>
-      <div class="ctext">${keywordsLine(card)}${highlightCardKeywords(cardText(card)) || "\u2014"}${card.flavor ? `<div class="zflavor">${card.flavor}</div>` : ""}</div>
+      <div class="ctext">${cardBodyHtml(card)}${card.flavor ? `<div class="zflavor">${card.flavor}</div>` : ""}</div>
       <div class="cfoot">
         <span class="rar" style="background:${rarCol};color:${rarCol}" title="${RARITY_RU[card.rarity]}"></span>
         <span class="cstats">${card.type === "Creature" /* Creature */ ? `<span class="catk">${card.attack ?? 0}</span><span class="chp">${card.health ?? 0}</span>` : `<span style="color:#767c8e">${FACTION_SIGIL[card.faction]}</span>`}</span>
@@ -22613,6 +22529,8 @@
     if (nearLeft && place === "left") side = "right";
     zoomPreview.style.left = side === "left" ? "10px" : "auto";
     zoomPreview.style.right = side === "right" ? "10px" : "auto";
+    zoomPreview.classList.remove("zoomAt");
+    zoomPreview.classList.toggle("zoomLeft", side === "left");
     zoomPreview.style.top = "50%";
     zoomPreview.style.bottom = "auto";
     zoomPreview.style.transform = side === "right" ? "translateY(-50%) translateX(0)" : "translateY(-50%) translateX(0)";
@@ -22630,6 +22548,7 @@
   }
   var lastZoomEl = null;
   document.addEventListener("mousemove", (ev) => {
+    if (ev.target?.closest?.(".packSlot")) return;
     const host = ev.target?.closest?.(".card,.unit");
     if (host && host.dataset.cardId) {
       lastZoomEl = host;
@@ -22766,8 +22685,189 @@
     return isEN() ? localeCache?.[`card_${c.id}_name`] || c.name : c.name;
   }
   function cardText(c) {
+    if (c.type === "Creature" /* Creature */ && !isEN()) return creatureDescHtml(c).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
     const ru = c.abilityText ?? "";
     return isEN() ? localeCache?.[`card_${c.id}_text`] || ru : ru;
+  }
+  var KW_REMINDER = {
+    Taunt: "\u041F\u043E\u043A\u0430 \u044D\u0442\u043E \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u043D\u0430 \u043F\u043E\u043B\u0435, \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A \u043E\u0431\u044F\u0437\u0430\u043D \u0430\u0442\u0430\u043A\u043E\u0432\u0430\u0442\u044C \u0435\u0433\u043E \u2014 \u0431\u0438\u0442\u044C \u0433\u0435\u0440\u043E\u044F \u0438\u043B\u0438 \u0434\u0440\u0443\u0433\u0438\u0445 \u0441\u0443\u0449\u0435\u0441\u0442\u0432 \u043D\u0435\u043B\u044C\u0437\u044F.",
+    Rush: "\u041C\u043E\u0436\u0435\u0442 \u0430\u0442\u0430\u043A\u043E\u0432\u0430\u0442\u044C \u0432 \u0442\u043E\u0442 \u0436\u0435 \u0445\u043E\u0434, \u043A\u043E\u0433\u0434\u0430 \u0432\u044B\u0448\u043B\u043E \u043D\u0430 \u043F\u043E\u043B\u0435.",
+    Windfury: "\u041C\u043E\u0436\u0435\u0442 \u0430\u0442\u0430\u043A\u043E\u0432\u0430\u0442\u044C \u0434\u0432\u0430\u0436\u0434\u044B \u0437\u0430 \u0445\u043E\u0434.",
+    Trample: "\u0415\u0441\u043B\u0438 \u0443\u0431\u0438\u0432\u0430\u0435\u0442 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u0432 \u0431\u043E\u044E, \u043B\u0438\u0448\u043D\u0438\u0439 \u0443\u0440\u043E\u043D \u043F\u0440\u043E\u0445\u043E\u0434\u0438\u0442 \u0432 \u0433\u0435\u0440\u043E\u044F \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430.",
+    Lifesteal: "\u0423\u0440\u043E\u043D, \u043D\u0430\u043D\u0435\u0441\u0451\u043D\u043D\u044B\u0439 \u044D\u0442\u0438\u043C \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E\u043C, \u0432\u043E\u0441\u0441\u0442\u0430\u043D\u0430\u0432\u043B\u0438\u0432\u0430\u0435\u0442 \u0441\u0442\u043E\u043B\u044C\u043A\u043E \u0436\u0435 \u0437\u0434\u043E\u0440\u043E\u0432\u044C\u044F \u0432\u0430\u0448\u0435\u043C\u0443 \u0433\u0435\u0440\u043E\u044E.",
+    Unblockable: "\u0421\u0443\u0449\u0435\u0441\u0442\u0432\u0430 \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430 \u043D\u0435 \u043C\u043E\u0433\u0443\u0442 \u0432\u044B\u0431\u0440\u0430\u0442\u044C \u0435\u0433\u043E \u0446\u0435\u043B\u044C\u044E \u0430\u0442\u0430\u043A\u0438.",
+    DivineShield: "\u0412\u044B\u0445\u043E\u0434\u0438\u0442 \u043D\u0430 \u043F\u043E\u043B\u0435 \u0441\u043E \u0429\u0438\u0442\u043E\u043C: \u043F\u0435\u0440\u0432\u043E\u0435 \u043F\u043E\u043B\u0443\u0447\u0435\u043D\u043D\u043E\u0435 \u043F\u043E\u0432\u0440\u0435\u0436\u0434\u0435\u043D\u0438\u0435 \u043F\u043E\u043B\u043D\u043E\u0441\u0442\u044C\u044E \u043F\u043E\u0433\u043B\u043E\u0449\u0430\u0435\u0442\u0441\u044F.",
+    Poisonous: "\u0421\u0443\u0449\u0435\u0441\u0442\u0432\u043E, \u043F\u043E\u043B\u0443\u0447\u0438\u0432\u0448\u0435\u0435 \u043E\u0442 \u043D\u0435\u0433\u043E \u0443\u0440\u043E\u043D, \u043E\u0442\u0440\u0430\u0432\u043B\u0435\u043D\u043E \u2014 \u0441\u043B\u0435\u0434\u0443\u044E\u0449\u0435\u0435 \u043F\u043E\u0432\u0440\u0435\u0436\u0434\u0435\u043D\u0438\u0435 \u0435\u0433\u043E \u0443\u0431\u044C\u0451\u0442.",
+    Freezing: "\u0421\u0443\u0449\u0435\u0441\u0442\u0432\u043E, \u043F\u043E\u043B\u0443\u0447\u0438\u0432\u0448\u0435\u0435 \u043E\u0442 \u043D\u0435\u0433\u043E \u0443\u0440\u043E\u043D, \u0437\u0430\u043C\u043E\u0440\u0430\u0436\u0438\u0432\u0430\u0435\u0442\u0441\u044F \u0438 \u043F\u0440\u043E\u043F\u0443\u0441\u043A\u0430\u0435\u0442 \u0441\u043B\u0435\u0434\u0443\u044E\u0449\u0443\u044E \u0430\u0442\u0430\u043A\u0443.",
+    SpellDamage: "\u0412\u0430\u0448\u0438 \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u044F \u043D\u0430\u043D\u043E\u0441\u044F\u0442 \u043D\u0430 1 \u0443\u0440\u043E\u043D \u0431\u043E\u043B\u044C\u0448\u0435.",
+    Battlecry: "\u0421\u0440\u0430\u0431\u0430\u0442\u044B\u0432\u0430\u0435\u0442, \u043A\u043E\u0433\u0434\u0430 \u0432\u044B \u0440\u0430\u0437\u044B\u0433\u0440\u044B\u0432\u0430\u0435\u0442\u0435 \u044D\u0442\u043E \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u0438\u0437 \u0440\u0443\u043A\u0438.",
+    Deathrattle: "\u0421\u0440\u0430\u0431\u0430\u0442\u044B\u0432\u0430\u0435\u0442, \u043A\u043E\u0433\u0434\u0430 \u044D\u0442\u043E \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u043F\u043E\u0433\u0438\u0431\u0430\u0435\u0442."
+  };
+  function plural(n, one, few, many) {
+    const a = Math.abs(n) % 100, b = a % 10;
+    if (a > 10 && a < 20) return many;
+    if (b === 1) return one;
+    if (b >= 2 && b <= 4) return few;
+    return many;
+  }
+  function tgtPhrase(to, f, cs) {
+    const k = cs === "dat" ? 0 : cs === "acc" ? 1 : 2;
+    const HERO = {
+      EnemyHero: ["\u0433\u0435\u0440\u043E\u044E \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430", "\u0433\u0435\u0440\u043E\u044F \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430", "\u0433\u0435\u0440\u043E\u044F \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430"],
+      FriendlyHero: ["\u0441\u0432\u043E\u0435\u043C\u0443 \u0433\u0435\u0440\u043E\u044E", "\u0441\u0432\u043E\u0435\u0433\u043E \u0433\u0435\u0440\u043E\u044F", "\u0441\u0432\u043E\u0435\u0433\u043E \u0433\u0435\u0440\u043E\u044F"],
+      AnyHero: ["\u043B\u044E\u0431\u043E\u043C\u0443 \u0433\u0435\u0440\u043E\u044E", "\u043B\u044E\u0431\u043E\u0433\u043E \u0433\u0435\u0440\u043E\u044F", "\u043B\u044E\u0431\u043E\u0433\u043E \u0433\u0435\u0440\u043E\u044F"],
+      AllEnemies: ["\u0432\u0441\u0435\u043C \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0430\u043C \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430", "\u0432\u0441\u0435\u0445 \u0441\u0443\u0449\u0435\u0441\u0442\u0432 \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430", "\u0432\u0441\u0435\u0445 \u0441\u0443\u0449\u0435\u0441\u0442\u0432 \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430"],
+      AllFriendlies: ["\u0432\u0441\u0435\u043C \u0441\u0432\u043E\u0438\u043C \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0430\u043C", "\u0432\u0441\u0435\u0445 \u0441\u0432\u043E\u0438\u0445 \u0441\u0443\u0449\u0435\u0441\u0442\u0432", "\u0432\u0441\u0435\u0445 \u0441\u0432\u043E\u0438\u0445 \u0441\u0443\u0449\u0435\u0441\u0442\u0432"],
+      AllCreatures: ["\u0432\u0441\u0435\u043C \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0430\u043C", "\u0432\u0441\u0435\u0445 \u0441\u0443\u0449\u0435\u0441\u0442\u0432", "\u0432\u0441\u0435\u0445 \u0441\u0443\u0449\u0435\u0441\u0442\u0432"]
+    };
+    if (to && HERO[to]) return HERO[to][k];
+    const own = to === "FriendlyCreature";
+    const whose = to === "EnemyCreature" ? " \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430" : "";
+    const cnt = f?.count && f.count > 1 ? f.count : 1;
+    let suf = "";
+    if (f?.highestAttack) suf = " \u0441 \u043D\u0430\u0438\u0431\u043E\u043B\u044C\u0448\u0435\u0439 \u0430\u0442\u0430\u043A\u043E\u0439";
+    else if (f?.lowestAttack) suf = " \u0441 \u043D\u0430\u0438\u043C\u0435\u043D\u044C\u0448\u0435\u0439 \u0430\u0442\u0430\u043A\u043E\u0439";
+    else if (f?.lowestHealth) suf = " \u0441 \u043D\u0430\u0438\u043C\u0435\u043D\u044C\u0448\u0438\u043C \u0437\u0434\u043E\u0440\u043E\u0432\u044C\u0435\u043C";
+    else if (f?.highestHealth) suf = " \u0441 \u043D\u0430\u0438\u0431\u043E\u043B\u044C\u0448\u0438\u043C \u0437\u0434\u043E\u0440\u043E\u0432\u044C\u0435\u043C";
+    if (cnt > 1) {
+      const noun2 = [own ? "\u0441\u0432\u043E\u0438\u043C \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0430\u043C" : "\u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0430\u043C", own ? "\u0441\u0432\u043E\u0438\u0445 \u0441\u0443\u0449\u0435\u0441\u0442\u0432" : "\u0441\u0443\u0449\u0435\u0441\u0442\u0432", own ? "\u0441\u0432\u043E\u0438\u0445 \u0441\u0443\u0449\u0435\u0441\u0442\u0432" : "\u0441\u0443\u0449\u0435\u0441\u0442\u0432"][k];
+      return `${f?.random ? "\u0441\u043B\u0443\u0447\u0430\u0439\u043D\u044B\u043C ".slice(0, k === 0 ? 9 : 0) : ""}${cnt} ${noun2}${whose}${suf}`.replace(/^случайным (\d)/, "$1 \u0441\u043B\u0443\u0447\u0430\u0439\u043D\u044B\u043C");
+    }
+    const adj = f?.random ? ["\u0441\u043B\u0443\u0447\u0430\u0439\u043D\u043E\u043C\u0443", "\u0441\u043B\u0443\u0447\u0430\u0439\u043D\u043E\u0435", "\u0441\u043B\u0443\u0447\u0430\u0439\u043D\u043E\u0433\u043E"][k] : suf ? "" : ["\u0432\u044B\u0431\u0440\u0430\u043D\u043D\u043E\u043C\u0443", "\u0432\u044B\u0431\u0440\u0430\u043D\u043D\u043E\u0435", "\u0432\u044B\u0431\u0440\u0430\u043D\u043D\u043E\u0433\u043E"][k];
+    const pos = own ? ["\u0441\u0432\u043E\u0435\u043C\u0443", "\u0441\u0432\u043E\u0451", "\u0441\u0432\u043E\u0435\u0433\u043E"][k] : "";
+    const noun = ["\u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0443", "\u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E", "\u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0430"][k];
+    return [adj, pos, noun].filter(Boolean).join(" ") + whose + suf;
+  }
+  function effectRu(e, card, next) {
+    const v = e.value ?? 0;
+    const to = e.to ?? card.target;
+    const own = to === "FriendlyCreature";
+    void own;
+    const dat = () => tgtPhrase(to, e.filter, "dat");
+    const acc = () => tgtPhrase(to, e.filter, "acc");
+    const gen = () => tgtPhrase(to, e.filter, "gen");
+    const turns = (n) => `${n} ${plural(n, "\u0445\u043E\u0434", "\u0445\u043E\u0434\u0430", "\u0445\u043E\u0434\u043E\u0432")}`;
+    switch (e.op) {
+      case "damage":
+        return { text: `\u041D\u0430\u043D\u0435\u0441\u0438\u0442\u0435 ${v} \u0443\u0440\u043E\u043D\u0430 ${dat()}` };
+      case "heal":
+        return { text: `\u0412\u043E\u0441\u0441\u0442\u0430\u043D\u043E\u0432\u0438\u0442\u0435 ${v} \u0437\u0434\u043E\u0440\u043E\u0432\u044C\u044F ${dat()}` };
+      case "draw":
+        return { text: `\u0412\u043E\u0437\u044C\u043C\u0438\u0442\u0435 ${v} ${plural(v, "\u043A\u0430\u0440\u0442\u0443", "\u043A\u0430\u0440\u0442\u044B", "\u043A\u0430\u0440\u0442")}` };
+      case "opponentDraw":
+        return { text: `\u041F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A \u0431\u0435\u0440\u0451\u0442 ${v} ${plural(v, "\u043A\u0430\u0440\u0442\u0443", "\u043A\u0430\u0440\u0442\u044B", "\u043A\u0430\u0440\u0442")}` };
+      case "destroyCreature":
+        return { text: `\u0423\u043D\u0438\u0447\u0442\u043E\u0436\u044C\u0442\u0435 ${acc()}` };
+      case "buffAttack":
+        if (next && next.op === "buffHealth" && (next.to ?? card.target) === to) return { text: `\u0414\u0430\u0439\u0442\u0435 ${dat()} +${v}/+${next.value ?? 0}`, skipNext: true };
+        return { text: `\u0414\u0430\u0439\u0442\u0435 ${dat()} +${v} \u043A \u0430\u0442\u0430\u043A\u0435` };
+      case "buffHealth":
+        return { text: `\u0414\u0430\u0439\u0442\u0435 ${dat()} +${v} \u043A \u0437\u0434\u043E\u0440\u043E\u0432\u044C\u044E` };
+      case "debuffAttack":
+        return { text: `\u0423\u043C\u0435\u043D\u044C\u0448\u0438\u0442\u0435 \u0430\u0442\u0430\u043A\u0443 ${gen()} \u043D\u0430 ${v}` };
+      case "debuffHealth":
+        return { text: `\u041F\u043E\u0440\u0447\u0430: \u043D\u0430\u0432\u0441\u0435\u0433\u0434\u0430 \u0443\u043C\u0435\u043D\u044C\u0448\u0438\u0442\u0435 \u0437\u0434\u043E\u0440\u043E\u0432\u044C\u0435 ${gen()} \u043D\u0430 ${v}` };
+      case "applyStatus": {
+        const st = e.status;
+        if (st === "Poison") return { text: `\u041E\u0442\u0440\u0430\u0432\u0438\u0442\u0435 ${acc()} (${/^All/.test(to ?? "") || (e.filter?.count ?? 1) > 1 ? "\u0441\u043B\u0435\u0434\u0443\u044E\u0449\u0435\u0435 \u043F\u043E\u0432\u0440\u0435\u0436\u0434\u0435\u043D\u0438\u0435 \u0443\u0431\u044C\u0451\u0442 \u043A\u0430\u0436\u0434\u043E\u0433\u043E" : "\u0441\u043B\u0435\u0434\u0443\u044E\u0449\u0435\u0435 \u043F\u043E\u0432\u0440\u0435\u0436\u0434\u0435\u043D\u0438\u0435 \u0435\u0433\u043E \u0443\u0431\u044C\u0451\u0442"})` };
+        if (st === "Freeze") return { text: `\u0417\u0430\u043C\u043E\u0440\u043E\u0437\u044C\u0442\u0435 ${acc()} \u043D\u0430 ${turns(Math.max(1, v))} \u2014 \u043E\u043D\u043E \u043D\u0435 \u0430\u0442\u0430\u043A\u0443\u0435\u0442` };
+        if (st === "Shield") return { text: `\u0414\u0430\u0439\u0442\u0435 ${dat()} \u0429\u0438\u0442 (\u043F\u043E\u0433\u043B\u043E\u0449\u0430\u0435\u0442 \u043F\u0435\u0440\u0432\u043E\u0435 \u043F\u043E\u0432\u0440\u0435\u0436\u0434\u0435\u043D\u0438\u0435)` };
+        if (st === "Burn") return { text: `\u041F\u043E\u0434\u043E\u0436\u0433\u0438\u0442\u0435 ${acc()}: ${e.statusValue ?? 1} \u0443\u0440\u043E\u043D\u0430 \u0432 \u043D\u0430\u0447\u0430\u043B\u0435 \u043A\u0430\u0436\u0434\u043E\u0433\u043E \u0445\u043E\u0434\u0430, ${turns(Math.max(1, v))}` };
+        if (st === "Fury") return { text: `\u0414\u0430\u0439\u0442\u0435 ${dat()} \u042F\u0440\u043E\u0441\u0442\u044C \u2014 \u043C\u043E\u0436\u0435\u0442 \u0430\u0442\u0430\u043A\u043E\u0432\u0430\u0442\u044C \u0441\u0440\u0430\u0437\u0443` };
+        if (st === "Silence") return { text: `\u041D\u0430\u043B\u043E\u0436\u0438\u0442\u0435 \u041D\u0435\u043C\u043E\u0442\u0443 \u043D\u0430 ${acc()} \u2014 \u043E\u043D\u043E \u0442\u0435\u0440\u044F\u0435\u0442 \u0432\u0441\u0435 \u0441\u043F\u043E\u0441\u043E\u0431\u043D\u043E\u0441\u0442\u0438` };
+        return { text: `\u041D\u0430\u043B\u043E\u0436\u0438\u0442\u0435 \u0441\u0442\u0430\u0442\u0443\u0441 \u043D\u0430 ${acc()}` };
+      }
+      case "removeStatus":
+        return { text: `\u0421\u043D\u0438\u043C\u0438\u0442\u0435 \u0432\u0441\u0435 \u0441\u0442\u0430\u0442\u0443\u0441\u044B \u0441 ${gen()}` };
+      case "silence":
+        return { text: `\u041D\u0430\u043B\u043E\u0436\u0438\u0442\u0435 \u041D\u0435\u043C\u043E\u0442\u0443 \u043D\u0430 ${acc()} \u2014 \u043E\u043D\u043E \u043D\u0430\u0432\u0441\u0435\u0433\u0434\u0430 \u0442\u0435\u0440\u044F\u0435\u0442 \u0432\u0441\u0435 \u0441\u043F\u043E\u0441\u043E\u0431\u043D\u043E\u0441\u0442\u0438` };
+      case "returnToHand":
+        return { text: `\u0412\u0435\u0440\u043D\u0438\u0442\u0435 ${acc()} \u0432 \u0440\u0443\u043A\u0443 \u0432\u043B\u0430\u0434\u0435\u043B\u044C\u0446\u0430` };
+      case "stealCard":
+        return { text: `\u0417\u0430\u0431\u0435\u0440\u0438\u0442\u0435 ${v || 1} ${plural(v || 1, "\u0441\u043B\u0443\u0447\u0430\u0439\u043D\u0443\u044E \u043A\u0430\u0440\u0442\u0443", "\u0441\u043B\u0443\u0447\u0430\u0439\u043D\u044B\u0435 \u043A\u0430\u0440\u0442\u044B", "\u0441\u043B\u0443\u0447\u0430\u0439\u043D\u044B\u0445 \u043A\u0430\u0440\u0442")} \u0438\u0437 \u0440\u0443\u043A\u0438 \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430` };
+      case "stealCreature":
+        return { text: `\u0412\u043E\u0437\u044C\u043C\u0438\u0442\u0435 \u043F\u043E\u0434 \u043A\u043E\u043D\u0442\u0440\u043E\u043B\u044C ${acc()}` };
+      case "gainMana":
+        return { text: `\u041F\u043E\u043B\u0443\u0447\u0438\u0442\u0435 ${v} ${plural(v, "\u043C\u0430\u043D\u0443", "\u043C\u0430\u043D\u044B", "\u043C\u0430\u043D\u044B")} \u0432 \u044D\u0442\u043E\u043C \u0445\u043E\u0434\u0443` };
+      case "gainMaxMana":
+        return { text: `\u041D\u0430\u0432\u0441\u0435\u0433\u0434\u0430 \u0443\u0432\u0435\u043B\u0438\u0447\u044C\u0442\u0435 \u043C\u0430\u043A\u0441\u0438\u043C\u0443\u043C \u043C\u0430\u043D\u044B \u043D\u0430 ${v}` };
+      case "summonToken": {
+        const t = e.token;
+        return { text: t ? `\u041F\u0440\u0438\u0437\u043E\u0432\u0438\u0442\u0435 \xAB${t.name}\xBB ${t.attack ?? 0}/${t.health ?? 0}` : "\u041F\u0440\u0438\u0437\u043E\u0432\u0438\u0442\u0435 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E" };
+      }
+      case "gainEcho":
+        return { text: `\u041F\u043E\u043B\u0443\u0447\u0438\u0442\u0435 ${v || 1} \u042D\u0445\u043E-${plural(v || 1, "\u043E\u0447\u043A\u043E", "\u043E\u0447\u043A\u0430", "\u043E\u0447\u043A\u043E\u0432")}` };
+      case "sacrifice":
+        return { text: "\u041F\u043E\u0436\u0435\u0440\u0442\u0432\u0443\u0439\u0442\u0435 \u0441\u0432\u043E\u0438\u043C \u0441\u0430\u043C\u044B\u043C \u0441\u043B\u0430\u0431\u044B\u043C \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E\u043C" };
+      case "restoreHealthByAttack":
+        return { text: "\u0412\u043E\u0441\u0441\u0442\u0430\u043D\u043E\u0432\u0438\u0442\u0435 \u0441\u0432\u043E\u0435\u043C\u0443 \u0433\u0435\u0440\u043E\u044E \u0437\u0434\u043E\u0440\u043E\u0432\u044C\u0435, \u0440\u0430\u0432\u043D\u043E\u0435 \u0430\u0442\u0430\u043A\u0435 \u0432\u044B\u0431\u0440\u0430\u043D\u043D\u043E\u0433\u043E \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0430" };
+      case "damageAllEnemyCreatures":
+        return { text: `\u041D\u0430\u043D\u0435\u0441\u0438\u0442\u0435 ${v} \u0443\u0440\u043E\u043D\u0430 \u0432\u0441\u0435\u043C \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0430\u043C \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430` };
+      case "damageAllFriendlyCreatures":
+        return { text: `\u041D\u0430\u043D\u0435\u0441\u0438\u0442\u0435 ${v} \u0443\u0440\u043E\u043D\u0430 \u0432\u0441\u0435\u043C \u0441\u0432\u043E\u0438\u043C \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0430\u043C` };
+      case "damageAllCreatures":
+        return { text: `\u041D\u0430\u043D\u0435\u0441\u0438\u0442\u0435 ${v} \u0443\u0440\u043E\u043D\u0430 \u0432\u0441\u0435\u043C \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0430\u043C` };
+      case "healAllFriendlyCreatures":
+        return { text: `\u0412\u043E\u0441\u0441\u0442\u0430\u043D\u043E\u0432\u0438\u0442\u0435 ${v} \u0437\u0434\u043E\u0440\u043E\u0432\u044C\u044F \u0432\u0441\u0435\u043C \u0441\u0432\u043E\u0438\u043C \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0430\u043C` };
+      case "freezeAllEnemies":
+        return { text: `\u0417\u0430\u043C\u043E\u0440\u043E\u0437\u044C\u0442\u0435 \u0432\u0441\u0435\u0445 \u0441\u0443\u0449\u0435\u0441\u0442\u0432 \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430 \u043D\u0430 ${turns(Math.max(1, v))}` };
+      case "burnAllEnemies":
+        return { text: `\u041F\u043E\u0434\u043E\u0436\u0433\u0438\u0442\u0435 \u0432\u0441\u0435\u0445 \u0432\u0440\u0430\u0433\u043E\u0432: ${e.statusValue ?? 1} \u0443\u0440\u043E\u043D\u0430 \u0432 \u043D\u0430\u0447\u0430\u043B\u0435 \u0445\u043E\u0434\u0430, ${turns(Math.max(1, v))}` };
+      case "shieldAllFriendlies":
+        return { text: "\u0414\u0430\u0439\u0442\u0435 \u0432\u0441\u0435\u043C \u0441\u0432\u043E\u0438\u043C \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0430\u043C \u0429\u0438\u0442" };
+      case "setAttack":
+        return { text: `\u0421\u0434\u0435\u043B\u0430\u0439\u0442\u0435 \u0430\u0442\u0430\u043A\u0443 ${gen()} \u0440\u0430\u0432\u043D\u043E\u0439 ${v}` };
+      case "copyLastSpell":
+        return { text: "\u041F\u043E\u0432\u0442\u043E\u0440\u0438\u0442\u0435 \u043F\u043E\u0441\u043B\u0435\u0434\u043D\u0435\u0435 \u0440\u0430\u0437\u044B\u0433\u0440\u0430\u043D\u043D\u043E\u0435 \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0435" };
+      case "mill":
+        return { text: `\u041F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A \u0441\u0431\u0440\u0430\u0441\u044B\u0432\u0430\u0435\u0442 ${v} ${plural(v, "\u0432\u0435\u0440\u0445\u043D\u044E\u044E \u043A\u0430\u0440\u0442\u0443", "\u0432\u0435\u0440\u0445\u043D\u0438\u0435 \u043A\u0430\u0440\u0442\u044B", "\u0432\u0435\u0440\u0445\u043D\u0438\u0445 \u043A\u0430\u0440\u0442")} \u0441\u0432\u043E\u0435\u0439 \u043A\u043E\u043B\u043E\u0434\u044B` };
+      case "damageHeroes":
+        return { text: `\u041D\u0430\u043D\u0435\u0441\u0438\u0442\u0435 ${v} \u0443\u0440\u043E\u043D\u0430 \u043E\u0431\u043E\u0438\u043C \u0433\u0435\u0440\u043E\u044F\u043C` };
+      case "reduceIncomingDamage":
+        return { text: `\u0412\u0430\u0448 \u0433\u0435\u0440\u043E\u0439 \u043F\u043E\u043B\u0443\u0447\u0430\u0435\u0442 \u043D\u0430 ${v} \u0443\u0440\u043E\u043D\u0430 \u043C\u0435\u043D\u044C\u0448\u0435` };
+      case "increaseSpellDamage":
+        return { text: `\u0412\u0430\u0448\u0438 \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u044F \u043D\u0430\u043D\u043E\u0441\u044F\u0442 \u043D\u0430 ${v} \u0443\u0440\u043E\u043D\u0430 \u0431\u043E\u043B\u044C\u0448\u0435` };
+      default:
+        return { text: String(e.op) };
+    }
+  }
+  function effectsRu(list, card) {
+    const parts = [];
+    for (let i = 0; i < list.length; i++) {
+      const r = effectRu(list[i], card, list[i + 1]);
+      let t = r.text;
+      if (list[i].repeat && list[i].repeat > 1) t += ` (\xD7${list[i].repeat})`;
+      if (r.skipNext) i++;
+      const last = parts[parts.length - 1];
+      const m = /^Призовите (?:(\d+) × )?(«.+)$/.exec(last ?? "");
+      if (m && t === `\u041F\u0440\u0438\u0437\u043E\u0432\u0438\u0442\u0435 ${m[2]}`) {
+        parts[parts.length - 1] = `\u041F\u0440\u0438\u0437\u043E\u0432\u0438\u0442\u0435 ${+(m[1] ?? 1) + 1} \xD7 ${m[2]}`;
+        continue;
+      }
+      parts.push(t);
+    }
+    return parts.map((p, i) => i === 0 ? p : p.charAt(0).toLowerCase() + p.slice(1)).join(", \u0437\u0430\u0442\u0435\u043C ");
+  }
+  function creatureDescHtml(c, withReminder = true) {
+    const kws = (c.keywords ?? []).map(String);
+    const lines = [];
+    const rem = (k) => withReminder ? ` <i class="kwRem">(${esc(KW_REMINDER[k] ?? "")})</i>` : "";
+    for (const k of kws) {
+      if (k === "Battlecry" || k === "Deathrattle") continue;
+      lines.push(`<div class="abLine"><strong class="cardKeyword">${esc(kwName(k))}</strong>${rem(k)}</div>`);
+    }
+    if (c.effects?.length) lines.push(`<div class="abLine"><strong class="cardKeyword">\u0411\u043E\u0435\u0432\u043E\u0439 \u043A\u043B\u0438\u0447:</strong> ${esc(effectsRu(c.effects, c))}.</div>`);
+    if (c.onDeath?.length) lines.push(`<div class="abLine"><strong class="cardKeyword">\u041F\u0440\u0435\u0434\u0441\u043C\u0435\u0440\u0442\u043D\u044B\u0439 \u0445\u0440\u0438\u043F:</strong> ${esc(effectsRu(c.onDeath, c))}.</div>`);
+    if (c.onTurnStart?.length) lines.push(`<div class="abLine"><strong class="cardKeyword">\u0412 \u043D\u0430\u0447\u0430\u043B\u0435 \u0432\u0430\u0448\u0435\u0433\u043E \u0445\u043E\u0434\u0430:</strong> ${esc(effectsRu(c.onTurnStart, c))}.</div>`);
+    if (c.onTurnEnd?.length) lines.push(`<div class="abLine"><strong class="cardKeyword">\u0412 \u043A\u043E\u043D\u0446\u0435 \u0432\u0430\u0448\u0435\u0433\u043E \u0445\u043E\u0434\u0430:</strong> ${esc(effectsRu(c.onTurnEnd, c))}.</div>`);
+    if (c.onSpellCast?.length) lines.push(`<div class="abLine"><strong class="cardKeyword">\u041A\u043E\u0433\u0434\u0430 \u0432\u044B \u0440\u0430\u0437\u044B\u0433\u0440\u044B\u0432\u0430\u0435\u0442\u0435 \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0435:</strong> ${esc(effectsRu(c.onSpellCast, c))}.</div>`);
+    if (c.onDamageTaken?.length) lines.push(`<div class="abLine"><strong class="cardKeyword">\u041F\u043E\u043B\u0443\u0447\u0430\u044F \u0443\u0440\u043E\u043D:</strong> ${esc(effectsRu(c.onDamageTaken, c))}.</div>`);
+    if (!lines.length) return '<div class="abLine abVanilla">\u0421\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u0431\u0435\u0437 \u0441\u043F\u043E\u0441\u043E\u0431\u043D\u043E\u0441\u0442\u0435\u0439.</div>';
+    return lines.join("");
+  }
+  function cardBodyHtml(c, withReminder = true) {
+    if (c.type === "Creature" /* Creature */ && !isEN()) return creatureDescHtml(c, withReminder);
+    return keywordsLine(c) + (highlightCardKeywords(cardText(c)) || "\u2014");
   }
   function highlightCardKeywords(text) {
     let html = esc(text);
@@ -22846,6 +22946,8 @@
     constructor() {
       this.engine = null;
       this.ai = null;
+      /** v3.4: сетевой матч с живым соперником (null — обычный бой против ИИ). */
+      this.net = null;
       this.playerFaction = "Aurites" /* Aurites */;
       this.playerDeckId = "Aurites";
       this.enemyFaction = "Necrus" /* Necrus */;
@@ -22863,6 +22965,10 @@
       this.manualCombat = true;
       this.inCombatWindow = false;
       this.pendingAttack = null;
+      /** v3.17: «Атака всеми» — очередь атак готовых существ с ручным выбором целей */
+      this.massAttack = false;
+      this.massDone = 0;
+      this.massTotal = 0;
       this.combatWindowDone = null;
       this.turnDone = null;
       /** Существа, призванные с прошлого рендера: им показываем анимацию выхода. */
@@ -22876,6 +22982,10 @@
       this.pendingDraw = null;
       this.aimFrom = null;
       this.autoTurnEnabled = true;
+      /** v3.17.3: подсказка при долгом раздумье игрока — таймер + золотая подсветка сыгранных карт */
+      this.thinkTimer = null;
+      this.thinkOn = false;
+      this.thinkHooks = false;
       this.autoToken = "";
       this.autoDeadline = 0;
       this.autoTimer = null;
@@ -22885,7 +22995,6 @@
       this.combatBusy = false;
       this.combatSnap = null;
       this.overShown = false;
-      this.candleTimer = null;
       /** Ход ИИ: пауза 1–2 с (ТЗ п.5.1), «неидеальность» через blunderRate. */
       /** Окно отклика для игрока во время хода ИИ (MTG: приоритет оппонента). */
       this.instantPassResolve = null;
@@ -22897,6 +23006,8 @@
       this.telemPlayed = [];
       this.campaignBoss = null;
       this.launchMode = "menu";
+      this.eventId = null;
+      // v3: матч запущен из «Событий»
       this.practice = false;
       this.matchId = null;
       // из POST /api/match/start (спека п.1.4); null — офлайн/локальный бой
@@ -22925,6 +23036,7 @@
       this.instantLabel = "";
       this.cdTimer = 0;
       this.cdLeft = 20;
+      this.tutAllDone = false;
       /** Блокируем всё, кроме требуемого действия (Промпт 1 п.4); «Меню» и тренер — всегда можно. */
       this.tutBlocker = (ev) => {
         if (!this.tutLesson || !this.tutStepId) return;
@@ -22945,6 +23057,7 @@
           showToast("\u{1F393} \u0421\u043D\u0430\u0447\u0430\u043B\u0430 \u0432\u044B\u043F\u043E\u043B\u043D\u0438\u0442\u0435 \u043F\u043E\u0434\u0441\u0432\u0435\u0447\u0435\u043D\u043D\u043E\u0435 \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435 \u2014 \u043E\u0441\u0442\u0430\u043B\u044C\u043D\u043E\u0435 \u0437\u0430\u0431\u043B\u043E\u043A\u0438\u0440\u043E\u0432\u0430\u043D\u043E");
         }
       };
+      this.lastWasNet = false;
     }
     /* ------------------------------ запуск ------------------------------ */
     async start() {
@@ -22958,9 +23071,10 @@
       this.pendingSummonFx.clear();
       this.pendingStatusFx = [];
       logBuffer.length = 0;
+      applyBattleBg(this.playerFaction);
       const pDef = resolveDeck(this.playerDeckId, deckList) ?? starterDeckForFaction(this.playerFaction) ?? deckById.get(this.playerFaction);
-      const pDeck = pDef.cards.slice();
-      if (!isStarterDeckId(pDef.id)) {
+      const pDeck = this.net ? this.net.you.deck.slice() : pDef.cards.slice();
+      if (!this.net && !isStarterDeckId(pDef.id)) {
         const unowned = pDeck.filter((id) => ownedCount(id) === 0);
         if (unowned.length > 0) {
           this.running = false;
@@ -22971,10 +23085,10 @@
         }
       }
       const enemyDef = isStarterDeckId(pDef.id) ? starterDeckForFaction(this.enemyFaction) ?? deckById.get(this.enemyFaction) : deckById.get(this.enemyFaction);
-      const eDeck = enemyDef.cards.slice();
+      const eDeck = this.net ? this.net.opp.deck.slice() : enemyDef.cards.slice();
       this.engine = new GameEngine(db, [pDeck, eDeck], {
         factions: [this.playerFaction, this.enemyFaction],
-        names: ["\u0412\u044B", this.friendFoe ?? (this.bossPower ? `\u0411\u041E\u0421\u0421 \xB7 ${FACTION_RU[this.enemyFaction]}` : FACTION_RU[this.enemyFaction])],
+        names: ["\u0412\u044B", this.net ? this.net.opp.name : this.friendFoe ?? (this.bossPower ? `\u0411\u041E\u0421\u0421 \xB7 ${FACTION_RU[this.enemyFaction]}` : FACTION_RU[this.enemyFaction])],
         seed: Date.now() % 99991 + 7,
         config: { ...DEFAULT_CONFIG, passiveMul: PASSIVE_MUL, combatMode: "manual" },
         hooks: { onEvent: (e) => this.onEvent(e) }
@@ -22987,7 +23101,7 @@
         this.renderStats();
       });
       this.engine.onBeforeCombatEnd = this.combatAnim;
-      this.engine.interactiveStack = true;
+      this.engine.interactiveStack = !this.net;
       this.matchStart = Date.now();
       this.telemPlayed = [];
       this.bossLastTurn = -1;
@@ -22997,7 +23111,7 @@
         op.maxHealth = this.bossHp;
       }
       this.tutInjected = [];
-      if (this.tutLesson) {
+      if (this.tutLesson && !this.net) {
         const inj = TUT_HANDS[this.tutLesson] ?? [];
         const ph = this.engine.p(0 /* Player */);
         for (const id of inj) if (ph.hand.length < 10 && db.has(id)) ph.hand.push(id);
@@ -23016,14 +23130,20 @@
       $("gameover").classList.add("hidden");
       $("battle").classList.remove("hidden");
       this.setupScene();
-      const pPass = `${FACTION_RU[this.playerFaction]} \xB7 ${PASSIVE_TEXT[this.playerFaction].replace(/<[^>]+>/g, "")}`;
-      const ePass = `${FACTION_RU[this.enemyFaction]} \xB7 ${PASSIVE_TEXT[this.enemyFaction].replace(/<[^>]+>/g, "")}`;
-      $("playerFac").textContent = pPass;
-      $("playerFac").title = pPass;
-      $("enemyFac").textContent = ePass;
-      $("enemyFac").title = ePass;
+      const pFull = `\u041F\u0430\u0441\u0441\u0438\u0432 \u0444\u0440\u0430\u043A\u0446\u0438\u0438 \u2014 ${PASSIVE_TEXT[this.playerFaction]}`;
+      const eFull = `\u041F\u0430\u0441\u0441\u0438\u0432 \u0444\u0440\u0430\u043A\u0446\u0438\u0438 \u2014 ${PASSIVE_TEXT[this.enemyFaction]}`;
+      $("playerFac").textContent = FACTION_RU[this.playerFaction];
+      $("playerFac").innerHTML = FACTION_RU[this.playerFaction];
+      $("playerFac").title = pFull.replace(/<[^>]+>/g, "");
+      $("enemyFac").textContent = FACTION_RU[this.enemyFaction];
+      $("enemyFac").innerHTML = FACTION_RU[this.enemyFaction];
+      $("enemyFac").title = eFull.replace(/<[^>]+>/g, "");
       this.setPortrait("playerPortrait", this.playerFaction);
       this.setPortrait("enemyPortrait", this.enemyFaction);
+      if (this.net) {
+        await this.netSetup();
+        return;
+      }
       this.engine.setup();
       pushLog(`\u2694 ${FACTION_RU[this.playerFaction]} \u043F\u0440\u043E\u0442\u0438\u0432 ${FACTION_RU[this.enemyFaction]}`, "big");
       this.renderAll();
@@ -23050,14 +23170,12 @@
       }
       vfxInit($("battle"));
       mountPostLayers(document.body);
-      startAmbient(paletteOf(this.playerFaction).secondary, 70);
-      setAmbientColor(paletteOf(this.playerFaction).secondary);
-      startParallax([...bd?.querySelectorAll(".bl") ?? []]);
-      if (!this.candleTimer) this.candleTimer = window.setInterval(() => candleFlicker(bd ?? document.body), 2600);
+      stopAmbient();
     }
     stop() {
       this.running = false;
       this.turnDone?.();
+      this.clearThinkWatch();
     }
     /* --------------------------- главный цикл --------------------------- */
     async loop() {
@@ -23065,6 +23183,7 @@
       try {
         while (this.running && e.result === "Ongoing" /* Ongoing */) {
           if (e.activeSide === 0 /* Player */) await this.humanTurn();
+          else if (this.net) await this.netTurn();
           else await this.aiTurn();
           if (e.result === "Ongoing" /* Ongoing */ && e.turn > e.config.maxTurns) e.result = "Draw" /* Draw */;
           this.renderAll();
@@ -23084,6 +23203,7 @@
       this.setBusy(false);
       this.setWho("\u0412\u0430\u0448 \u0445\u043E\u0434");
       e.runTurn();
+      this.netAct("turnStart");
       this.ropeStart();
       await this.playPhaseBanners(["Start" /* Start */, "Resource" /* Resource */]);
       this.renderAll();
@@ -23091,25 +23211,47 @@
         this.turnDone = res;
       });
       this.turnDone = null;
-      if (!this.running) return;
+      if (!this.running || e.result !== "Ongoing" /* Ongoing */) return;
       this.aiInstantResponse("\u043F\u0435\u0440\u0435\u0434 \u0432\u0430\u0448\u0435\u0439 \u0430\u0442\u0430\u043A\u043E\u0439");
+      if (e.result !== "Ongoing" /* Ongoing */ || !this.running) {
+        this.renderAll();
+        return;
+      }
       this.setWho("\u0411\u0438\u0442\u0432\u0430");
       if (this.manualCombat) {
         e.enterCombatPhase();
+        this.netAct("combat");
         await this.combatWindow();
-        if (!this.running) return;
+        if (!this.running || e.result !== "Ongoing" /* Ongoing */) {
+          this.renderAll();
+          return;
+        }
       }
+      const skipCombat = e.manualCombatSkip;
       await e.finishMainPhase();
+      this.netAct("endTurn", { skip: skipCombat });
       this.aiInstantResponse("\u0432 \u043A\u043E\u043D\u0435\u0446 \u0432\u0430\u0448\u0435\u0433\u043E \u0445\u043E\u0434\u0430");
       this.renderAll();
     }
     async responseWindow(label, force = false) {
+      if (this.net) return;
       const e = this.engine;
       if (e.result !== "Ongoing" /* Ongoing */ || !this.running) return;
       const hand = e.p(0 /* Player */).hand.map((id) => e.db.get(id)).filter(Boolean);
       const mana = e.p(0 /* Player */).mana;
-      if (!force && !hand.some((c) => c.type === "Spell" /* Spell */ && c.subtype === "Instant" /* Instant */ && c.cost <= mana)) return;
+      void force;
+      if (!hand.some((c) => c.type === "Spell" /* Spell */ && c.subtype === "Instant" /* Instant */ && c.cost <= mana)) return;
       e.openInstantWindow(0 /* Player */);
+      const legal = e.p(0 /* Player */).hand.filter((_, i) => {
+        const r = e.canPlay(0 /* Player */, i);
+        return r.ok && r.card?.subtype === "Instant" /* Instant */;
+      }).length;
+      if (!legal) {
+        e.closeInstantWindow();
+        return;
+      }
+      document.body.classList.add("ecPriority");
+      Audio_.uiClick();
       this.instantLabel = label;
       this.renderAll();
       if (window.ecAutoPass || settings.autoPass) {
@@ -23129,6 +23271,7 @@
         this.instantPassResolve = res;
         this.instantTimer = window.setTimeout(() => this.passInstant(), 2e4);
       });
+      document.body.classList.remove("ecPriority");
     }
     ropeStart() {
       this.ropeStop();
@@ -23173,17 +23316,22 @@
           meta.mmr += 12;
           if (!meta.borderlessEventClaimed) meta.borderlessEventWins = Math.min(BORDERLESS_EVENT_WINS, (meta.borderlessEventWins ?? 0) + 1);
         }
-        meta.xp += 80 + e.turn * 2;
+        meta.xp += Math.round((80 + e.turn * 2) * (1 + cosmBonusTotal().xp / 100));
         questBump("win_fac", 1, fac);
       } else {
         meta.losses += 1;
         meta.facL[fac] = (meta.facL[fac] ?? 0) + 1;
         if (!unranked) meta.mmr = Math.max(800, meta.mmr - 10);
-        meta.xp += 20 + e.turn;
+        meta.xp += Math.round((20 + e.turn) * (1 + cosmBonusTotal().xp / 100));
       }
       meta.bestMmr = Math.max(meta.bestMmr ?? meta.mmr, meta.mmr);
-      meta.bpXp = (meta.bpXp ?? 0) + (win ? 120 : 60);
+      meta.bpXp = (meta.bpXp ?? 0) + Math.round((win ? 120 : 60) * (1 + cosmBonusTotal().bp / 100));
       questBump("dmg", e.stats[0 /* Player */].damageDealt);
+      if (this.eventId) {
+        const evMsg = eventOnMatchEnd(this.eventId, win);
+        this.eventId = null;
+        if (evMsg) window.setTimeout(() => showToast(`\u25C6 ${evMsg}`), 900);
+      }
       checkAchs();
       const lvlAfter = Math.floor(meta.xp / 500) + 1;
       if (lvlAfter > lvlBefore) levelUpFx(lvlAfter);
@@ -23254,7 +23402,7 @@
         line.textContent = `\u041D\u0430\u0433\u0440\u0430\u0434\u044B: +${win ? 80 + e.turn * 2 : 20 + e.turn} \u043E\u043F\u044B\u0442\u0430, +${win ? unranked ? 60 : 120 : unranked ? 25 : 60} \u043E\u043F\u044B\u0442\u0430 \u043F\u0440\u043E\u043F\u0443\u0441\u043A\u0430` + (unranked ? " (\u043C\u0430\u0442\u0447 \u0431\u0435\u0437 \u0440\u0435\u0439\u0442\u0438\u043D\u0433\u0430)" : `, \u0440\u0435\u0439\u0442\u0438\u043D\u0433 ${meta.mmr} \u2014 ${rankOf(meta.mmr).title}`) + (reward ? `, \u{1FA99}${reward}${gemReward ? ` \u0438 \u{1F48E}${gemReward}` : ""} \u0437\u0430 \u043A\u0430\u043C\u043F\u0430\u043D\u0438\u044E` : "");
         go2.appendChild(line);
       }
-      if (reward) shardsAdd(reward);
+      if (reward) shardsAdd(Math.round(reward * (1 + cosmBonusTotal().sh / 100)));
       if (gemReward) gemsAdd(gemReward);
     }
     /** Насос стека: поочерёдные окна ответа до опустошения LIFO-стека. */
@@ -23291,6 +23439,7 @@
       list.innerHTML = e.stack.map((en, i) => `<div class="stItem ${en.side === 0 /* Player */ ? "me" : "foe"}">${i === e.stack.length - 1 ? "\u25B6 " : ""}${en.side === 0 /* Player */ ? "\u0412\u044B" : "\u041F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A"}: ${esc(en.card.name)}</div>`).join("");
     }
     passInstant() {
+      document.body.classList.remove("ecPriority");
       if (this.cdTimer) {
         window.clearInterval(this.cdTimer);
         this.cdTimer = 0;
@@ -23309,6 +23458,7 @@
     }
     /** ИИ отвечает мгновенными заклинаниями в ваш ход (эвристика). */
     aiInstantResponse(label) {
+      if (this.net || !this.ai) return;
       const e = this.engine;
       if (e.result !== "Ongoing" /* Ongoing */) return;
       const pl = e.p(1 /* Opponent */);
@@ -23549,7 +23699,7 @@
           if (rec.attackerAfter) this.combatSnap.units.set(rec.attackerUid, rec.attackerAfter.hp);
           if (rec.hitHero) {
             const target = rec.attackerSide === 0 /* Player */ ? 1 /* Opponent */ : 0 /* Player */;
-            this.combatSnap.hp[target] = Math.max(0, this.combatSnap.hp[target] - rec.heroDamage);
+            this.combatSnap.hp[target] = this.combatSnap.hp[target] - rec.heroDamage;
           }
           const healed = rec.lifestealAmount ?? 0;
           if (rec.lifesteal && healed > 0) {
@@ -23591,7 +23741,11 @@
       return e.p(0 /* Player */).creatures.some((c) => e.canAttack(c));
     }
     async combatWindow() {
+      if (this.engine.result !== "Ongoing" /* Ongoing */) return;
       this.inCombatWindow = true;
+      this.massAttack = false;
+      this.massDone = 0;
+      this.massTotal = 0;
       this.setCombatStep(1);
       this.renderPhaseTrack("Combat" /* Combat */);
       await this.banner(PHASE_RU["Combat" /* Combat */]);
@@ -23618,6 +23772,7 @@
     }
     closeCombatWindow() {
       this.setCombatStep(2);
+      this.clearMassAttack(true);
       this.combatWindowDone?.();
     }
     // MTG: declare blockers
@@ -23631,11 +23786,18 @@
       this.closeCombatWindow();
     }
     cancelAttack() {
-      if (this.pendingAttack === null) return;
-      const n = this.unitNodes.get(this.pendingAttack);
+      const massWasOn = this.massAttack;
+      if (this.pendingAttack === null && !massWasOn) return;
+      const n = this.pendingAttack !== null ? this.unitNodes.get(this.pendingAttack) : null;
       if (n) n.classList.remove("attacking");
       this.pendingAttack = null;
       this.clearHighlights();
+      if (massWasOn) {
+        this.massAttack = false;
+        this.massDone = 0;
+        this.massTotal = 0;
+        if (this.inCombatWindow && this.engine) this.updateButtons();
+      }
     }
     attackTargetsFor(uid) {
       const e = this.engine;
@@ -23644,7 +23806,7 @@
       const taunts = en.creatures.filter((c2) => !c2.silenced && (c2.keywords ?? []).includes("Taunt" /* Taunt */));
       const mustHit = !!c?.data?.mustHitCreature;
       const heroAllowed = taunts.length === 0 && !mustHit;
-      const pool = taunts.length ? taunts : en.creatures;
+      const pool = (taunts.length ? taunts : en.creatures).filter((c2) => !c2.unblockableThisTurn && !(!c2.silenced && (c2.keywords ?? []).includes("Unblockable" /* Unblockable */)));
       return { uids: pool.map((c2) => c2.uid), hero: heroAllowed };
     }
     beginAttack(uid) {
@@ -23681,10 +23843,61 @@
         this.flashHint("\u0410\u0442\u0430\u043A\u0430 \u043E\u0442\u043A\u043B\u043E\u043D\u0435\u043D\u0430 \u0434\u0432\u0438\u0436\u043A\u043E\u043C");
         return;
       }
+      this.netAct("attack", { uid, targetUid, hero: !!targetHero });
       const recs = e.attackQueue.slice(q0);
       await this.combatCore(recs);
       this.renderAll();
       this.scheduleWindowAutoClose();
+      if (this.massAttack && this.inCombatWindow) this.nextMassAttacker();
+    }
+    /** v3.17: уиды своих существ, готовых к атаке прямо сейчас. */
+    readyAttackerUids() {
+      const e = this.engine;
+      return e ? e.p(0 /* Player */).creatures.filter((c) => e.canAttack(c)).map((c) => c.uid) : [];
+    }
+    /** v3.17: «Атака всеми» — по очереди берём каждое готовое существо,
+     *  цель выбирает игрок вручную (клик по существу/герою). */
+    startMassAttack() {
+      if (!this.inCombatWindow || this.busy) return;
+      const ready = this.readyAttackerUids();
+      if (ready.length === 0) {
+        this.flashHint("\u0413\u043E\u0442\u043E\u0432\u044B\u0445 \u043A \u0430\u0442\u0430\u043A\u0435 \u0441\u0443\u0449\u0435\u0441\u0442\u0432 \u043D\u0435\u0442");
+        return;
+      }
+      this.massAttack = true;
+      this.massDone = 0;
+      this.massTotal = ready.length;
+      this.beginAttack(ready[0]);
+      this.massHint();
+    }
+    nextMassAttacker() {
+      const ready = this.readyAttackerUids();
+      if (ready.length === 0) {
+        this.massAttack = false;
+        if (this.engine) this.updateButtons();
+        return;
+      }
+      this.massDone += 1;
+      this.beginAttack(ready[0]);
+      this.massHint();
+    }
+    massHint() {
+      const n = this.massDone + 1;
+      $("actionHint").textContent = `\u2694 \u0410\u0442\u0430\u043A\u0430 \u0432\u0441\u0435\u043C\u0438 (${n}/${this.massTotal}): \u0432\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u0446\u0435\u043B\u044C \u2014 \u0433\u0435\u0440\u043E\u0439 \u0438\u043B\u0438 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \xB7 \u041F\u041A\u041C/Esc \u2014 \u043E\u0442\u043C\u0435\u043D\u0438\u0442\u044C`;
+      this.flashHint(`\u0410\u0442\u0430\u043A\u0430 \u0432\u0441\u0435\u043C\u0438: ${n} \u0438\u0437 ${this.massTotal} \u2014 \u0432\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u0446\u0435\u043B\u044C (\u041F\u041A\u041C/Esc \u2014 \u043E\u0442\u043C\u0435\u043D\u0438\u0442\u044C)`);
+    }
+    clearMassAttack(silent = false) {
+      if (!this.massAttack) return;
+      this.massAttack = false;
+      this.massDone = 0;
+      this.massTotal = 0;
+      if (!silent) {
+        if (this.inCombatWindow && this.engine) {
+          const n = this.engine.p(0 /* Player */).creatures.filter((c) => this.engine.canAttack(c)).length;
+          $("actionHint").textContent = n > 0 ? `\u2694 \u0424\u0430\u0437\u0430 \u0431\u043E\u044F: ${n} \u0433\u043E\u0442\u043E\u0432\u044B\u0445 \u043A \u0430\u0442\u0430\u043A\u0435 \xB7 \u043A\u043B\u0438\u043A \u043F\u043E \u0441\u0432\u043E\u0435\u043C\u0443 \u2192 \u0446\u0435\u043B\u044C \xB7 \xAB\u0410\u0442\u0430\u043A\u0430 \u0432\u0441\u0435\u043C\u0438\xBB \u2014 \u0432\u0441\u0435 \u043F\u043E\u0434\u0440\u044F\u0434` : "\u0424\u0430\u0437\u0430 \u0431\u043E\u044F: \u043D\u0435\u0447\u0435\u043C \u0430\u0442\u0430\u043A\u043E\u0432\u0430\u0442\u044C \u2014 \xAB\u041F\u0440\u043E\u043F\u0443\u0441\u0442\u0438\u0442\u044C \u0431\u043E\u0439\xBB \u0438\u043B\u0438 Space";
+        }
+        this.updateButtons();
+      }
     }
     /* ------------------- события движка → визуал/лог ------------------- */
     onEvent(e) {
@@ -23851,6 +24064,23 @@
         case "TurnStarted" /* TurnStarted */:
           this.renderPhaseTrack("Start" /* Start */);
           break;
+        case "GameOver" /* GameOver */: {
+          if (this.instantTimer) {
+            window.clearTimeout(this.instantTimer);
+            this.instantTimer = 0;
+          }
+          if (this.cdTimer) {
+            window.clearInterval(this.cdTimer);
+            this.cdTimer = 0;
+          }
+          document.body.classList.remove("ecPriority");
+          const ri = this.instantPassResolve;
+          this.instantPassResolve = null;
+          ri?.();
+          this.turnDone?.();
+          this.combatWindowDone?.();
+          break;
+        }
         default:
           break;
       }
@@ -24118,7 +24348,9 @@
       const p = e.p(0 /* Player */), o = e.p(1 /* Opponent */);
       const cap = (x) => String(Math.min(10, x));
       const snapHp = this.combatBusy && this.combatSnap ? this.combatSnap.hp : null;
-      $("playerHp").textContent = String(snapHp ? snapHp[0 /* Player */] : p.health);
+      const hpP = snapHp ? snapHp[0 /* Player */] : p.health;
+      $("playerHp").textContent = String(hpP);
+      $("playerHp").closest(".hbHp")?.classList.toggle("neg", hpP < 0);
       $("playerMana").textContent = `${p.mana}/${cap(p.maxMana + p.bonusMana)}`;
       if (p.mana > this.prevMana) {
         const st = $("playerMana").closest(".stat");
@@ -24134,7 +24366,9 @@
       $("playerEcho").textContent = String(p.echoPoints);
       $("playerGrave").textContent = String(p.graveyard.length);
       this.renderGraveZone(0 /* Player */, $("playerGraveZone"), p.graveyard.length);
-      $("enemyHp").textContent = String(snapHp ? snapHp[1 /* Opponent */] : o.health);
+      const hpO = snapHp ? snapHp[1 /* Opponent */] : o.health;
+      $("enemyHp").textContent = String(hpO);
+      $("enemyHp").closest(".hbHp")?.classList.toggle("neg", hpO < 0);
       $("enemyMana").textContent = `${o.mana}/${cap(o.maxMana + o.bonusMana)}`;
       $("enemyHand").textContent = String(o.hand.length);
       const backs = $("enemyBacks");
@@ -24282,7 +24516,7 @@
       }
       const myMain = e.activeSide === 0 /* Player */ && e.phase === "Main" /* Main */ && !this.busy && this.running;
       const maxAngle = Math.min(12, n * 2.1);
-      const cw = Math.min(196, Math.max(118, window.innerWidth * 0.125));
+      const cw = Math.min(168, Math.max(96, Math.min(window.innerHeight * 0.15, window.innerWidth * 0.11)));
       const overlap = Math.round(Math.max(-cw * 0.44, cw * 0.8 - n * cw * 0.12));
       pl.hand.forEach((cid, i) => {
         const card = db.get(cid);
@@ -24291,7 +24525,7 @@
         const t = n === 1 ? 0.5 : i / (n - 1);
         const angle = (t - 0.5) * maxAngle;
         const lift = -Math.cos((t - 0.5) * Math.PI) * 10;
-        const base = `rotate(${angle.toFixed(2)}deg) translateY(${lift.toFixed(1)}px)`;
+        const base = `translateY(var(--hand-sink, 0px)) rotate(${angle.toFixed(2)}deg) translateY(${lift.toFixed(1)}px)`;
         node.style.transform = base;
         node.style.marginLeft = i === 0 ? "0" : `${overlap}px`;
         node.style.zIndex = String(10 + i);
@@ -24696,6 +24930,7 @@
       const played = e.playCard(0 /* Player */, index, uid, side);
       if (!played) this.flashHint("\u0414\u0432\u0438\u0436\u043E\u043A \u043E\u0442\u043A\u043B\u043E\u043D\u0438\u043B \u0440\u043E\u0437\u044B\u0433\u0440\u044B\u0448");
       else {
+        this.netAct("play", { index, uid, side });
         Audio_.cardPlay(card?.cost ?? 3);
         const zone = card && (card.type === "Creature" /* Creature */ || card.type === "Rune" /* Rune */) ? $("playerBoard") : $("enemyBoard");
         screenFlash(paletteOf(card?.faction ?? "Neutral" /* Neutral */).primary, 0.1, 200);
@@ -24745,24 +24980,93 @@
       btn("btnEcho").textContent = echo.ok ? `\u25C8 \u042D\u0445\u043E: \u043F\u043E\u0432\u0442\u043E\u0440\u0438\u0442\u044C \xAB${echo.card.name}\xBB (\u043E\u0447\u043A\u043E\u0432 ${e.p(0 /* Player */).echoPoints})` : "\u25C8 \u0418\u0441\u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u0442\u044C \u042D\u0445\u043E";
       btn("btnEcho").title = echo.reason ?? "\u0411\u0435\u0441\u043F\u043B\u0430\u0442\u043D\u043E \u043F\u043E\u0432\u0442\u043E\u0440\u0438\u0442\u044C \u043F\u043E\u0441\u043B\u0435\u0434\u043D\u0435\u0435 \u0440\u0430\u0437\u044B\u0433\u0440\u0430\u043D\u043D\u043E\u0435 \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0435 (\u043E\u0434\u0438\u043D \u0440\u0430\u0437 \u0437\u0430 \u0438\u0433\u0440\u0443)";
       const ab = btn("btnAutoBattle");
-      ab.classList.toggle("hidden", !this.inCombatWindow);
+      ab.classList.toggle("inv", !this.inCombatWindow);
       ab.disabled = !this.inCombatWindow;
       const sc = btn("btnSkipCombat");
-      sc.classList.toggle("hidden", !this.inCombatWindow);
+      sc.classList.toggle("inv", !this.inCombatWindow);
       sc.disabled = !this.inCombatWindow;
+      const aa = btn("btnAttackAll");
+      aa.classList.toggle("inv", !this.inCombatWindow);
+      aa.disabled = !this.inCombatWindow || this.busy || (this.engine ? this.readyAttackerUids().length === 0 : true);
       if (this.inCombatWindow) {
-        const n = this.engine ? this.engine.p(this.engine.activeSide).creatures.filter((c) => this.engine.canAttack(c)).length : 0;
-        $("actionHint").textContent = n > 0 ? `\u2694 \u0424\u0430\u0437\u0430 \u0431\u043E\u044F: ${n} \u0433\u043E\u0442\u043E\u0432\u044B\u0445 \u043A \u0430\u0442\u0430\u043A\u0435 \u043F\u043E\u0434\u0441\u0432\u0435\u0447\u0435\u043D\u044B \u0437\u043E\u043B\u043E\u0442\u043E\u043C \xB7 \u043A\u043B\u0438\u043A \u043F\u043E \u0441\u0432\u043E\u0435\u043C\u0443 \u2192 \u0446\u0435\u043B\u044C \u0441\u0442\u0440\u0435\u043B\u043A\u043E\u0439 \xB7 \xAB\u0410\u0432\u0442\u043E-\u0431\u043E\u0439\xBB \u2014 \u0434\u043E\u0438\u0433\u0440\u0430\u0442\u044C, \xAB\u041F\u0440\u043E\u043F\u0443\u0441\u0442\u0438\u0442\u044C \u0431\u043E\u0439\xBB \u2014 \u043D\u0435 \u0431\u0438\u0442\u044C` : "\u0424\u0430\u0437\u0430 \u0431\u043E\u044F: \u043D\u0435\u0447\u0435\u043C \u0430\u0442\u0430\u043A\u043E\u0432\u0430\u0442\u044C \u2014 \u043D\u0430\u0436\u043C\u0438\u0442\u0435 \xAB\u041F\u0440\u043E\u043F\u0443\u0441\u0442\u0438\u0442\u044C \u0431\u043E\u0439\xBB \u0438\u043B\u0438 Space";
+        const n = this.readyAttackerUids().length;
+        if (!this.massAttack) {
+          $("actionHint").textContent = n > 0 ? `\u2694 \u0424\u0430\u0437\u0430 \u0431\u043E\u044F: ${n} \u0433\u043E\u0442\u043E\u0432\u044B\u0445 \u043A \u0430\u0442\u0430\u043A\u0435 \xB7 \u043A\u043B\u0438\u043A \u043F\u043E \u0441\u0432\u043E\u0435\u043C\u0443 \u2192 \u0446\u0435\u043B\u044C \xB7 \xAB\u0410\u0442\u0430\u043A\u0430 \u0432\u0441\u0435\u043C\u0438\xBB \u2014 \u0432\u0441\u0435 \u043F\u043E\u0434\u0440\u044F\u0434` : "\u0424\u0430\u0437\u0430 \u0431\u043E\u044F: \u043D\u0435\u0447\u0435\u043C \u0430\u0442\u0430\u043A\u043E\u0432\u0430\u0442\u044C \u2014 \xAB\u041F\u0440\u043E\u043F\u0443\u0441\u0442\u0438\u0442\u044C \u0431\u043E\u0439\xBB \u0438\u043B\u0438 Space";
+        }
+        this.armThinkWatch();
         return;
       }
       if ($("actionHint").style.color) return;
+      if (this.thinkOn) {
+        const still = this.running && !this.busy && e?.activeSide === 0 /* Player */ && e?.phase === "Main" /* Main */;
+        if (still) return;
+        this.clearThinkWatch();
+      }
       $("actionHint").textContent = myMain ? "\u041F\u0435\u0440\u0435\u0442\u0430\u0449\u0438\u0442\u0435 \u043A\u0430\u0440\u0442\u0443 \u043D\u0430 \u043F\u043E\u043B\u0435 \u0438\u043B\u0438 \u043D\u0430 \u0446\u0435\u043B\u044C \xB7 \u041F\u0440\u043E\u0431\u0435\u043B \u2014 \u0437\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u044C \u0445\u043E\u0434 \xB7 E \u2014 \u042D\u0445\u043E" : "\u041E\u0436\u0438\u0434\u0430\u043D\u0438\u0435\u2026";
+      this.armThinkWatch();
+    }
+    /* ---------------- v3.17.3: подсказка при долгом раздумье ----------------
+       Если в основной фазе игрок 7 секунд ничего не делает — карты, которые
+       можно разыграть, мягко пульсируют золотом + текст-подсказка в доке.
+       Любое изменение состояния (updateButtons) сбрасывает и перезапускает таймер. */
+    clearThinkWatch() {
+      if (this.thinkTimer !== null) {
+        clearTimeout(this.thinkTimer);
+        this.thinkTimer = null;
+      }
+      if (this.thinkOn) {
+        this.thinkOn = false;
+        document.querySelectorAll("#hand .card.thinkHint").forEach((n) => n.classList.remove("thinkHint"));
+        const h = $("actionHint");
+        if (h.textContent?.startsWith("\u{1F4A1}")) {
+          const e = this.engine;
+          const myMain = this.running && !this.busy && e?.activeSide === 0 /* Player */ && e?.phase === "Main" /* Main */;
+          h.textContent = myMain ? "\u041F\u0435\u0440\u0435\u0442\u0430\u0449\u0438\u0442\u0435 \u043A\u0430\u0440\u0442\u0443 \u043D\u0430 \u043F\u043E\u043B\u0435 \u0438\u043B\u0438 \u043D\u0430 \u0446\u0435\u043B\u044C \xB7 \u041F\u0440\u043E\u0431\u0435\u043B \u2014 \u0437\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u044C \u0445\u043E\u0434 \xB7 E \u2014 \u042D\u0445\u043E" : "\u041E\u0436\u0438\u0434\u0430\u043D\u0438\u0435\u2026";
+        }
+      }
+    }
+    armThinkWatch() {
+      this.clearThinkWatch();
+      const e = this.engine;
+      const myMain = this.running && !this.busy && e?.activeSide === 0 /* Player */ && e?.phase === "Main" /* Main */;
+      if (!myMain || this.tutLesson) {
+        return;
+      }
+      if (!this.thinkHooks) {
+        this.thinkHooks = true;
+        const dismiss = () => {
+          if (!this.thinkOn && this.thinkTimer === null) return;
+          this.clearThinkWatch();
+          this.armThinkWatch();
+        };
+        document.addEventListener("pointerdown", dismiss, true);
+        document.addEventListener("keydown", dismiss, true);
+      }
+      this.thinkTimer = window.setTimeout(() => {
+        this.thinkTimer = null;
+        const eng = this.engine;
+        const still = this.running && !this.busy && eng?.activeSide === 0 /* Player */ && eng?.phase === "Main" /* Main */;
+        if (!still || this.tutLesson) return;
+        const cards = [...document.querySelectorAll("#hand .card")].filter((n) => !n.classList.contains("unplayable") && !n.classList.contains("tilting"));
+        if (cards.length === 0) {
+          if (!$("actionHint").style.color)
+            $("actionHint").textContent = "\u{1F4A1} \u0421\u044B\u0433\u0440\u0430\u0442\u044C \u043D\u0435\u0447\u0435\u0433\u043E \u2014 \u043C\u043E\u0436\u043D\u043E \u0437\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u044C \u0445\u043E\u0434 (\u041F\u0440\u043E\u0431\u0435\u043B) \u0438\u043B\u0438 \u043F\u0435\u0440\u0435\u0439\u0442\u0438 \u043A \u0430\u0442\u0430\u043A\u0430\u043C";
+          return;
+        }
+        cards.forEach((n) => n.classList.add("thinkHint"));
+        this.thinkOn = true;
+        if (!$("actionHint").style.color)
+          $("actionHint").textContent = `\u{1F4A1} \u041F\u043E\u0434\u0441\u043A\u0430\u0437\u043A\u0430: \u043C\u043E\u0436\u043D\u043E \u0440\u0430\u0437\u044B\u0433\u0440\u0430\u0442\u044C ${cards.length} \u043A\u0430\u0440\u0442(\u044B) \u2014 \u043F\u043E\u0434\u0441\u0432\u0435\u0447\u0435\u043D\u044B \u0437\u043E\u043B\u043E\u0442\u043E\u043C`;
+      }, 7e3);
     }
     /** Публичный «завершить ход» для обработчика кнопки. */
     endTurnNow() {
       if (this.tutLesson && !this.tutOk()) {
-        showToast(`\u{1F393} ${LESSONS[this.tutLesson - 1].ru}: \u0441\u043D\u0430\u0447\u0430\u043B\u0430 ${LESSONS[this.tutLesson - 1].need.toLowerCase()}`);
-        return;
+        const st = this.tutStep();
+        if (!st || !st.allow.includes("#btnEndTurn")) {
+          showToast("\u{1F393} \u0421\u043D\u0430\u0447\u0430\u043B\u0430 \u0432\u044B\u043F\u043E\u043B\u043D\u0438\u0442\u0435 \u043F\u043E\u0434\u0441\u0432\u0435\u0447\u0435\u043D\u043D\u043E\u0435 \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435 \u0443\u0440\u043E\u043A\u0430");
+          return;
+        }
       }
       this.ropeStop();
       const e = this.engine;
@@ -24772,21 +25076,8 @@
     /* ------------------------ обучение: уроки ------------------------ */
     /** Условие выполнения текущего урока. */
     tutOk() {
-      const e = this.engine;
-      if (!e) return true;
-      const st = e.stats[0 /* Player */];
-      switch (this.tutLesson) {
-        case 1:
-          return st.runesPlayed >= 1 && st.creaturesSummoned >= 1 && st.spellsCast >= 1;
-        case 2:
-          return st.damageDealt > 0;
-        case 3:
-          return this.tutInjected.length > 0 && this.tutInjected.every((id) => this.tutPlayed(id));
-        case 4:
-          return e.turn >= 3 && st.cardsPlayed >= 3;
-        default:
-          return true;
-      }
+      if (!this.engine) return true;
+      return this.tutAllDone;
     }
     /** Урок выполнен: снимаем гейт, начисляем награду (однократно), обновляем стадию. */
     tutCheck() {
@@ -24824,6 +25115,7 @@
     /** Старт урока: первый шаг, поллер и блокер посторонних действий (Промпт 1 п.4). */
     tutStartLesson() {
       this.tutCleanup();
+      this.tutAllDone = false;
       this.tutStepId = TUT_STEP_FIRST[this.tutLesson] ?? 0;
       this.tutApplyStep();
       if (!this.tutPollId) this.tutPollId = window.setInterval(() => this.tutPollStep(), 350);
@@ -24857,8 +25149,21 @@
       this.tutMarkCards = e?.stats[0 /* Player */].cardsPlayed ?? 0;
       this.tutMarkDmg = e?.stats[0 /* Player */].damageDealt ?? 0;
       this.tutTap = false;
-      tutCoach(`${LESSONS[st.lesson - 1].ru} \xB7 \u0448\u0430\u0433 ${st.id}/20 \u2014 ${st.message}`);
+      this.tutRenderCoach(st);
       st.hi()?.classList.add("tourHi");
+    }
+    /** Текст тренера: номер шага внутри урока + фактическая мана (ждём своего хода, если мана ещё не пришла). */
+    tutRenderCoach(st) {
+      const list = TUT_LESSON_STEPS(st.lesson);
+      const idx = list.findIndex((x) => x.id === st.id) + 1;
+      const head = `${LESSONS[st.lesson - 1].ru} \xB7 \u0448\u0430\u0433 ${idx}/${list.length}`;
+      const mine = tutMyMain();
+      let msg = st.message;
+      if (!mine) msg = "\u0425\u043E\u0434 \u0441\u043E\u043F\u0435\u0440\u043D\u0438\u043A\u0430 \u2014 \u0434\u043E\u0436\u0434\u0438\u0442\u0435\u0441\u044C \u0441\u0432\u043E\u0435\u0433\u043E \u0445\u043E\u0434\u0430\u2026";
+      else if (st.mana && tutMana() < st.mana) msg = `\u041D\u0443\u0436\u043D\u043E ${st.mana}\u2726, \u0443 \u0432\u0430\u0441 ${tutMana()}\u2726 \u2014 \u0437\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u0435 \u0445\u043E\u0434, \u043C\u0430\u043D\u0430 \u0432\u044B\u0440\u0430\u0441\u0442\u0435\u0442.`;
+      const text = `${head} \xB7 \u043C\u0430\u043D\u0430 ${tutMana()}/${tutMaxMana()} \u2014 ${msg}`;
+      const n = document.getElementById("tutCoach");
+      if (n && n.textContent !== `\u{1F393} ${text}`) tutCoach(text);
     }
     /** Ждём выполнения действия игроком, затем следующий шаг (Промпт 1 п.3). */
     tutPollStep() {
@@ -24870,9 +25175,11 @@
         document.querySelectorAll(".tourHi").forEach((x) => x.classList.remove("tourHi"));
         hi.classList.add("tourHi");
       }
+      this.tutRenderCoach(st);
       if (!st.ok()) return;
       const next = TUT_STEPS.find((s) => s.id === st.id + 1);
       if (!next || next.lesson !== st.lesson) {
+        this.tutAllDone = true;
         this.tutCheck();
         return;
       }
@@ -24939,12 +25246,140 @@
         }
       }
       if (e.useEcho(0 /* Player */, uid, side)) {
+        this.netAct("echo", { uid, side });
         pushLog(`\u25C8 \u042D\u0445\u043E \u043F\u043E\u0432\u0442\u043E\u0440\u0438\u043B\u043E \xAB${card?.name ?? "\u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0435"}\xBB`, "big");
         Audio_.echo();
         echoFx(centerOf($("playerHero"), 0.42));
       }
       this.renderAll();
       await sleep2(320);
+    }
+    /* ------------------------ онлайн (v3.4) ------------------------
+       Ходящий игрок — источник истины: действие + снимок состояния уходят сопернику,
+       тот проигрывает анимацию и накладывает зеркальный снимок (рассинхрон невозможен). */
+    netAct(k, extra = {}) {
+      if (!this.net || !this.engine) return;
+      this.net.send({ k, ...extra, st: this.engine.exportState() });
+    }
+    netApply(st) {
+      const e = this.engine;
+      if (!e || !st) return;
+      e.importState(st, true);
+      this.combatBusy = false;
+      this.combatSnap = null;
+      this.renderAll();
+    }
+    async netSetup() {
+      const e = this.engine, net = this.net;
+      net.onNeedSync = () => {
+        if (this.engine) net.send({ k: "sync", st: this.engine.exportState() });
+      };
+      pushLog(`\u2694 \u041E\u043D\u043B\u0430\u0439\u043D-\u043C\u0430\u0442\u0447: \u0432\u044B \u043F\u0440\u043E\u0442\u0438\u0432 ${net.opp.name} (${FACTION_RU[this.enemyFaction]}) \xB7 ${net.mode === "ranked" ? "\u0440\u0435\u0439\u0442\u0438\u043D\u0433\u043E\u0432\u044B\u0439" : net.mode === "friendly" ? "\u0434\u0440\u0443\u0436\u0435\u0441\u043A\u0438\u0439" : "\u043E\u0431\u044B\u0447\u043D\u044B\u0439"}`, "big");
+      this.setWho("\u041F\u043E\u0434\u0433\u043E\u0442\u043E\u0432\u043A\u0430 \u043C\u0430\u0442\u0447\u0430\u2026");
+      e.setup();
+      if (net.seat === 0) net.send({ k: "init", st: e.exportState() });
+      else {
+        const m = await net.nextOf("init");
+        if (!m) {
+          this.showGameOver();
+          return;
+        }
+        e.importState(m.st, true);
+      }
+      this.renderAll();
+      await this.showMulligan();
+      net.send({ k: "mull", pl: e.exportState().players[0 /* Player */] });
+      this.setWho("\u0421\u043E\u043F\u0435\u0440\u043D\u0438\u043A \u0432\u044B\u0431\u0438\u0440\u0430\u0435\u0442 \u0441\u0442\u0430\u0440\u0442\u043E\u0432\u0443\u044E \u0440\u0443\u043A\u0443\u2026");
+      const om = await net.nextOf("mull");
+      if (!om) {
+        this.showGameOver();
+        return;
+      }
+      const opl = om.pl;
+      opl.side = 1 /* Opponent */;
+      for (const c of opl.creatures) c.owner = 1 /* Opponent */;
+      e.players[1 /* Opponent */] = opl;
+      e.activeSide = net.seat === 0 ? 0 /* Player */ : 1 /* Opponent */;
+      e.turn = 0;
+      pushLog(net.seat === 0 ? "\u0412\u044B \u0445\u043E\u0434\u0438\u0442\u0435 \u043F\u0435\u0440\u0432\u044B\u043C" : `\u041F\u0435\u0440\u0432\u044B\u043C \u0445\u043E\u0434\u0438\u0442 ${net.opp.name}`, "phase");
+      this.renderAll();
+      await this.loop();
+    }
+    async netTurn() {
+      const e = this.engine, net = this.net;
+      this.setBusy(true);
+      this.setWho(`\u0425\u043E\u0434 \u0441\u043E\u043F\u0435\u0440\u043D\u0438\u043A\u0430 \xB7 ${net.opp.name}`);
+      const flip = (sd) => sd === 0 /* Player */ ? 1 /* Opponent */ : sd === 1 /* Opponent */ ? 0 /* Player */ : void 0;
+      for (; ; ) {
+        const m = await net.next();
+        if (!m || !this.running) break;
+        const st = m.st;
+        try {
+          if (m.k === "turnStart") {
+            await this.playPhaseBanners(["Start" /* Start */, "Resource" /* Resource */]);
+            this.netApply(st);
+          } else if (m.k === "play") {
+            e.playCard(1 /* Opponent */, Number(m.index), m.uid, flip(m.side));
+            this.renderAll();
+            await sleep2(480);
+            this.netApply(st);
+          } else if (m.k === "echo") {
+            e.useEcho(1 /* Opponent */, m.uid, flip(m.side));
+            this.renderAll();
+            await sleep2(360);
+            this.netApply(st);
+          } else if (m.k === "combat") {
+            e.enterCombatPhase();
+            this.setWho("\u0411\u0438\u0442\u0432\u0430 \u0441\u043E\u043F\u0435\u0440\u043D\u0438\u043A\u0430");
+            await this.banner(PHASE_RU["Combat" /* Combat */]);
+            this.beginCombatSnap();
+          } else if (m.k === "attack") {
+            const q0 = e.attackQueue.length;
+            if (e.manualAttack(1 /* Opponent */, Number(m.uid), m.targetUid, !!m.hero)) await this.combatCore(e.attackQueue.slice(q0));
+            this.netApply(st);
+          } else if (m.k === "endTurn") {
+            e.manualCombatSkip = !!m.skip;
+            await e.finishMainPhase();
+            this.netApply(st);
+            break;
+          } else if (m.k === "sync") {
+            this.netApply(st);
+            if (e.activeSide === 0 /* Player */) break;
+          }
+        } catch (err) {
+          console.warn("[net] replay", m.k, err);
+          this.netApply(st);
+        }
+        if (e.result !== "Ongoing" /* Ongoing */) break;
+      }
+      this.setBusy(false);
+      this.renderAll();
+    }
+    /** Итог боя → матч-серверу (он сверяет отчёты обоих и начисляет рейтинг). */
+    netFinish() {
+      const net = this.net, e = this.engine;
+      if (!net || !e) return;
+      const w = e.result === "PlayerWin" /* PlayerWin */ ? net.seat : e.result === "OpponentWin" /* OpponentWin */ ? net.seat === 0 ? 1 : 0 : null;
+      if (!net.overInfo) net.sendRaw({ t: "result", winnerSeat: w });
+      this.lastWasNet = true;
+      window.setTimeout(() => {
+        net.close();
+        if (this.net === net) this.net = null;
+        void onlineRefreshAfterMatch();
+      }, 4e3);
+    }
+    /** Сервер завершил матч (сдача / обрыв / сверка итогов). */
+    netServerOver(winnerSeat, reason) {
+      const e = this.engine, net = this.net;
+      if (!e || !net) return;
+      if (e.result === "Ongoing" /* Ongoing */) {
+        e.result = winnerSeat == null ? "Draw" /* Draw */ : winnerSeat === net.seat ? "PlayerWin" /* PlayerWin */ : "OpponentWin" /* OpponentWin */;
+        pushLog(reason === "concede" ? winnerSeat === net.seat ? "\u{1F3F3} \u0421\u043E\u043F\u0435\u0440\u043D\u0438\u043A \u0441\u0434\u0430\u043B\u0441\u044F" : "\u{1F3F3} \u0412\u044B \u0441\u0434\u0430\u043B\u0438\u0441\u044C" : reason === "disconnect" ? "\u{1F4E1} \u0421\u043E\u043F\u0435\u0440\u043D\u0438\u043A \u043D\u0435 \u0432\u0435\u0440\u043D\u0443\u043B\u0441\u044F \u2014 \u0442\u0435\u0445\u043D\u0438\u0447\u0435\u0441\u043A\u0430\u044F \u043F\u043E\u0431\u0435\u0434\u0430" : "\u041C\u0430\u0442\u0447 \u0437\u0430\u0432\u0435\u0440\u0448\u0451\u043D \u0441\u0435\u0440\u0432\u0435\u0440\u043E\u043C", "big");
+        this.turnDone?.();
+        this.combatWindowDone?.();
+        this.renderAll();
+        if (!this.overShown) window.setTimeout(() => this.showGameOver(), 300);
+      }
     }
     /* ------------------------------ муллиган ------------------------------ */
     showMulligan() {
@@ -25006,15 +25441,18 @@
     }
     /* ---------------------------- конец игры ---------------------------- */
     showGameOver() {
+      if (this.overShown || !this.engine) return;
+      this.overShown = true;
+      this.ropeStop();
+      $("ropeBar")?.classList.add("hidden");
       tutCoachHide();
       screenFlash("#ffd87a", 0.4, 620);
       shake(9, void 0, 420);
       vignettePulse("#d8b45a", 0.5);
       this.metaRewards();
-      if (this.overShown || !this.engine) return;
-      this.overShown = true;
       this.running = false;
       const e = this.engine;
+      if (this.net) this.netFinish();
       const win = e.result === "PlayerWin" /* PlayerWin */;
       const draw = e.result === "Draw" /* Draw */;
       const title = $("goTitle");
@@ -25067,6 +25505,8 @@
     ];
   }
   var battle = new Battle();
+  window.ecBattle = battle;
+  window.__battle = battle;
   var PICK_KEY = "ec.pickedFaction";
   var MENU_DECK_KEY = "ec.menuSelectedDeckId";
   var picked = "Aurites" /* Aurites */;
@@ -25193,6 +25633,7 @@
     tableSkin: "classic",
     runeSkin: "classic",
     avatarsOwned: [],
+    setsOwned: [],
     borderlessOwned: [],
     borderlessEquipped: [],
     borderlessEventWins: 0,
@@ -25352,6 +25793,76 @@
   window.ecToggleBorderless = (id) => toggleBorderless(id);
   window.ecBorderlessOwned = () => [...meta.borderlessOwned ?? []];
   var META_API = () => `http://${window.location.hostname}:8081`;
+  var AUTH_KEY = "ec_auth_v1";
+  function authGet() {
+    try {
+      const a = JSON.parse(window.localStorage.getItem(AUTH_KEY) || "null");
+      return a && a.accessToken ? a : null;
+    } catch {
+      return null;
+    }
+  }
+  function authSet(j) {
+    try {
+      if (!j || !j.accessToken || !j.refreshToken) {
+        window.localStorage.removeItem(AUTH_KEY);
+        return;
+      }
+      window.localStorage.setItem(AUTH_KEY, JSON.stringify({ accessToken: j.accessToken, refreshToken: j.refreshToken, exp: Date.now() + (j.expiresIn ?? 900) * 1e3 }));
+    } catch {
+    }
+  }
+  var authRefreshing = null;
+  function authRefresh() {
+    const a = authGet();
+    if (!a) return Promise.resolve(false);
+    if (authRefreshing) return authRefreshing;
+    authRefreshing = (async () => {
+      try {
+        const r = await window.fetch(`${META_API()}/api/auth/refresh`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ refreshToken: a.refreshToken })
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          if (r.status === 401) {
+            authSet(null);
+            authExpired();
+          }
+          return false;
+        }
+        authSet(j);
+        return true;
+      } catch {
+        return false;
+      } finally {
+        authRefreshing = null;
+      }
+    })();
+    return authRefreshing;
+  }
+  function authExpired() {
+    if (!meta.signedIn) return;
+    meta.signedIn = false;
+    metaSave();
+    try {
+      syncAccountRow();
+      showToast("\u{1F512} \u0421\u0435\u0441\u0441\u0438\u044F \u0438\u0441\u0442\u0435\u043A\u043B\u0430 \u2014 \u0432\u043E\u0439\u0434\u0438\u0442\u0435 \u0441\u043D\u043E\u0432\u0430");
+    } catch {
+    }
+  }
+  async function authFetch(url, init = {}) {
+    let a = authGet();
+    if (a && a.exp - Date.now() < 3e4) {
+      await authRefresh();
+      a = authGet();
+    }
+    const withAuth = (t) => ({ ...init, headers: { ...init.headers || {}, ...t ? { authorization: `Bearer ${t.accessToken}` } : {} } });
+    let r = await window.fetch(url, withAuth(a));
+    if (r.status === 401 && a && await authRefresh()) r = await window.fetch(url, withAuth(authGet()));
+    return r;
+  }
   var syncTimer = 0;
   function scheduleSync() {
     if (syncTimer) return;
@@ -25360,68 +25871,156 @@
       syncProfile();
     }, 1500);
   }
+  window.__syncDbg = () => ({
+    timer: syncTimer ? "pending" : "none",
+    inFlight: !!syncInFlight,
+    shards: shardsGet(),
+    lastSynced: meta.lastSynced ?? null,
+    signedIn: meta.signedIn,
+    pid: meta.pid
+  });
+  var metaApiOldWarned = false;
+  var syncInFlight = null;
   function syncProfile() {
-    try {
+    if (syncInFlight) return syncInFlight;
+    const run = (async () => {
       if (typeof window.fetch !== "function" || !meta.pid) return;
-      const ctl = new AbortController();
-      const t = window.setTimeout(() => ctl.abort(), 800);
-      void window.fetch(`${META_API()}/api/profile`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        signal: ctl.signal,
-        body: JSON.stringify({
-          pid: meta.pid,
-          nick: meta.nick,
-          level: Math.floor(meta.xp / 500) + 1,
-          xp: meta.xp,
-          mmr: meta.mmr,
-          bestMmr: meta.bestMmr ?? meta.mmr,
-          wins: meta.wins,
-          losses: meta.losses,
-          avatarFac: meta.avatarFac,
-          frame: meta.frame,
-          ach: meta.ach,
+      try {
+        const ctl = new AbortController();
+        const t = window.setTimeout(() => ctl.abort(), 800);
+        const ls = meta.lastSynced;
+        const first = !ls;
+        const d = (v, p) => first ? void 0 : Math.trunc(v - (p ?? v));
+        const abs = (v) => first ? v : void 0;
+        const atSend = {
           shards: shardsGet(),
           gems: gemsGet(),
           freeOpens: meta.freeOpens ?? 0,
-          bundles: meta.bundles ?? [],
-          bpXp: meta.bpXp ?? 0,
-          bpPremium: !!meta.bpPremium,
-          bpClaimed: meta.bpClaimed ?? [],
-          bpClaimedP: meta.bpClaimedP ?? [],
-          foilTokens: meta.foilTokens ?? 0,
-          premOpens: meta.premOpens ?? 0,
-          avatarsOwned: meta.avatarsOwned ?? [],
-          tutStage: meta.tutStage ?? 0,
-          tutDone: !!meta.tutDone,
-          tutReward: meta.tutReward ?? "",
-          tutClaims: meta.tutClaims ?? [],
-          cosmetics: {
-            backs: meta.backsOwned ?? [],
-            tables: meta.tablesOwned ?? [],
-            runes: meta.runesOwned ?? [],
-            backEq: meta.backEq ?? "classic",
-            tableSkin: meta.tableSkin ?? "classic",
-            runeSkin: meta.runeSkin ?? "classic"
-          },
-          questDate: meta.questDate,
-          wquestWeek: meta.wquestWeek,
-          quests: {
-            daily: (meta.quests ?? []).map((q) => ({ id: q.id, prog: q.prog, goal: q.goal, claimed: q.claimed, fac: q.fac })),
-            weekly: (meta.wquests ?? []).map((q) => ({ id: q.id, prog: q.prog, goal: q.goal, claimed: q.claimed }))
-          },
-          history: (meta.history ?? []).slice(0, 20)
-        })
-      }).then(() => window.clearTimeout(t), () => window.clearTimeout(t));
-    } catch {
-    }
+          mmr: meta.mmr,
+          wins: meta.wins,
+          losses: meta.losses,
+          bpXp: meta.bpXp ?? 0
+        };
+        const r = await authFetch(`${META_API()}/api/profile`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          signal: ctl.signal,
+          body: JSON.stringify({
+            pid: meta.pid,
+            nick: meta.nick,
+            level: Math.floor(meta.xp / 500) + 1,
+            xp: meta.xp,
+            bestMmr: meta.bestMmr ?? meta.mmr,
+            mmr: abs(meta.mmr),
+            dMmr: d(meta.mmr, ls?.mmr),
+            wins: abs(meta.wins),
+            dWins: d(meta.wins, ls?.wins),
+            losses: abs(meta.losses),
+            dLosses: d(meta.losses, ls?.losses),
+            avatarFac: meta.avatarFac,
+            frame: meta.frame,
+            ach: meta.ach,
+            shards: abs(shardsGet()),
+            dShards: d(shardsGet(), ls?.shards),
+            gems: abs(gemsGet()),
+            dGems: d(gemsGet(), ls?.gems),
+            freeOpens: abs(meta.freeOpens ?? 0),
+            dFreeOpens: d(meta.freeOpens ?? 0, ls?.freeOpens),
+            bundles: meta.bundles ?? [],
+            bpXp: abs(meta.bpXp ?? 0),
+            dBpXp: d(meta.bpXp ?? 0, ls?.bpXp),
+            bpPremium: !!meta.bpPremium,
+            bpClaimed: meta.bpClaimed ?? [],
+            bpClaimedP: meta.bpClaimedP ?? [],
+            foilTokens: meta.foilTokens ?? 0,
+            premOpens: meta.premOpens ?? 0,
+            avatarsOwned: meta.avatarsOwned ?? [],
+            tutStage: meta.tutStage ?? 0,
+            tutDone: !!meta.tutDone,
+            tutReward: meta.tutReward ?? "",
+            tutClaims: meta.tutClaims ?? [],
+            cosmetics: {
+              backs: meta.backsOwned ?? [],
+              tables: meta.tablesOwned ?? [],
+              runes: meta.runesOwned ?? [],
+              backEq: meta.backEq ?? "classic",
+              tableSkin: meta.tableSkin ?? "classic",
+              runeSkin: meta.runeSkin ?? "classic"
+            },
+            questDate: meta.questDate,
+            wquestWeek: meta.wquestWeek,
+            quests: {
+              daily: (meta.quests ?? []).map((q) => ({ id: q.id, prog: q.prog, goal: q.goal, claimed: q.claimed, fac: q.fac })),
+              weekly: (meta.wquests ?? []).map((q) => ({ id: q.id, prog: q.prog, goal: q.goal, claimed: q.claimed }))
+            },
+            history: (meta.history ?? []).slice(0, 20)
+          })
+        });
+        window.clearTimeout(t);
+        if (!r.ok) return;
+        const j = await r.json().catch(() => null);
+        const gp = j?.profile;
+        if (!gp) return;
+        if (j.apiVersion !== 3 && !metaApiOldWarned) {
+          metaApiOldWarned = true;
+          console.warn("[meta] \u0421\u0435\u0440\u0432\u0435\u0440 meta \u0431\u0435\u0437 \u0434\u0435\u043B\u044C\u0442\u0430-\u043F\u0440\u043E\u0442\u043E\u043A\u043E\u043B\u0430 (\u043D\u0435\u0442 apiVersion:3): \u0432\u044B\u0434\u0430\u0447\u0438 \u0430\u0434\u043C\u0438\u043D\u043A\u0438 \u0441\u043E\u0445\u0440\u0430\u043D\u044F\u044E\u0442\u0441\u044F, \u043D\u043E \u0442\u0440\u0430\u0442\u044B \u0438\u0433\u0440\u043E\u043A\u0430 \u0441\u0435\u0440\u0432\u0435\u0440 \u043D\u0435 \u0437\u0430\u043F\u0438\u0441\u044B\u0432\u0430\u0435\u0442, \u043F\u043E\u043A\u0430 \u043D\u0435 \u043E\u0431\u043D\u043E\u0432\u043B\u0451\u043D. \u041E\u0431\u043D\u043E\u0432\u0438\u0442\u0435: npm run server:meta (\u0438\u043B\u0438 node build/meta_server.js).");
+        }
+        let applied = false;
+        if (typeof gp.shards === "number" && gp.shards !== atSend.shards) {
+          shardsSet(shardsGet() + (gp.shards - atSend.shards));
+          applied = true;
+        }
+        if (typeof gp.gems === "number" && gp.gems !== atSend.gems) {
+          meta.gems = Math.max(0, gemsGet() + (gp.gems - atSend.gems));
+          applied = true;
+        }
+        if (typeof gp.freeOpens === "number" && gp.freeOpens !== atSend.freeOpens) {
+          meta.freeOpens = Math.max(0, (meta.freeOpens ?? 0) + (gp.freeOpens - atSend.freeOpens));
+          applied = true;
+        }
+        if (typeof gp.mmr === "number" && gp.mmr !== atSend.mmr) {
+          meta.mmr = gp.mmr;
+          applied = true;
+        }
+        if (typeof gp.wins === "number" && gp.wins !== atSend.wins) {
+          meta.wins = gp.wins;
+          applied = true;
+        }
+        if (typeof gp.losses === "number" && gp.losses !== atSend.losses) {
+          meta.losses = gp.losses;
+          applied = true;
+        }
+        if (typeof gp.bpXp === "number" && gp.bpXp !== atSend.bpXp) {
+          meta.bpXp = Math.max(0, (meta.bpXp ?? 0) + (gp.bpXp - atSend.bpXp));
+          applied = true;
+        }
+        if (typeof gp.bestMmr === "number") meta.bestMmr = Math.max(meta.bestMmr ?? 0, gp.bestMmr);
+        meta.lastSynced = {
+          shards: typeof gp.shards === "number" ? gp.shards : atSend.shards,
+          gems: typeof gp.gems === "number" ? gp.gems : atSend.gems,
+          freeOpens: typeof gp.freeOpens === "number" ? gp.freeOpens : atSend.freeOpens,
+          mmr: typeof gp.mmr === "number" ? gp.mmr : atSend.mmr,
+          wins: typeof gp.wins === "number" ? gp.wins : atSend.wins,
+          losses: typeof gp.losses === "number" ? gp.losses : atSend.losses,
+          bpXp: typeof gp.bpXp === "number" ? gp.bpXp : atSend.bpXp
+        };
+        if (applied) metaSave();
+        renderShards();
+      } catch {
+      }
+    })();
+    syncInFlight = run;
+    void run.finally(() => {
+      if (syncInFlight === run) syncInFlight = null;
+    });
+    return run;
   }
   function apiSend(path, body) {
     try {
       if (typeof window.fetch !== "function" || !meta.pid) return;
       const ctl = new AbortController();
       const t = window.setTimeout(() => ctl.abort(), 800);
-      void window.fetch(META_API() + path, {
+      void authFetch(META_API() + path, {
         method: "POST",
         headers: { "content-type": "application/json" },
         signal: ctl.signal,
@@ -25491,7 +26090,7 @@
     const status = claimed ? "questTaskClaimed" : done ? "questTaskDone" : "";
     const reset = done ? `<span class="questTaskReset questReset" data-quest-reset="${kind}" data-reset-prefix="\u0421\u0431\u0440\u043E\u0441 \u0447\u0435\u0440\u0435\u0437">\u2014</span>` : "";
     const buttonLabel = claimed ? "\u041F\u043E\u043B\u0443\u0447\u0435\u043D\u043E \u2713" : canClaim ? "\u0417\u0430\u0431\u0440\u0430\u0442\u044C" : `\u{1FA99}${reward}`;
-    return `<article class="questTask ${status}" data-quest-card="${kind}:${esc(q.id)}" role="listitem">
+    return `<article class="questTask ${status}" data-quest-card="${kind}:${esc(q.id)}" role="listitem" style="--pct:${percent}">
     <span class="questTaskIcon" aria-hidden="true"><b>${icon}</b><img src="/cosm/quests/${artId}?t=${Date.now()}" alt="" loading="lazy" onload="this.closest('.questTaskIcon')?.classList.add('hasArt')" onerror="this.remove()"></span>
     <div class="questTaskMain">
       <strong class="questTaskTitle">${esc(label)}</strong>
@@ -25518,8 +26117,9 @@
     const q = (weekly ? meta.wquests : meta.quests).find((x) => x.id === id);
     if (!q || q.claimed || q.prog < q.goal) return false;
     q.claimed = true;
-    const reward = weekly ? WEEK_REWARD[q.id] ?? 0 : DAILY_REWARD[q.id] ?? 0;
-    const bpReward2 = weekly ? 250 : 150;
+    const cbQ = cosmBonusTotal();
+    const reward = Math.round((weekly ? WEEK_REWARD[q.id] ?? 0 : DAILY_REWARD[q.id] ?? 0) * (1 + cbQ.sh / 100));
+    const bpReward2 = Math.round((weekly ? 250 : 150) * (1 + cbQ.bp / 100));
     shardsAdd(reward);
     meta.bpXp = (meta.bpXp ?? 0) + bpReward2;
     metaSave();
@@ -25537,7 +26137,8 @@
     const button = ev.target?.closest?.(".homeQuestClaim");
     if (!button || button.disabled) return;
     const kind = button.dataset.kind === "weekly" ? "weekly" : "daily";
-    if (button.dataset.q) claimQuestReward(kind, button.dataset.q, true);
+    const inProfile = !!button.closest("#profBody");
+    if (button.dataset.q) claimQuestReward(kind, button.dataset.q, !inProfile);
   });
   window.setInterval(() => {
     const reset = syncQuestPeriods();
@@ -25588,6 +26189,29 @@
     if (toastTimer) window.clearTimeout(toastTimer);
     toastTimer = window.setTimeout(() => n.classList.remove("on"), 2400);
   }
+  var ECONOMY = {
+    pack: { gold: 300, gem: 200 },
+    offers: {
+      p1: { ru: "1 \u0411\u0443\u0441\u0442\u0435\u0440", gem: 200, gold: 300, qty: 1, kind: "pack" },
+      p10: { ru: "10 \u0411\u0443\u0441\u0442\u0435\u0440\u043E\u0432", gem: 1800, gold: 2700, qty: 10, kind: "pack", save: 10 },
+      p15: { ru: "15 \u0411\u0443\u0441\u0442\u0435\u0440\u043E\u0432", gem: 2500, gold: 3750, qty: 15, kind: "pack", save: 17, hl: true },
+      m1: { ru: "1 \u041C\u0438\u0444\u0438\u0447\u0435\u0441\u043A\u0438\u0439", gem: 350, gold: 500, qty: 1, kind: "mythic" },
+      m10: { ru: "10 \u041C\u0438\u0444\u0438\u0447\u0435\u0441\u043A\u0438\u0445", gem: 3150, gold: 4500, qty: 10, kind: "mythic", save: 10 }
+    },
+    factionPack: 350,
+    // 🪙: бустер выбранной фракции (+17% за выбор)
+    starter: 500,
+    // 🪙: «Набор новичка», 10 карт, разово
+    factionBundle: 1200,
+    // 💎: 10 бустеров + 🪙500 + аватар «Архонт», разово (≈ −45%)
+    backs: { runes: 600, ember: 900 },
+    // 🪙
+    tables: { terra: { price: 1500, cur: "sh" }, necro: { price: 1e3, cur: "gem" } },
+    runes: { flame: { price: 400, cur: "gem" } },
+    // крафт/разбор — тарифы, утверждённые пользователем (спека «3. Магазин» п.4.4), не менять
+    craft: { Common: 5, Uncommon: 10, Rare: 20, Epic: 100, Legendary: 400 },
+    disenchant: { Common: 1, Uncommon: 2, Rare: 5, Epic: 20, Legendary: 100 }
+  };
   var CRAFT_COST = { Common: 5, Uncommon: 10, Rare: 20, Epic: 100, Legendary: 400 };
   var DISENCHANT_COINS = { Common: 1, Uncommon: 2, Rare: 5, Epic: 20, Legendary: 100 };
   window.ecMeta = () => meta;
@@ -25662,7 +26286,7 @@
     ["Epic" /* Epic */, 0.1],
     ["Legendary" /* Legendary */, 0.05]
   ];
-  var PACK_PRICE = 300;
+  var PACK_PRICE = ECONOMY.pack.gold;
   var PLAYSET = 4;
   var CONVERT = { ["Common" /* Common */]: 1, ["Uncommon" /* Uncommon */]: 2, ["Rare" /* Rare */]: 5, ["Epic" /* Epic */]: 20, ["Legendary" /* Legendary */]: 100 };
   var SHARD_KEY = "ec_shards_v1";
@@ -25888,6 +26512,8 @@
       renderShards();
     }
     $("boosterModal").classList.add("hidden");
+    hidePackInfo();
+    hideZoom();
     if (renderCards) renderCollection();
     const target = boosterReturnFocus;
     boosterReturnFocus = null;
@@ -25955,7 +26581,7 @@
     }, 560);
   }
   function attachVolumetric(root = document) {
-    const selector = ".boosterInvCard, .packOffer, .ofCard, .bpTile, .packSealedInner, .cardback, .packSlot .back, .packSlot .face .card, .ofArt";
+    const selector = ".boosterInvCard, .packOffer, .ofCard, .bpTile, .packSealedInner, .cardback:not(.packSlot .cardback), .ofArt";
     const list = Array.from(root.querySelectorAll(selector));
     list.forEach((el2) => {
       if (el2.dataset.volAttached) return;
@@ -25987,7 +26613,49 @@
       });
     });
   }
+  function showPackInfo(sl, side) {
+    let box = document.getElementById("packInfo");
+    if (!box) {
+      box = el("aside", "packInfo");
+      box.id = "packInfo";
+      document.body.appendChild(box);
+    }
+    const c = sl.card;
+    const stats = c.type === "Creature" /* Creature */ ? `<span class="piStats">\u2694 ${c.attack ?? 0} \xB7 \u2764 ${c.health ?? 0}</span>` : "";
+    box.innerHTML = `<div class="piName">${esc(cardName(c))}</div>
+    <div class="piType">${typeName(c.type)} \xB7 ${esc(factionName(c.faction))} \xB7 <b class="r-${String(c.rarity).toLowerCase()}">${rarityName(c.rarity)}</b></div>
+    <div class="piCost">\u0421\u0442\u043E\u0438\u043C\u043E\u0441\u0442\u044C: <b>${c.cost}\u2726</b> ${stats}</div>
+    <div class="piText">${cardBodyHtml(c)}</div>
+    ${cardFlavor(c) ? `<div class="piFlavor">${cardFlavor(c)}</div>` : ""}
+    ${sl.foil ? '<div class="piTag">\u2726 \u0424\u043E\u0439\u043B</div>' : ""}${sl.borderless ? '<div class="piTag">\u25C7 Borderless</div>' : ""}
+    ${sl.converted > 0 ? `<div class="piTag">\u0414\u0443\u0431\u043B\u0438\u043A\u0430\u0442 \u2192 \u{1FA99}${sl.converted}</div>` : `<div class="piTag">\u0412 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u0438: ${ownedCount(c.id)}/${PLAYSET}</div>`}`;
+    box.dataset.side = side;
+    box.classList.add("show");
+  }
+  function placePackPreview(slot, side) {
+    const r = slot.getBoundingClientRect();
+    const info = document.getElementById("packInfo");
+    const zw = zoomPreview.offsetWidth || 340;
+    const iw = info?.offsetWidth || 0;
+    const gap = 12;
+    const vw = window.innerWidth;
+    let zx = side === "right" ? r.right + gap : r.left - gap - zw;
+    if (zx + zw > vw - 8) zx = vw - 8 - zw;
+    if (zx < 8) zx = 8;
+    zoomPreview.style.setProperty("--zx", `${zx}px`);
+    zoomPreview.classList.add("zoomAt");
+    if (info) {
+      let ix = side === "right" ? zx + zw + gap : zx - gap - iw;
+      if (ix + iw > vw - 8 || ix < 8) ix = side === "right" ? zx - gap - iw : zx + zw + gap;
+      info.style.left = `${Math.max(8, Math.min(vw - 8 - iw, ix))}px`;
+      info.style.right = "auto";
+    }
+  }
+  function hidePackInfo() {
+    document.getElementById("packInfo")?.classList.remove("show");
+  }
   function renderPackSlots(slots) {
+    hidePackInfo();
     const row = $("packRow");
     if (!row) return;
     const stage = document.getElementById("packStage");
@@ -26053,6 +26721,19 @@
         }
       };
       slot.addEventListener("click", doFlip);
+      const showBig = (ev) => {
+        if (!slot.classList.contains("flip")) return;
+        const side = ev.clientX > window.innerWidth / 2 ? "left" : "right";
+        showZoom(sl.card, ev.clientX, ev.clientY, side, sl.borderless ? "borderless" : "auto");
+        showPackInfo(sl, side);
+        placePackPreview(slot, side);
+      };
+      slot.addEventListener("mouseenter", showBig);
+      slot.addEventListener("mousemove", showBig);
+      slot.addEventListener("mouseleave", () => {
+        hideZoom();
+        hidePackInfo();
+      });
       slot.setAttribute("role", "button");
       slot.setAttribute("tabindex", "0");
       slot.addEventListener("keydown", (ev) => {
@@ -26313,6 +26994,7 @@
     };
     return `<span class="deckCIcon" style="background:${bg[faction] ?? bg.Neutral}" title="${FACTION_RU[faction] ?? faction}">${sig[faction] ?? "\u25C8"}</span>`;
   }
+  var GEAR_SVG = '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path fill="currentColor" d="M19.14 12.94a7.5 7.5 0 0 0 .05-.94 7.5 7.5 0 0 0-.05-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.61-.22l-2.39.96a7 7 0 0 0-1.62-.94l-.36-2.54A.5.5 0 0 0 13.9 2h-3.84a.5.5 0 0 0-.49.42l-.36 2.54a7 7 0 0 0-1.62.94l-2.39-.96a.5.5 0 0 0-.61.22L2.67 8.48a.5.5 0 0 0 .12.64l2.03 1.58a7.5 7.5 0 0 0 0 1.88l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32c.13.22.39.3.61.22l2.39-.96c.5.39 1.04.7 1.62.94l.36 2.54c.04.24.25.42.49.42h3.84c.24 0 .45-.18.49-.42l.36-2.54a7 7 0 0 0 1.62-.94l2.39.96c.22.08.48 0 .61-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58ZM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7Z"/></svg>';
   function renderDeckGrid() {
     const grid = document.getElementById("deckGrid");
     const countEl = document.getElementById("decksCount");
@@ -26379,7 +27061,7 @@
       const deckArtUrl = `img/decks/${encodeURIComponent(d.id)}.png`;
       const artHtml = avatarCard ? `<img class="deckAvatarImg" src="${cardArtUrl}" alt="" loading="lazy" decoding="async" onerror="this.style.display='none'">` : `<img class="deckPresetArt" src="${deckArtUrl}" alt="" loading="lazy" decoding="async" onerror="this.style.display='none';if(this.nextElementSibling)this.nextElementSibling.style.display='block'"><img class="deckCardArtFallback" src="${cardArtUrl}" alt="" loading="lazy" decoding="async" style="display:none" onerror="this.style.display='none'">`;
       const avatarTag = avatarCard ? `<span class="deckAvatarTag" title="\u041E\u0431\u043B\u043E\u0436\u043A\u0430: ${esc(cardName(avatarCard))}">\u{1F3B4} ${esc(cardName(avatarCard))}</span>` : "";
-      const artEdit = !d.isPrecon ? `<button class="deckArtEdit" type="button" title="\u0412\u044B\u0431\u0440\u0430\u0442\u044C \u0430\u0440\u0442 \u0438\u0437 \u043A\u0430\u0440\u0442 \u044D\u0442\u043E\u0439 \u043A\u043E\u043B\u043E\u0434\u044B" aria-label="\u0412\u044B\u0431\u0440\u0430\u0442\u044C \u0430\u0440\u0442 \u0434\u043B\u044F \u043A\u043E\u043B\u043E\u0434\u044B \xAB${esc(d.name)}\xBB" data-deck-art-edit="${esc(d.id)}"><span aria-hidden="true">\u2726</span> \u0418\u0437\u043C\u0435\u043D\u0438\u0442\u044C \u0430\u0440\u0442</button>` : "";
+      const artEdit = !d.isPrecon ? `<button class="deckArtEdit deckArtGear" type="button" title="\u0418\u0437\u043C\u0435\u043D\u0438\u0442\u044C \u0430\u0440\u0442 \u043A\u043E\u043B\u043E\u0434\u044B" aria-label="\u0418\u0437\u043C\u0435\u043D\u0438\u0442\u044C \u0430\u0440\u0442 \u043A\u043E\u043B\u043E\u0434\u044B \xAB${esc(d.name)}\xBB" data-deck-art-edit="${esc(d.id)}">${GEAR_SVG}</button>` : "";
       box.dataset.avatarCardId = avatarCard?.id ?? "";
       box.title = avatarCard ? `${d.name} \xB7 \u043E\u0431\u043B\u043E\u0436\u043A\u0430: ${cardName(avatarCard)}` : d.name;
       const deckArtClass = `deckArt f-${d.faction}`;
@@ -26391,13 +27073,17 @@
         if (facSet.size >= 3) break;
       }
       const colorsHtml = Array.from(facSet).slice(0, 3).map((f) => deckColorIcon(f)).join("");
+      void colorsHtml;
+      void avatarTag;
+      void fallbackSig;
+      box.classList.add("deckBoxFull");
       box.innerHTML = `
-      <div class="${deckArtClass}">${artHtml}<span class="deckArtFallback" aria-hidden="true">${fallbackSig}</span>${avatarTag}</div>
+      <div class="${deckArtClass}">${artHtml}</div>
       <div class="deckLabel">
         <div class="deckName" title="${esc(d.name)}">${esc(d.name)}</div>
-        <div class="deckMeta"><div class="deckColors">${colorsHtml}</div><span class="deckCount">${d.format === STARTER_DECK_FORMAT ? "\u0421\u0442\u0430\u0440\u0442\u043E\u0432\u0430\u044F \xB7 30 \u043A\u0430\u0440\u0442" : `${d.cards.length} \u043A\u0430\u0440\u0442`}</span></div>
-        ${artEdit}
+        <div class="deckMeta"><span class="deckCount">${d.isPrecon ? `\u0421\u0442\u0430\u043D\u0434\u0430\u0440\u0442\u043D\u0430\u044F \xB7 ${d.cards.length} \u043A\u0430\u0440\u0442` : `${d.cards.length} \u043A\u0430\u0440\u0442`}</span></div>
       </div>
+      ${artEdit}
       <span class="selCheck">\u2713</span>
     `;
       box.addEventListener("click", () => {
@@ -26537,7 +27223,7 @@
     }, null);
   }
   function deckPlayProblem(deck) {
-    const minimum = isStarterDeckId(deck.id) ? 30 : 60;
+    const minimum = MIN_DECK_SIZE;
     const sizeCheck = validateDeckSize(deck.cards, dbLookup, minimum);
     if (!sizeCheck.ok) return sizeCheck.problems[0] ?? "\u043A\u043E\u043B\u043E\u0434\u0430 \u043D\u0435 \u0441\u043E\u0431\u0440\u0430\u043D\u0430";
     if (!isStarterDeckId(deck.id)) {
@@ -26844,6 +27530,287 @@
     document.getElementById("homeScreen")?.classList.add("hidden");
     document.querySelectorAll(".topTab").forEach((el2) => el2.classList.toggle("active", el2.dataset.tab === "home"));
   }
+  var weeklyFaction = () => {
+    const w = weekStr();
+    let h = 0;
+    for (const ch of w) h = h * 31 + ch.charCodeAt(0) >>> 0;
+    return FACTION_IDS[h % FACTION_IDS.length];
+  };
+  var EVENT_DEFS = [
+    {
+      id: "borderless",
+      title: "\u0413\u0430\u043B\u0435\u0440\u0435\u044F \u0431\u0435\u0437 \u0433\u0440\u0430\u043D\u0438\u0446",
+      kind: "\u0420\u0435\u0439\u0442\u0438\u043D\u0433 \xB7 Borderless",
+      period: "none",
+      goal: BORDERLESS_EVENT_WINS,
+      desc: "\u041F\u043E\u0431\u0435\u0436\u0434\u0430\u0439\u0442\u0435 \u0432 \u0440\u0435\u0439\u0442\u0438\u043D\u0433\u043E\u0432\u044B\u0445 \u043C\u0430\u0442\u0447\u0430\u0445 \u043B\u044E\u0431\u043E\u0439 \u043A\u043E\u043B\u043E\u0434\u043E\u0439.",
+      rules: "\u0417\u0430\u0441\u0447\u0438\u0442\u044B\u0432\u0430\u044E\u0442\u0441\u044F \u0442\u043E\u043B\u044C\u043A\u043E \u0440\u0435\u0439\u0442\u0438\u043D\u0433\u043E\u0432\u044B\u0435 \u043F\u043E\u0431\u0435\u0434\u044B.",
+      reward: "\u25C7 Borderless-\u0432\u0430\u0440\u0438\u0430\u043D\u0442 \u043A\u0430\u0440\u0442\u044B",
+      launch: "match",
+      ranked: true
+    },
+    {
+      id: "weekly_fac",
+      title: "\u0424\u0440\u0430\u043A\u0446\u0438\u044F \u043D\u0435\u0434\u0435\u043B\u0438",
+      kind: "\u0415\u0436\u0435\u043D\u0435\u0434\u0435\u043B\u044C\u043D\u043E\u0435",
+      period: "weekly",
+      goal: 3,
+      desc: "\u041E\u0434\u0435\u0440\u0436\u0438\u0442\u0435 3 \u043F\u043E\u0431\u0435\u0434\u044B \u0441\u0442\u0430\u0440\u0442\u043E\u0432\u043E\u0439 \u043A\u043E\u043B\u043E\u0434\u043E\u0439 \u0444\u0440\u0430\u043A\u0446\u0438\u0438 \u043D\u0435\u0434\u0435\u043B\u0438.",
+      rules: "\u041A\u043E\u043B\u043E\u0434\u0430 \u0444\u0440\u0430\u043A\u0446\u0438\u0438 \u043F\u043E\u0434\u0441\u0442\u0430\u0432\u043B\u044F\u0435\u0442\u0441\u044F \u0430\u0432\u0442\u043E\u043C\u0430\u0442\u0438\u0447\u0435\u0441\u043A\u0438. \u0411\u0435\u0437 \u0440\u0435\u0439\u0442\u0438\u043D\u0433\u0430.",
+      reward: "\u{1FA99}500 + 1 \u0431\u0443\u0441\u0442\u0435\u0440",
+      launch: "match",
+      difficulty: 0.7,
+      fac: weeklyFaction,
+      grant: () => {
+        shardsAdd(500);
+        meta.freeOpens = (meta.freeOpens ?? 0) + 1;
+      }
+    },
+    {
+      id: "daily_nightmare",
+      title: "\u0412\u044B\u0437\u043E\u0432 \u0434\u043D\u044F: \u041A\u043E\u0448\u043C\u0430\u0440",
+      kind: "\u0415\u0436\u0435\u0434\u043D\u0435\u0432\u043D\u043E\u0435",
+      period: "daily",
+      goal: 1,
+      desc: "\u041F\u043E\u0431\u0435\u0434\u0438\u0442\u0435 \u0418\u0418 \u043D\u0430 \u043C\u0430\u043A\u0441\u0438\u043C\u0430\u043B\u044C\u043D\u043E\u0439 \u0441\u043B\u043E\u0436\u043D\u043E\u0441\u0442\u0438.",
+      rules: "\u0421\u043B\u043E\u0436\u043D\u043E\u0441\u0442\u044C \xAB\u041A\u043E\u0448\u043C\u0430\u0440\xBB. \u0411\u0435\u0437 \u0440\u0435\u0439\u0442\u0438\u043D\u0433\u0430. 1 \u043D\u0430\u0433\u0440\u0430\u0434\u0430 \u0432 \u0434\u0435\u043D\u044C.",
+      reward: "\u{1F48E}50",
+      launch: "match",
+      difficulty: 1.05,
+      grant: () => gemsAdd(50)
+    },
+    {
+      id: "gauntlet",
+      title: "\u0418\u0441\u043F\u044B\u0442\u0430\u043D\u0438\u0435 \u0441\u0442\u0438\u0445\u0438\u0439",
+      kind: "\u0421\u0435\u0440\u0438\u044F",
+      period: "none",
+      goal: 5,
+      streak: true,
+      desc: "\u041F\u044F\u0442\u044C \u043F\u043E\u0431\u0435\u0434 \u043F\u043E\u0434\u0440\u044F\u0434 \u2014 \u043F\u043E \u043E\u0434\u043D\u043E\u0439 \u043D\u0430\u0434 \u043A\u0430\u0436\u0434\u043E\u0439 \u0444\u0440\u0430\u043A\u0446\u0438\u0435\u0439.",
+      rules: "\u041F\u043E\u0440\u0430\u0436\u0435\u043D\u0438\u0435 \u0441\u0431\u0440\u0430\u0441\u044B\u0432\u0430\u0435\u0442 \u0441\u0435\u0440\u0438\u044E. \u0421\u043E\u043F\u0435\u0440\u043D\u0438\u043A\u0438 \u0438\u0434\u0443\u0442 \u043F\u043E \u043A\u0440\u0443\u0433\u0443.",
+      reward: "\u{1FA99}1000 + \u043C\u0438\u0444\u0438\u0447\u0435\u0441\u043A\u0438\u0439 \u0431\u0443\u0441\u0442\u0435\u0440",
+      launch: "match",
+      difficulty: 0.85,
+      grant: () => {
+        shardsAdd(1e3);
+        meta.premOpens = (meta.premOpens ?? 0) + 1;
+      }
+    },
+    {
+      id: "quick",
+      title: "\u0411\u044B\u0441\u0442\u0440\u0430\u044F \u0438\u0433\u0440\u0430",
+      kind: "\u0422\u0440\u0435\u043D\u0438\u0440\u043E\u0432\u043A\u0430",
+      period: "none",
+      goal: 0,
+      desc: "\u041C\u0430\u0442\u0447 \u043F\u0440\u043E\u0442\u0438\u0432 \u0418\u0418 \u0431\u0435\u0437 \u0440\u0435\u0439\u0442\u0438\u043D\u0433\u0430 \u0432\u044B\u0431\u0440\u0430\u043D\u043D\u043E\u0439 \u043A\u043E\u043B\u043E\u0434\u043E\u0439.",
+      rules: "\u041E\u043F\u044B\u0442 \u0438 \u043F\u0440\u043E\u043F\u0443\u0441\u043A \u043D\u0430\u0447\u0438\u0441\u043B\u044F\u044E\u0442\u0441\u044F \u043A\u0430\u043A \u043E\u0431\u044B\u0447\u043D\u043E.",
+      reward: "\u041E\u043F\u044B\u0442 \u0438 BP",
+      launch: "match",
+      difficulty: 0.6
+    },
+    {
+      id: "campaign",
+      title: "\u041A\u0430\u043C\u043F\u0430\u043D\u0438\u044F",
+      kind: "\u0421\u044E\u0436\u0435\u0442",
+      period: "none",
+      goal: 0,
+      desc: "\u0421\u044E\u0436\u0435\u0442\u043D\u044B\u0435 \u0433\u043B\u0430\u0432\u044B \u0444\u0440\u0430\u043A\u0446\u0438\u0439 \u0441 \u044D\u043B\u0438\u0442\u0430\u043C\u0438 \u0438 \u0431\u043E\u0441\u0441\u0430\u043C\u0438.",
+      rules: "\u041F\u0440\u043E\u0433\u0440\u0435\u0441\u0441 \u2014 \u0432 \u043E\u043A\u043D\u0435 \u043A\u0430\u043C\u043F\u0430\u043D\u0438\u0438.",
+      reward: "\u041C\u043E\u043D\u0435\u0442\u044B, \u0433\u0435\u043C\u044B, \u0431\u0443\u0441\u0442\u0435\u0440\u044B",
+      launch: "campaign"
+    },
+    {
+      id: "tutorial",
+      title: "\u041E\u0431\u0443\u0447\u0435\u043D\u0438\u0435",
+      kind: "\u041D\u043E\u0432\u0438\u0447\u043A\u0430\u043C",
+      period: "none",
+      goal: 4,
+      desc: "\u0427\u0435\u0442\u044B\u0440\u0435 \u0443\u0440\u043E\u043A\u0430: \u043C\u0430\u043D\u0430, \u0431\u043E\u0439, \u043C\u0435\u0445\u0430\u043D\u0438\u043A\u0438, \u043A\u0440\u0438\u0432\u0430\u044F \u043C\u0430\u043D\u044B.",
+      rules: "\u0428\u0430\u0433\u0438 \u0443\u0440\u043E\u043A\u0430 \u043F\u0440\u0438\u0432\u044F\u0437\u0430\u043D\u044B \u043A \u043C\u0430\u043D\u0435 \u0445\u043E\u0434\u0430.",
+      reward: "\u041A\u043E\u043B\u043E\u0434\u0430 \u0444\u0440\u0430\u043A\u0446\u0438\u0438 + 5 \u0431\u0443\u0441\u0442\u0435\u0440\u043E\u0432 + \u{1F48E}100",
+      launch: "tut"
+    }
+  ];
+  var eventsFilter = "all";
+  function eventPeriodKey(period) {
+    return period === "daily" ? todayStr() : period === "weekly" ? weekStr() : "all";
+  }
+  function eventState(def) {
+    const all = meta.events ?? (meta.events = {});
+    const key = eventPeriodKey(def.period);
+    let st = all[def.id];
+    if (!st || st.period !== key) {
+      st = { p: 0, claimed: false, period: key };
+      all[def.id] = st;
+    }
+    if (def.id === "borderless") {
+      st.p = Math.min(def.goal, meta.borderlessEventWins ?? 0);
+      st.claimed = !!meta.borderlessEventClaimed;
+    }
+    if (def.id === "tutorial") {
+      st.p = Math.min(4, meta.tutStage ?? 0);
+      st.claimed = !!meta.tutReward;
+    }
+    return st;
+  }
+  function gauntletFoe() {
+    return FACTION_IDS[eventState(EVENT_DEFS.find((d) => d.id === "gauntlet")).p % FACTION_IDS.length];
+  }
+  function eventOnMatchEnd(id, win) {
+    const def = EVENT_DEFS.find((d) => d.id === id);
+    if (!def || def.goal <= 0 || def.id === "borderless" || def.id === "tutorial") return "";
+    const st = eventState(def);
+    if (st.claimed) return "";
+    if (win) st.p = Math.min(def.goal, st.p + 1);
+    else if (def.streak) st.p = 0;
+    metaSave();
+    return win ? `${def.title}: ${st.p}/${def.goal}${st.p >= def.goal ? " \u2014 \u043D\u0430\u0433\u0440\u0430\u0434\u0430 \u0436\u0434\u0451\u0442 \u0432 \xAB\u0421\u043E\u0431\u044B\u0442\u0438\u044F\u0445\xBB" : ""}` : def.streak ? `${def.title}: \u0441\u0435\u0440\u0438\u044F \u043F\u0440\u0435\u0440\u0432\u0430\u043D\u0430` : "";
+  }
+  function launchEvent(def) {
+    if (def.launch === "campaign") {
+      $("eventsScreen").classList.add("hidden");
+      openCampaign();
+      return;
+    }
+    if (def.launch === "tut") {
+      $("eventsScreen").classList.add("hidden");
+      openTut();
+      return;
+    }
+    if (def.id === "borderless") {
+      closeEventsScreen();
+      navigateApp("home");
+      const chk = document.getElementById("chkPractice");
+      if (chk) chk.checked = false;
+      battle.launchMode = "menu";
+      battle.eventId = null;
+      btn("btnPlay").click();
+      return;
+    }
+    const fac = def.fac?.();
+    if (fac) {
+      const deck = starterDeckForFaction(fac) ?? deckList.find((d) => d.faction === fac);
+      const pick = sel("deckPick");
+      if (deck) {
+        if (![...pick.options].some((o) => o.value === deck.id)) pick.add(new Option(deck.name, deck.id));
+        pick.value = deck.id;
+      }
+      picked = fac;
+    }
+    const deckNow = resolveDeck(sel("deckPick").value, deckList);
+    const problem = deckNow ? deckPlayProblem(deckNow) : "\u043A\u043E\u043B\u043E\u0434\u0430 \u043D\u0435 \u0432\u044B\u0431\u0440\u0430\u043D\u0430";
+    if (problem) {
+      showToast(`\u041A\u043E\u043B\u043E\u0434\u0430 \u043D\u0435 \u0433\u043E\u0442\u043E\u0432\u0430: ${problem}`);
+      return;
+    }
+    if (deckNow && FACTION_IDS.includes(deckNow.faction)) picked = deckNow.faction;
+    battle.launchMode = "event";
+    battle.eventId = def.id;
+    battle.practice = !def.ranked;
+    battle.difficulty = def.difficulty ?? 0.7;
+    battle.friendFoe = null;
+    battle.bossPower = null;
+    battle.bossHp = 0;
+    battle.tutLesson = 0;
+    battle.campNode = null;
+    battle.enemyFaction = def.id === "gauntlet" ? gauntletFoe() : FACTION_IDS[Math.floor(Math.random() * FACTION_IDS.length)];
+    closeEventsScreen();
+    btn("btnPlay").click();
+  }
+  function claimEvent(def) {
+    const st = eventState(def);
+    if (st.claimed || def.goal <= 0 || st.p < def.goal) return;
+    if (def.id === "borderless") {
+      const reward = grantRandomBorderless();
+      if (!reward) {
+        showToast("\u0412\u0441\u0435 Borderless-\u0432\u0430\u0440\u0438\u0430\u043D\u0442\u044B \u0443\u0436\u0435 \u0441\u043E\u0431\u0440\u0430\u043D\u044B");
+        return;
+      }
+      meta.borderlessEventClaimed = true;
+      metaSave();
+      showToast(`\u25C7 \u041F\u043E\u043B\u0443\u0447\u0435\u043D Borderless-\u0432\u0430\u0440\u0438\u0430\u043D\u0442: \xAB${cardName(reward)}\xBB`);
+    } else if (def.id === "tutorial") {
+      $("eventsScreen").classList.add("hidden");
+      openTut();
+      return;
+    } else {
+      def.grant?.();
+      st.claimed = true;
+      if (def.streak) {
+        st.p = 0;
+        st.claimed = false;
+      }
+      metaSave();
+      renderShards();
+      showToast(`\u{1F381} ${def.title}: ${def.reward}`);
+    }
+    renderEvents();
+  }
+  function renderEvents() {
+    const grid = document.getElementById("eventsGrid");
+    if (!grid) return;
+    const rows = EVENT_DEFS.map((def) => ({ def, st: eventState(def) }));
+    const list = rows.filter(({ def, st }) => eventsFilter === "all" || eventsFilter === "active" && def.goal > 0 && st.p > 0 && !st.claimed || eventsFilter === "rewards" && def.goal > 0 && st.p >= def.goal && !st.claimed);
+    grid.className = "eventsGridV3";
+    grid.removeAttribute("style");
+    grid.innerHTML = list.map(({ def, st }) => {
+      const done = def.goal > 0 && st.p >= def.goal;
+      const canClaim = done && !st.claimed;
+      const fac = def.fac?.();
+      const foe = def.id === "gauntlet" ? gauntletFoe() : null;
+      const pct = def.goal > 0 ? Math.round(st.p / def.goal * 100) : 0;
+      const timer = def.period !== "none" ? `<span class="evTimer questReset" data-quest-reset="${def.period}" data-reset-prefix="\u041E\u0441\u0442\u0430\u043B\u043E\u0441\u044C">\u2014</span>` : "";
+      const extra = fac ? `<div class="evExtra">\u0424\u0440\u0430\u043A\u0446\u0438\u044F \u043D\u0435\u0434\u0435\u043B\u0438: <b>${FACTION_SIGIL[fac]} ${FACTION_RU[fac]}</b></div>` : foe ? `<div class="evExtra">\u0421\u043B\u0435\u0434\u0443\u044E\u0449\u0438\u0439 \u0441\u043E\u043F\u0435\u0440\u043D\u0438\u043A: <b>${FACTION_SIGIL[foe]} ${FACTION_RU[foe]}</b></div>` : "";
+      const progress = def.goal > 0 ? `<div class="evProgress"><div class="evProgressTrack"><i style="width:${pct}%"></i></div><b>${st.p}/${def.goal}</b></div>` : "";
+      const action = canClaim ? `<button type="button" class="evBtn claim" data-ev-claim="${def.id}">\u0417\u0430\u0431\u0440\u0430\u0442\u044C \u043D\u0430\u0433\u0440\u0430\u0434\u0443</button>` : st.claimed && def.goal > 0 ? `<button type="button" class="evBtn" disabled>\u041F\u043E\u043B\u0443\u0447\u0435\u043D\u043E \u2713</button>` : `<button type="button" class="evBtn play" data-ev-play="${def.id}">${def.launch === "match" ? "\u0418\u0433\u0440\u0430\u0442\u044C" : "\u041E\u0442\u043A\u0440\u044B\u0442\u044C"}</button>`;
+      return `<article class="evCard ev-${def.id}${canClaim ? " ready" : ""}${st.claimed && def.goal > 0 ? " claimed" : ""}" data-event-id="${def.id}">
+      <div class="evArt"><img src="/cosm/events/${def.id}" alt="" loading="lazy" onload="this.parentElement.classList.add('hasArt')" onerror="this.remove()"></div>
+      <div class="evShade"></div>
+      <div class="evTop"><span class="evKind">${def.kind}</span>${timer}</div>
+      <div class="evBody">
+        <h3 class="evTitle">${def.title}</h3>
+        <p class="evDesc">${def.desc}</p>
+        ${extra}
+        <p class="evRules">${def.rules}</p>
+        ${progress}
+        <div class="evFoot"><span class="evReward">\u041D\u0430\u0433\u0440\u0430\u0434\u0430: <b>${def.reward}</b></span>${action}</div>
+      </div>
+    </article>`;
+    }).join("") || '<div class="evEmpty">\u0417\u0434\u0435\u0441\u044C \u043F\u043E\u043A\u0430 \u043F\u0443\u0441\u0442\u043E</div>';
+    grid.onclick = (ev) => {
+      const t = ev.target;
+      const play = t?.closest?.("[data-ev-play]");
+      if (play) {
+        Audio_.uiClick();
+        const d = EVENT_DEFS.find((x) => x.id === play.dataset.evPlay);
+        if (d) launchEvent(d);
+        return;
+      }
+      const claim = t?.closest?.("[data-ev-claim]");
+      if (claim) {
+        Audio_.uiClick();
+        const d = EVENT_DEFS.find((x) => x.id === claim.dataset.evClaim);
+        if (d) claimEvent(d);
+      }
+    };
+    const side = document.getElementById("eventsSide");
+    if (side) {
+      const cnt = (f) => rows.filter(({ def, st }) => f === "all" || (f === "active" ? def.goal > 0 && st.p > 0 && !st.claimed : def.goal > 0 && st.p >= def.goal && !st.claimed)).length;
+      side.className = "eventsSideV3";
+      side.removeAttribute("style");
+      side.innerHTML = `<div class="evSideTitle">\u25C6 \u0421\u043E\u0431\u044B\u0442\u0438\u044F</div>` + [["all", "\u0412\u0441\u0435"], ["active", "\u0412 \u043F\u0440\u043E\u0446\u0435\u0441\u0441\u0435"], ["rewards", "\u041D\u0430\u0433\u0440\u0430\u0434\u044B"]].map(([id, ru]) => `<button type="button" class="evFilter${eventsFilter === id ? " sel" : ""}" data-ev-filter="${id}">${ru}<span>${cnt(id)}</span></button>`).join("");
+      side.onclick = (ev) => {
+        const f = ev.target?.closest?.("[data-ev-filter]");
+        if (f) {
+          eventsFilter = f.dataset.evFilter;
+          renderEvents();
+        }
+      };
+    }
+    document.getElementById("eventsScreen")?.classList.add("eventsV3");
+    updateQuestCountdowns();
+  }
+  window.ecEvents = () => EVENT_DEFS.map((d) => ({ id: d.id, ...eventState(d) }));
   function openEventsScreen() {
     setAppRoute("events");
     $("menu").classList.add("hidden");
@@ -26859,65 +27826,11 @@
     $("campaignModal")?.classList.add("hidden");
     const es = document.getElementById("eventsScreen");
     if (es) es.classList.remove("hidden");
-    const grid = document.getElementById("eventsGrid");
-    if (grid) {
-      const borderlessProgress = Math.min(BORDERLESS_EVENT_WINS, meta.borderlessEventWins ?? 0);
-      const canClaimBorderless = borderlessProgress >= BORDERLESS_EVENT_WINS && !meta.borderlessEventClaimed;
-      const events = [
-        { title: "\u0413\u0430\u043B\u0435\u0440\u0435\u044F \u0431\u0435\u0437 \u0433\u0440\u0430\u043D\u0438\u0446", sub: "\u0421\u043E\u0431\u044B\u0442\u0438\u0435 \xB7 Borderless", art: "/art/Ethereal/eth_03.png", borderless: true },
-        { title: "\u041F\u0440\u0435\u043C\u044C\u0435\u0440-\u0434\u0440\u0430\u0444\u0442", sub: "\u041B\u0438\u043C\u0438\u0442", art: "/art/Pyromancer/pyr_01.png" },
-        { title: "\u0411\u044B\u0441\u0442\u0440\u044B\u0439 \u0441\u0442\u0430\u0440\u0442", sub: "\u0412 \u0431\u044B\u0441\u0442\u0440\u0443\u044E \u0438\u0433\u0440\u0443", art: "/art/Aurites/aur_01.png" },
-        { title: "\u0418\u0441\u043F\u044B\u0442\u0430\u043D\u0438\u0435 \u0441\u0442\u0438\u0445\u0438\u0439", sub: "\u041E\u0431\u0443\u0447\u0435\u043D\u0438\u0435", art: "/art/Ethereal/eth_01.png" },
-        { title: "\u0421\u043E\u0431\u044B\u0442\u0438\u0435 \u043D\u0435\u0434\u0435\u043B\u0438: \u0421\u0442\u0430\u043D\u0434\u0430\u0440\u0442", sub: "\u0420\u0435\u0433\u0438\u0441\u0442\u0440\u0430\u0446\u0438\u044F \u043E\u0442\u043A\u0440\u044B\u0442\u0430", art: "/art/Terramorph/ter_01.png" },
-        { title: "\u041D\u0435\u043E\u043D\u043E\u0432\u0430\u044F \u0430\u0440\u043A\u0430\u0434\u0430", sub: "\u0421\u043E\u0431\u044B\u0442\u0438\u0435", art: "/art/Necrus/nec_01.png" },
-        { title: "\u041A\u043B\u0430\u0441\u0441\u0438\u0447\u0435\u0441\u043A\u0438\u0439 \u0434\u0440\u0430\u0444\u0442", sub: "\u041B\u0438\u043C\u0438\u0442", art: "/art/Aurites/aur_03.png" },
-        { title: "\u0411\u044B\u0441\u0442\u0440\u044B\u0439 \u0434\u0440\u0430\u0444\u0442", sub: "\u041B\u0438\u043C\u0438\u0442", art: "/art/Neutral/neu_01.png" },
-        { title: "\u0422\u0443\u0440\u043D\u0438\u0440 \u0441\u0431\u043E\u0440\u043D\u044B\u0445 \u043A\u043E\u043B\u043E\u0434", sub: "\u041A\u043E\u043D\u0441\u0442\u0440\u0443\u043A\u0442\u0435\u0434", art: "/art/Ethereal/eth_03.png" },
-        { title: "\u041A\u043B\u0430\u0441\u0441\u0438\u0447\u0435\u0441\u043A\u0438\u0439 \u0434\u0440\u0430\u0444\u0442", sub: "\u041B\u0438\u043C\u0438\u0442", art: "/art/Ethereal/eth_03.png" },
-        { title: "\u041A\u043B\u0430\u0441\u0441\u0438\u0447\u0435\u0441\u043A\u0438\u0439 \u0442\u0443\u0440\u043D\u0438\u0440", sub: "\u041A\u043E\u043D\u0441\u0442\u0440\u0443\u043A\u0442\u0435\u0434", art: "/art/Pyromancer/pyr_03.png" }
-      ];
-      grid.innerHTML = events.map((ev) => `
-      <div class="draftCard${ev.borderless ? " borderlessEventCard" : ""}" data-event-id="${ev.borderless ? "borderless" : ""}" style="height:${ev.borderless ? "172px" : "118px"};flex-direction:column;align-items:stretch;padding:0;border-radius:8px;overflow:hidden">
-        <div class="draftArt" style="position:absolute;inset:0"><img src="${ev.art}" alt="" loading="lazy" onerror="this.style.display='none'"></div>
-        <div class="eventArtShade"></div>
-        <div class="eventCardCopy">
-          <div class="eventCardTitle">${ev.title}</div>
-          <div class="eventCardSub">${ev.sub}</div>
-          ${ev.borderless ? `<div class="eventRewardBox">
-            <div class="eventProgressLabel"><span>\u0420\u0435\u0439\u0442\u0438\u043D\u0433\u043E\u0432\u044B\u0435 \u043F\u043E\u0431\u0435\u0434\u044B</span><b>${borderlessProgress}/${BORDERLESS_EVENT_WINS}</b></div>
-            <div class="eventProgressTrack"><i style="width:${borderlessProgress / BORDERLESS_EVENT_WINS * 100}%"></i></div>
-            <button type="button" class="eventRewardClaim" data-borderless-claim ${canClaimBorderless ? "" : "disabled"}>
-              ${meta.borderlessEventClaimed ? "\u041F\u043E\u043B\u0443\u0447\u0435\u043D\u043E \u2713" : canClaimBorderless ? "\u0417\u0430\u0431\u0440\u0430\u0442\u044C Borderless \u043D\u0430\u0433\u0440\u0430\u0434\u0443" : `\u0415\u0449\u0451 ${BORDERLESS_EVENT_WINS - borderlessProgress} \u043F\u043E\u0431\u0435\u0434\u044B`}
-            </button>
-            <small>1 \u043A\u043E\u0441\u043C\u0435\u0442\u0438\u0447\u0435\u0441\u043A\u0438\u0439 \u0432\u0430\u0440\u0438\u0430\u043D\u0442 \u043A\u0430\u0440\u0442\u044B \xB7 \u0431\u0430\u043B\u0430\u043D\u0441 \u043D\u0435 \u043C\u0435\u043D\u044F\u0435\u0442\u0441\u044F</small>
-          </div>` : ""}
-        </div>
-        ${ev.borderless ? '<span class="eventBorderlessTag">\u25C7 BORDERLESS</span>' : ""}
-      </div>
-    `).join("");
-      grid.onclick = (ev) => {
-        const target = ev.target;
-        const claim = target?.closest?.("[data-borderless-claim]");
-        if (claim) {
-          ev.stopPropagation();
-          if (claim.disabled || meta.borderlessEventClaimed) return;
-          const reward = grantRandomBorderless();
-          if (!reward) {
-            showToast("\u0412\u0441\u0435 Borderless-\u0432\u0430\u0440\u0438\u0430\u043D\u0442\u044B \u0443\u0436\u0435 \u0441\u043E\u0431\u0440\u0430\u043D\u044B");
-            return;
-          }
-          meta.borderlessEventClaimed = true;
-          metaSave();
-          showToast(`\u25C7 \u041F\u043E\u043B\u0443\u0447\u0435\u043D Borderless-\u0432\u0430\u0440\u0438\u0430\u043D\u0442: \xAB${cardName(reward)}\xBB`);
-          openEventsScreen();
-          return;
-        }
-        const tile = target?.closest?.(".draftCard");
-        if (tile && tile.dataset.eventId !== "borderless") showToast("\u0421\u043E\u0431\u044B\u0442\u0438\u0435 \u0441\u043A\u043E\u0440\u043E \u043E\u0442\u043A\u0440\u043E\u0435\u0442\u0441\u044F");
-      };
-      grid.style.marginRight = "";
-    }
+    renderEvents();
     syncTopWallet();
+  }
+  function closeEventsScreen() {
+    document.getElementById("eventsScreen")?.classList.add("hidden");
   }
   document.getElementById("homePlayBtn")?.addEventListener("click", () => {
     Audio_.uiClick();
@@ -27070,7 +27983,7 @@
     document.querySelectorAll(".topTab").forEach((x) => x.classList.toggle("active", x.dataset.tab === "profile"));
     openProfile();
   });
-  document.getElementById("btnNavMulti")?.addEventListener("click", () => openEventsScreen());
+  document.getElementById("btnNavMulti")?.addEventListener("click", () => openOnline());
   document.getElementById("btnNavPlay")?.addEventListener("click", () => btn("btnPlay").click());
   document.getElementById("btnNavExit")?.addEventListener("click", () => {
     Audio_.uiClick();
@@ -27082,6 +27995,7 @@
     if (!b) return;
     document.querySelectorAll("#menuNav .ecNavBtn").forEach((x) => x.classList.toggle("active", x === b));
   });
+  var homeChallengeList = [];
   function updateChallengePanel() {
     const evSel = document.getElementById("enemyFaction");
     const ev = evSel ? evSel.value : "__random";
@@ -27108,6 +28022,10 @@
       }
     }
     const practice = !!document.getElementById("chkPractice")?.checked;
+    const aiRow = document.querySelector(".ecAiOnly");
+    if (aiRow) aiRow.style.display = practice ? "" : "none";
+    const titleEl = document.getElementById("ecChTitle");
+    if (titleEl) titleEl.textContent = homeChallengeList.length ? "\u2694 \u0410\u043A\u0442\u0438\u0432\u043D\u044B\u0439 \u0432\u044B\u0437\u043E\u0432" : "\u041F\u043E\u0434\u0433\u043E\u0442\u043E\u0432\u043A\u0430 \u043A \u0431\u043E\u044E";
     const modeEl = document.getElementById("ecModeText");
     if (modeEl) modeEl.textContent = practice ? "\u0422\u0440\u0435\u043D\u0438\u0440\u043E\u0432\u043A\u0430 \xB7 \u0431\u0435\u0437 \u0440\u0435\u0439\u0442\u0438\u043D\u0433\u0430" : "\u0420\u0435\u0439\u0442\u0438\u043D\u0433\u043E\u0432\u0430\u044F \u043B\u0435\u0441\u0442\u043D\u0438\u0446\u0430 \xB7 \u0421\u0435\u0437\u043E\u043D 4";
     const pm = document.getElementById("ecPlayMode");
@@ -27410,6 +28328,15 @@
   }
   var ADMIN_KEY = "ec_admin_v1";
   var ADMIN_USERS_KEY = "ec_admin_users_v1";
+  var ADMIN_LOG_KEY = "ec_admin_log_v1";
+  function admLog(msg) {
+    try {
+      const arr = JSON.parse(window.localStorage.getItem(ADMIN_LOG_KEY) || "[]");
+      arr.unshift(`[${(/* @__PURE__ */ new Date()).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}] ${msg}`);
+      window.localStorage.setItem(ADMIN_LOG_KEY, JSON.stringify(arr.slice(0, 30)));
+    } catch {
+    }
+  }
   function isAdmin() {
     try {
       return window.localStorage.getItem(ADMIN_KEY) === "1";
@@ -27444,11 +28371,13 @@
     const facs = ["Aurites", "Necrus", "Terramorph", "Pyromancer", "Ethereal"];
     const frames = ["bronze", "silver", "gold", "crystal", "mythic"];
     const mocks = [];
-    mocks.push({ pid: meta.pid || "me", nick: meta.nick || "\u0413\u043E\u0441\u0442\u044C", avatarFac: meta.avatarFac || "Aurites", frame: meta.frame || "bronze", level: Math.floor((meta.xp || 0) / 500) + 1, mmr: meta.mmr || 1e3, wins: meta.wins || 0, losses: meta.losses || 0, shards: shardsGet(), gems: gemsGet(), banned: false, lastSeen: (/* @__PURE__ */ new Date()).toISOString().slice(0, 10) });
+    mocks.push({ pid: meta.pid || "me", nick: meta.nick || "\u0413\u043E\u0441\u0442\u044C", avatarFac: meta.avatarFac || "Aurites", frame: meta.frame || "bronze", level: Math.floor((meta.xp || 0) / 500) + 1, mmr: meta.mmr || 1e3, wins: meta.wins || 0, losses: meta.losses || 0, shards: shardsGet(), gems: gemsGet(), banned: false, lastSeen: (/* @__PURE__ */ new Date()).toISOString().slice(0, 10), online: true, lastSeenTs: Date.now() });
     const names = ["AetherWolf", "ShadowMage", "GroveKeeper", "EmberLord", "FrostWitch", "IronBastion", "StormCaller", "VoidWalker"];
     for (let i = 0; i < 7; i++) {
       const f = facs[i % facs.length];
-      mocks.push({ pid: `ec-demo-${i + 1}`, nick: names[i], avatarFac: f, frame: frames[i % frames.length], level: 5 + Math.floor(Math.random() * 40), mmr: 900 + Math.floor(Math.random() * 800), wins: Math.floor(Math.random() * 120), losses: Math.floor(Math.random() * 100), shards: 400 + Math.floor(Math.random() * 3e3), gems: 20 + Math.floor(Math.random() * 500), banned: Math.random() < 0.12, lastSeen: new Date(Date.now() - Math.floor(Math.random() * 14) * 864e5).toISOString().slice(0, 10) });
+      const on = i % 3 === 0;
+      const ago = on ? Math.floor(Math.random() * 36e5) : Math.floor(Math.random() * 14) * 864e5;
+      mocks.push({ pid: `ec-demo-${i + 1}`, nick: names[i], avatarFac: f, frame: frames[i % frames.length], level: 5 + Math.floor(Math.random() * 40), mmr: 900 + Math.floor(Math.random() * 800), wins: Math.floor(Math.random() * 120), losses: Math.floor(Math.random() * 100), shards: 400 + Math.floor(Math.random() * 3e3), gems: 20 + Math.floor(Math.random() * 500), banned: Math.random() < 0.12, lastSeen: new Date(Date.now() - ago).toISOString().slice(0, 10), online: on, lastSeenTs: Date.now() - ago });
     }
     try {
       window.localStorage.setItem(ADMIN_USERS_KEY, JSON.stringify(mocks));
@@ -27650,37 +28579,118 @@
       showToast("\u0412\u044B\u0448\u0435\u043B \u0438\u0437 \u0430\u0434\u043C\u0438\u043D\u043A\u0438");
     });
   }
+  var adminSrvUsers = null;
+  var adminSrvErr = "";
+  var adminSrvTimer = 0;
+  var adminSrvApiOld = false;
+  function adminKeyGet() {
+    try {
+      return window.localStorage.getItem("ec_admin_key_v1") || "echo-admin";
+    } catch {
+      return "echo-admin";
+    }
+  }
+  async function adminSrvFetch() {
+    const key = adminKeyGet();
+    if (!key) {
+      adminSrvUsers = null;
+      adminSrvErr = "no-key";
+      return;
+    }
+    try {
+      const r = await window.fetch(`${META_API()}/api/admin/users`, { headers: { "x-admin-key": key } });
+      if (r.status === 403) {
+        adminSrvErr = "key-invalid";
+        adminSrvUsers = null;
+        return;
+      }
+      if (!r.ok) {
+        adminSrvErr = `HTTP ${r.status}`;
+        adminSrvUsers = null;
+        return;
+      }
+      const j = await r.json();
+      adminSrvUsers = j.users || [];
+      adminSrvErr = "";
+      adminSrvApiOld = j.apiVersion !== 3;
+    } catch {
+      adminSrvErr = "offline";
+      adminSrvUsers = null;
+    }
+  }
+  async function adminSrvPost(route, body) {
+    try {
+      const r = await window.fetch(`${META_API()}${route}`, { method: "POST", headers: { "x-admin-key": adminKeyGet(), "content-type": "application/json" }, body: JSON.stringify(body) });
+      return r.ok;
+    } catch {
+      return false;
+    }
+  }
+  function srvRow(u) {
+    const on = u.status !== "offline";
+    const when = on ? ONLINE_STATUS_RU[u.status] ?? u.status : u.lastSeen ? new Date(u.lastSeen).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "\u2014";
+    return `<tr>
+    <td><div style="display:flex;align-items:center;gap:.45rem"><span style="width:28px;height:28px;border-radius:50%;background:var(--panel);border:1px solid rgba(120,190,255,.35);display:flex;align-items:center;justify-content:center;font-size:.72rem">${FACTION_SIGIL[u.avatarFac] || "\u25C8"}</span><div><div style="font-size:.78rem;color:#ffe9b0">${esc(u.nick)} <span class="admBadge" style="border-color:#2a4a6a;background:rgba(42,74,106,.15);color:#9fc6ff">\u0441\u0435\u0440\u0432\u0435\u0440</span></div><div style="font-size:.62rem;color:#8b93ab">${esc(u.login)} \xB7 ${esc(FACTION_RU[u.avatarFac] || u.avatarFac)} \xB7 ${u.frame}</div></div></div></td>
+    <td><b>${u.level}</b> <span style="color:#8b93ab">/ ${u.mmr}</span></td>
+    <td>${u.wins}-${u.losses} <span style="color:#8b93ab">${(u.wins / Math.max(1, u.wins + u.losses) * 100).toFixed(0)}%</span></td>
+    <td>\u{1FA99}${u.shards} \xB7 \u{1F48E}${u.gems}</td>
+    <td>${on ? `<span class="admBadge on">\u{1F7E2} ${esc(ONLINE_STATUS_RU[u.status] ?? "\u0432 \u0441\u0435\u0442\u0438")}</span>` : '<span class="admBadge off">\u26AA \u043E\u0444\u0444\u043B\u0430\u0439\u043D</span>'} ${u.banned ? '<span class="admBadge" style="border-color:#7c3a34;background:rgba(124,58,52,.12);color:#ffb3a6">\u0431\u0430\u043D</span>' : ""}<div style="font-size:.6rem;color:#6d7590">${when}</div></td>
+    <td><div class="admActions"><button class="btn" data-sact="edit" data-login="${esc(u.login)}" title="\u041D\u0438\u043A \u0438 MMR">\u270E</button><button class="btn" data-sact="give" data-login="${esc(u.login)}" title="\u0412\u044B\u0434\u0430\u0442\u044C \u0432\u0430\u043B\u044E\u0442\u0443/\u043F\u0430\u043A\u0438">\u{1FA99}</button><button class="btn" data-sact="kick" data-login="${esc(u.login)}" title="\u041A\u0438\u043A" ${on ? "" : "disabled"}>\u26A1</button><button class="btn" data-sact="ban" data-login="${esc(u.login)}" title="\u0411\u0430\u043D/\u0440\u0430\u0437\u0431\u0430\u043D">${u.banned ? "\u2713" : "\u26D4"}</button></div></td>
+  </tr>`;
+  }
   function renderAdminUsers(host) {
     const users = ensureAdminUsers();
-    users[0] = { pid: meta.pid || "me", nick: meta.nick, avatarFac: meta.avatarFac, frame: meta.frame, level: Math.floor((meta.xp || 0) / 500) + 1, mmr: meta.mmr || 1e3, wins: meta.wins || 0, losses: meta.losses || 0, shards: shardsGet(), gems: gemsGet(), banned: false, lastSeen: (/* @__PURE__ */ new Date()).toISOString().slice(0, 10) };
+    users[0] = { pid: meta.pid || "me", nick: meta.nick, avatarFac: meta.avatarFac, frame: meta.frame, level: Math.floor((meta.xp || 0) / 500) + 1, mmr: meta.mmr || 1e3, wins: meta.wins || 0, losses: meta.losses || 0, shards: shardsGet(), gems: gemsGet(), banned: false, lastSeen: (/* @__PURE__ */ new Date()).toISOString().slice(0, 10), online: true, lastSeenTs: Date.now() };
     saveAdminUsers(users);
+    const srvNote = adminSrvErr === "" ? `\u{1F310} \u0441\u0435\u0440\u0432\u0435\u0440: ${adminSrvUsers?.length ?? 0} \u0438\u0433\u0440\u043E\u043A\u043E\u0432` : adminSrvErr === "no-key" ? "\u{1F310} \u0441\u0435\u0440\u0432\u0435\u0440: \u0432\u0432\u0435\u0434\u0438\u0442\u0435 \u0430\u0434\u043C\u0438\u043D-\u043A\u043B\u044E\u0447 \u0432\u043E \u0432\u043A\u043B\u0430\u0434\u043A\u0435 \xAB\u0421\u0438\u0441\u0442\u0435\u043C\u0430\xBB" : adminSrvErr === "key-invalid" ? "\u{1F310} \u0441\u0435\u0440\u0432\u0435\u0440: \u0430\u0434\u043C\u0438\u043D-\u043A\u043B\u044E\u0447 \u043D\u0435 \u043F\u043E\u0434\u043E\u0448\u0451\u043B (v3.16+ \u0433\u0435\u043D\u0435\u0440\u0438\u0440\u0443\u0435\u0442 \u0441\u0432\u043E\u0439: \u0441\u043C\u043E\u0442\u0440\u0438\u0442\u0435 \u043A\u043E\u043D\u0441\u043E\u043B\u044C \u0441\u0435\u0440\u0432\u0435\u0440\u0430 / server/data/admin_key, \u0438\u043B\u0438 \u0437\u0430\u0434\u0430\u0439\u0442\u0435 env ADMIN_KEY; \u0432\u043F\u0438\u0448\u0438\u0442\u0435 \u0435\u0433\u043E \u0432 \xAB\u0421\u0438\u0441\u0442\u0435\u043C\u0430 \u2192 \u041A\u043B\u044E\u0447\xBB)" : adminSrvErr === "offline" ? "\u{1F310} \u0441\u0435\u0440\u0432\u0435\u0440 \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u0435\u043D (npm run server:meta)" : `\u{1F310} \u0441\u0435\u0440\u0432\u0435\u0440: \u043E\u0448\u0438\u0431\u043A\u0430 ${adminSrvErr}`;
+    const srvApiWarn = adminSrvApiOld && adminSrvErr === "" ? `<div style="margin-bottom:.5rem;padding:.55rem .7rem;border:1px solid #b3812f;background:rgba(179,129,47,.13);border-radius:8px;font-size:.68rem;color:#ffd98a;line-height:1.5">\u26A0\uFE0F <b>\u041E\u0431\u043D\u0430\u0440\u0443\u0436\u0435\u043D \u0421\u0422\u0410\u0420\u042B\u0419 meta-server (\u0431\u0435\u0437 \u0434\u0435\u043B\u044C\u0442\u0430-\u043F\u0440\u043E\u0442\u043E\u043A\u043E\u043B\u0430).</b> \u0412\u044B\u0434\u0430\u0432\u0430\u0435\u043C\u0430\u044F \u0437\u0434\u0435\u0441\u044C \u0432\u0430\u043B\u044E\u0442\u0430/\u0440\u0435\u0439\u0442\u0438\u043D\u0433 \u0441\u043E\u0445\u0440\u0430\u043D\u044F\u0435\u0442\u0441\u044F \u0438 \u043D\u0435 \u0437\u0430\u0442\u0438\u0440\u0430\u0435\u0442\u0441\u044F \u0441\u0438\u043D\u043A\u0430\u043C\u0438 \u0438\u0433\u0440\u043E\u043A\u0430, \u041D\u041E \u0442\u0440\u0430\u0442\u044B \u0438\u0433\u0440\u043E\u043A\u0430 \u0441\u0435\u0440\u0432\u0435\u0440 \u0437\u0430\u043F\u0438\u0441\u044B\u0432\u0430\u0442\u044C \u043D\u0435 \u0443\u043C\u0435\u0435\u0442 \u2014 \u043E\u043D\u0438 \u0431\u0443\u0434\u0443\u0442 \xAB\u0432\u043E\u0437\u0432\u0440\u0430\u0449\u0430\u0442\u044C\u0441\u044F\xBB \u043F\u0440\u0438 \u0441\u0438\u043D\u043A\u0435, \u043F\u043E\u043A\u0430 \u0441\u0435\u0440\u0432\u0435\u0440 \u043D\u0435 \u043E\u0431\u043D\u043E\u0432\u043B\u0451\u043D. <br>\u041E\u0431\u043D\u043E\u0432\u043B\u0435\u043D\u0438\u0435: \u043E\u0441\u0442\u0430\u043D\u043E\u0432\u0438\u0442\u0435 \u0441\u0442\u0430\u0440\u044B\u0439 \u043F\u0440\u043E\u0446\u0435\u0441\u0441 \u0441\u0435\u0440\u0432\u0435\u0440\u0430 \u0438 \u0437\u0430\u043F\u0443\u0441\u0442\u0438\u0442\u0435 <code style="background:rgba(0,0,0,.3);padding:0 .3rem;border-radius:4px">npm run server:meta</code> (\u043F\u0435\u0440\u0435\u0441\u043E\u0431\u0435\u0440\u0451\u0442 \u0438 \u0437\u0430\u043F\u0443\u0441\u0442\u0438\u0442) \u2014 \u043B\u0438\u0431\u043E <code style="background:rgba(0,0,0,.3);padding:0 .3rem;border-radius:4px">node build/meta_server.js</code> (\u0441\u0432\u0435\u0436\u0430\u044F prebuilt-\u0441\u0431\u043E\u0440\u043A\u0430 \u043B\u0435\u0436\u0438\u0442 \u0432 \u0430\u0440\u0445\u0438\u0432\u0435).</div>` : "";
     host.innerHTML = `<div style="display:flex;gap:.4rem;align-items:center;flex-wrap:wrap;margin-bottom:.5rem">
-    <input id="admUserSearch" placeholder="\u041F\u043E\u0438\u0441\u043A \u043F\u043E \u043D\u0438\u043A\u0443 / PID..." style="flex:1;min-width:180px;background:#14161f;border:1px solid var(--line);color:var(--text);padding:.42rem .5rem;border-radius:6px">
-    <select id="admUserFilter" style="background:#14161f;border:1px solid var(--line);color:var(--text);padding:.42rem;border-radius:6px"><option value="">\u0412\u0441\u0435</option><option value="banned">\u0417\u0430\u0431\u0430\u043D\u0435\u043D\u044B</option><option value="top">\u0422\u043E\u043F \u043F\u043E MMR</option></select>
+    <input id="admUserSearch" placeholder="\u041F\u043E\u0438\u0441\u043A \u043F\u043E \u043D\u0438\u043A\u0443 / PID / \u043B\u043E\u0433\u0438\u043D\u0443..." style="flex:1;min-width:180px;background:#14161f;border:1px solid var(--line);color:var(--text);padding:.42rem .5rem;border-radius:6px">
+    <select id="admUserFilter" style="background:#14161f;border:1px solid var(--line);color:var(--text);padding:.42rem;border-radius:6px"><option value="">\u0412\u0441\u0435</option><option value="online">\u{1F7E2} \u041E\u043D\u043B\u0430\u0439\u043D</option><option value="offline">\u26AA \u041E\u0444\u0444\u043B\u0430\u0439\u043D</option><option value="banned">\u0417\u0430\u0431\u0430\u043D\u0435\u043D\u044B</option><option value="top">\u0422\u043E\u043F \u043F\u043E MMR</option></select>
     <button class="btn" id="admUserAdd">\uFF0B \u0414\u043E\u0431\u0430\u0432\u0438\u0442\u044C \u0438\u0433\u0440\u043E\u043A\u0430</button>
+    <button class="btn" id="admUserGiveAll" title="\u041C\u0430\u0441\u0441\u043E\u0432\u0430\u044F \u0432\u044B\u0434\u0430\u0447\u0430: +500 \u{1FA99} \u0432\u0441\u0435\u043C, \u043A\u0442\u043E \u0432 \u0441\u0435\u0442\u0438">\u{1F381} \u0412\u0441\u0435\u043C \u043E\u043D\u043B\u0430\u0439\u043D +500 \u{1FA99}</button>
+    <button class="btn" id="admUserRefresh" title="\u041E\u0431\u043D\u043E\u0432\u0438\u0442\u044C \u0441\u043F\u0438\u0441\u043E\u043A \u0441 \u0441\u0435\u0440\u0432\u0435\u0440\u0430">\u{1F504}</button>
     <button class="btn" id="admUserExport">\u042D\u043A\u0441\u043F\u043E\u0440\u0442 CSV</button>
   </div>
+  <div style="font-size:.66rem;color:#9fc6ff;margin-bottom:.35rem"><span id="admSrvNote">${esc(srvNote)}</span> \xB7 \u0440\u0435\u0430\u043B\u044C\u043D\u044B\u0435 \u0438\u0433\u0440\u043E\u043A\u0438 \u0441\u0435\u0440\u0432\u0435\u0440\u0430 \u0441\u0432\u0435\u0440\u0445\u0443, \u043B\u043E\u043A\u0430\u043B\u044C\u043D\u044B\u0435 \u2014 \u043D\u0438\u0436\u0435</div>
+  ${srvApiWarn}
   <div style="overflow:auto;max-height:52vh;border:1px solid rgba(255,255,255,.06);border-radius:8px">
     <table class="admTable"><thead><tr><th>\u0418\u0433\u0440\u043E\u043A</th><th>\u0423\u0440 / MMR</th><th>W-L</th><th>\u{1FA99} / \u{1F48E}</th><th>\u0421\u0442\u0430\u0442\u0443\u0441</th><th>\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u044F</th></tr></thead><tbody id="admUserTbody"></tbody></table>
   </div>
-  <div style="font-size:.62rem;color:#8b93ab;margin-top:.4rem">\u0412\u0441\u0435\u0433\u043E ${users.length} \xB7 \u0432 \u043F\u0440\u043E\u0434\u0435 \u043F\u043E\u0434\u043C\u0435\u043D\u0438 localStorage \u043D\u0430 GET /api/admin/users?search=&filter=</div>`;
+  <div style="font-size:.62rem;color:#8b93ab;margin-top:.4rem"><span id="admSrvTotal">\u0412\u0441\u0435\u0433\u043E ${users.length + (adminSrvUsers?.length ?? 0)} \xB7 \u043E\u043D\u043B\u0430\u0439\u043D ${(adminSrvUsers ?? []).filter((u) => u.status !== "offline").length + users.filter((u) => u.online).length}</span></div>
+  <div class="admCard" style="margin-top:.6rem"><h4>\u{1F4CB} \u0416\u0443\u0440\u043D\u0430\u043B \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0439 \u0430\u0434\u043C\u0438\u043D\u0430</h4><div id="admUserLog" style="max-height:110px;overflow:auto;font-size:.66rem;color:#cbb98a;background:rgba(0,0,0,.18);border:1px solid rgba(255,255,255,.06);border-radius:6px;padding:.4rem .5rem">${JSON.parse(window.localStorage.getItem(ADMIN_LOG_KEY) || "[]").map((x) => `<div>${esc(x)}</div>`).join("") || "\u2014 \u043F\u043E\u043A\u0430 \u043F\u0443\u0441\u0442\u043E \u2014"}</div></div>`;
     const tbody = host.querySelector("#admUserTbody");
     const search = host.querySelector("#admUserSearch");
     const filter = host.querySelector("#admUserFilter");
     const render = () => {
       const q = (search.value || "").toLowerCase();
+      const match = (nick, id) => !q || nick.toLowerCase().includes(q) || id.toLowerCase().includes(q);
+      let srv = (adminSrvUsers ?? []).slice();
+      if (filter.value === "banned") srv = srv.filter((u) => u.banned);
+      if (filter.value === "online") srv = srv.filter((u) => u.status !== "offline");
+      if (filter.value === "offline") srv = srv.filter((u) => u.status === "offline");
+      srv = srv.filter((u) => match(u.nick, u.login));
+      if (filter.value === "top") srv.sort((a, b) => b.mmr - a.mmr);
+      srv.sort((a, b) => (b.status !== "offline" ? 1 : 0) - (a.status !== "offline" ? 1 : 0));
       let list = users.slice();
       if (filter.value === "banned") list = list.filter((u) => u.banned);
+      if (filter.value === "online") list = list.filter((u) => u.online);
+      if (filter.value === "offline") list = list.filter((u) => !u.online);
       if (filter.value === "top") list.sort((a, b) => b.mmr - a.mmr);
-      if (q) list = list.filter((u) => u.nick.toLowerCase().includes(q) || u.pid.toLowerCase().includes(q));
-      tbody.innerHTML = list.map((u) => `<tr>
+      list.sort((a, b) => (b.online ? 1 : 0) - (a.online ? 1 : 0));
+      list = list.filter((u) => match(u.nick, u.pid));
+      tbody.innerHTML = srv.map(srvRow).join("") + list.map((u) => `<tr>
       <td><div style="display:flex;align-items:center;gap:.45rem"><span style="width:28px;height:28px;border-radius:50%;background:var(--panel);border:1px solid rgba(255,216,122,.18);display:flex;align-items:center;justify-content:center;font-size:.72rem">${FACTION_SIGIL[u.avatarFac] || "\u25C8"}</span><div><div style="font-size:.78rem;color:#ffe9b0">${esc(u.nick)} ${u.pid === meta.pid ? '<span class="admBadge">\u0432\u044B</span>' : ""}</div><div style="font-size:.62rem;color:#8b93ab">${esc(u.pid)} \xB7 ${esc(FACTION_RU[u.avatarFac] || u.avatarFac)} \xB7 ${u.frame}</div></div></div></td>
       <td><b>${u.level}</b> <span style="color:#8b93ab">/ ${u.mmr}</span></td>
       <td>${u.wins}-${u.losses} <span style="color:#8b93ab">${(u.wins / Math.max(1, u.wins + u.losses) * 100).toFixed(0)}%</span></td>
       <td>\u{1FA99}${u.shards} \xB7 \u{1F48E}${u.gems}</td>
-      <td>${u.banned ? '<span class="admBadge" style="border-color:#7c3a34;background:rgba(124,58,52,.12);color:#ffb3a6">\u0431\u0430\u043D</span>' : '<span class="admBadge">\u0430\u043A\u0442\u0438\u0432\u0435\u043D</span>'} \xB7 ${u.lastSeen}</td>
-      <td><div class="admActions"><button class="btn" data-act="edit" data-pid="${u.pid}">\u270E</button><button class="btn" data-act="give" data-pid="${u.pid}">\u{1FA99}</button><button class="btn" data-act="ban" data-pid="${u.pid}">${u.banned ? "\u2713" : "\u26D4"}</button><button class="btn danger" data-act="del" data-pid="${u.pid}">\u2715</button></div></td>
+      <td>${u.online ? '<span class="admBadge on">\u{1F7E2} \u043E\u043D\u043B\u0430\u0439\u043D</span>' : '<span class="admBadge off">\u26AA \u043E\u0444\u0444\u043B\u0430\u0439\u043D</span>'} ${u.banned ? '<span class="admBadge" style="border-color:#7c3a34;background:rgba(124,58,52,.12);color:#ffb3a6">\u0431\u0430\u043D</span>' : ""}<div style="font-size:.6rem;color:#6d7590">${u.online ? "\u0432 \u0441\u0435\u0442\u0438" : u.lastSeen}</div></td>
+      <td><div class="admActions"><button class="btn" data-act="edit" data-pid="${u.pid}">\u270E</button><button class="btn" data-act="give" data-pid="${u.pid}">\u{1FA99}</button><button class="btn" data-act="kick" data-pid="${u.pid}" ${u.online ? "" : "disabled"}>\u26A1</button><button class="btn" data-act="ban" data-pid="${u.pid}">${u.banned ? "\u2713" : "\u26D4"}</button><button class="btn danger" data-act="del" data-pid="${u.pid}">\u2715</button></div></td>
     </tr>`).join("");
+      const noteEl = host.querySelector("#admSrvNote");
+      if (noteEl) noteEl.textContent = adminSrvErr === "" ? `\u{1F310} \u0441\u0435\u0440\u0432\u0435\u0440: ${(adminSrvUsers ?? []).length} \u0438\u0433\u0440\u043E\u043A\u043E\u0432 \xB7 \u043E\u043D\u043B\u0430\u0439\u043D ${(adminSrvUsers ?? []).filter((u) => u.status !== "offline").length}` : adminSrvErr === "no-key" ? "\u{1F310} \u0441\u0435\u0440\u0432\u0435\u0440: \u0432\u0432\u0435\u0434\u0438\u0442\u0435 \u0430\u0434\u043C\u0438\u043D-\u043A\u043B\u044E\u0447 \u0432\u043E \u0432\u043A\u043B\u0430\u0434\u043A\u0435 \xAB\u0421\u0438\u0441\u0442\u0435\u043C\u0430\xBB" : adminSrvErr === "offline" ? "\u{1F310} \u0441\u0435\u0440\u0432\u0435\u0440 \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u0435\u043D (npm run server:meta)" : `\u{1F310} \u0441\u0435\u0440\u0432\u0435\u0440: \u043E\u0448\u0438\u0431\u043A\u0430 ${adminSrvErr}`;
+      const totEl = host.querySelector("#admSrvTotal");
+      if (totEl) totEl.textContent = `\u0412\u0441\u0435\u0433\u043E ${users.length + (adminSrvUsers ?? []).length} \xB7 \u043E\u043D\u043B\u0430\u0439\u043D ${(adminSrvUsers ?? []).filter((u) => u.status !== "offline").length + users.filter((u) => u.online).length}`;
       tbody.querySelectorAll("[data-act]").forEach((b) => {
         b.addEventListener("click", () => {
           const act = b.dataset.act;
@@ -27699,27 +28709,48 @@
               metaSave();
             }
             saveAdminUsers(users);
+            admLog(`\u043F\u0440\u0430\u0432\u043A\u0430 ${users[idx].nick}: MMR ${nm}`);
             render();
             showToast("\u0421\u043E\u0445\u0440\u0430\u043D\u0435\u043D\u043E");
           } else if (act === "give") {
             const sh = parseInt(prompt("\u0412\u044B\u0434\u0430\u0442\u044C \u043C\u043E\u043D\u0435\u0442\u044B", "500") || "0") || 0;
             const ge = parseInt(prompt("\u0412\u044B\u0434\u0430\u0442\u044C \u{1F48E}", "50") || "0") || 0;
+            const pk = parseInt(prompt("\u0412\u044B\u0434\u0430\u0442\u044C \u0431\u0443\u0441\u0442\u0435\u0440\u043E\u0432", "0") || "0") || 0;
             users[idx].shards += sh;
             users[idx].gems += ge;
             if (pid === meta.pid) {
               shardsAdd(sh);
               gemsAdd(ge);
+              if (pk) {
+                meta.freeOpens = (meta.freeOpens ?? 0) + pk;
+                metaSave();
+              }
             }
             saveAdminUsers(users);
+            admLog(`\u0432\u044B\u0434\u0430\u0447\u0430 ${users[idx].nick}: \u{1FA99}${sh} \u{1F48E}${ge} \u{1F0CF}${pk}`);
             render();
-            showToast("\u0412\u044B\u0434\u0430\u043D\u043E \u{1FA99}" + sh + " \u{1F48E}" + ge);
+            showToast("\u0412\u044B\u0434\u0430\u043D\u043E \u{1FA99}" + sh + " \u{1F48E}" + ge + (pk ? " \u{1F0CF}" + pk : ""));
+          } else if (act === "kick") {
+            users[idx].online = false;
+            users[idx].lastSeenTs = Date.now();
+            users[idx].lastSeen = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+            saveAdminUsers(users);
+            admLog(`\u043A\u0438\u043A ${users[idx].nick}`);
+            render();
+            showToast("\u26A1 " + users[idx].nick + " \u043E\u0442\u043A\u043B\u044E\u0447\u0451\u043D");
           } else if (act === "ban") {
             users[idx].banned = !users[idx].banned;
+            if (users[idx].banned) {
+              users[idx].online = false;
+              users[idx].lastSeenTs = Date.now();
+            }
             saveAdminUsers(users);
+            admLog(`${users[idx].banned ? "\u0431\u0430\u043D" : "\u0440\u0430\u0437\u0431\u0430\u043D"} ${users[idx].nick}`);
             render();
-            showToast(users[idx].banned ? "\u0417\u0430\u0431\u0430\u043D\u0435\u043D" : "\u0420\u0430\u0437\u0431\u0430\u043D\u0435\u043D");
+            showToast(users[idx].banned ? "\u0417\u0430\u0431\u0430\u043D\u0435\u043D (\u0438 \u043A\u0438\u043A\u043D\u0443\u0442)" : "\u0420\u0430\u0437\u0431\u0430\u043D\u0435\u043D");
           } else if (act === "del") {
             if (!confirm("\u0423\u0434\u0430\u043B\u0438\u0442\u044C " + users[idx].nick + "?")) return;
+            admLog(`\u0443\u0434\u0430\u043B\u0435\u043D\u0438\u0435 ${users[idx].nick}`);
             if (pid === meta.pid) {
               alert("\u0421\u0432\u043E\u0439 \u0430\u043A\u043A\u0430\u0443\u043D\u0442 \u0443\u0434\u0430\u043B\u0438\u0442\u044C \u043D\u0435\u043B\u044C\u0437\u044F \u2014 \u043E\u0447\u0438\u0441\u0442\u0438 localStorage");
               return;
@@ -27731,19 +28762,78 @@
           }
         });
       });
+      tbody.querySelectorAll("[data-sact]").forEach((b) => {
+        b.addEventListener("click", () => {
+          const act = b.dataset.sact;
+          const login = b.dataset.login;
+          const u = (adminSrvUsers ?? []).find((x) => x.login === login);
+          if (!u) return;
+          if (act === "edit") {
+            const nu = prompt("\u041D\u043E\u0432\u044B\u0439 \u043D\u0438\u043A", u.nick);
+            if (nu === null) return;
+            const nm = parseInt(prompt("MMR", String(u.mmr)) || String(u.mmr)) || u.mmr;
+            void adminSrvPost("/api/admin/adjust", { login, nick: nu.trim() || u.nick, mmr: nm }).then((ok) => {
+              showToast(ok ? "\u0421\u043E\u0445\u0440\u0430\u043D\u0435\u043D\u043E \u043D\u0430 \u0441\u0435\u0440\u0432\u0435\u0440\u0435" : "\u041E\u0448\u0438\u0431\u043A\u0430 \u0441\u0435\u0440\u0432\u0435\u0440\u0430");
+              void adminSrvFetch().then(render);
+            });
+          } else if (act === "give") {
+            const sh = parseInt(prompt("\u0412\u044B\u0434\u0430\u0442\u044C \u043C\u043E\u043D\u0435\u0442\u044B", "500") || "0") || 0;
+            const ge = parseInt(prompt("\u0412\u044B\u0434\u0430\u0442\u044C \u{1F48E}", "50") || "0") || 0;
+            const pk = parseInt(prompt("\u0412\u044B\u0434\u0430\u0442\u044C \u0431\u0443\u0441\u0442\u0435\u0440\u043E\u0432", "0") || "0") || 0;
+            void adminSrvPost("/api/admin/adjust", { login, shards: u.shards + sh, gems: u.gems + ge, freeOpens: pk ? u.freeOpens ?? 0 + pk : void 0 }).then((ok) => {
+              admLog(`\u0441\u0435\u0440\u0432\u0435\u0440: \u0432\u044B\u0434\u0430\u0447\u0430 ${u.nick} \u{1FA99}${sh} \u{1F48E}${ge}`);
+              showToast(ok ? `\u0412\u044B\u0434\u0430\u043D\u043E ${u.nick}: \u{1FA99}${sh} \u{1F48E}${ge}` : "\u041E\u0448\u0438\u0431\u043A\u0430 \u0441\u0435\u0440\u0432\u0435\u0440\u0430");
+              void adminSrvFetch().then(render);
+            });
+          } else if (act === "kick") {
+            void adminSrvPost("/api/admin/kick", { login }).then((ok) => {
+              admLog(`\u0441\u0435\u0440\u0432\u0435\u0440: \u043A\u0438\u043A ${u.nick}`);
+              showToast(ok ? "\u26A1 " + u.nick + " \u043E\u0442\u043A\u043B\u044E\u0447\u0451\u043D \u043E\u0442 \u0441\u0435\u0440\u0432\u0435\u0440\u0430" : "\u041E\u0448\u0438\u0431\u043A\u0430 \u0441\u0435\u0440\u0432\u0435\u0440\u0430");
+              void adminSrvFetch().then(render);
+            });
+          } else if (act === "ban") {
+            void adminSrvPost("/api/admin/adjust", { login, banned: !u.banned }).then((ok) => {
+              admLog(`\u0441\u0435\u0440\u0432\u0435\u0440: ${u.banned ? "\u0440\u0430\u0437\u0431\u0430\u043D" : "\u0431\u0430\u043D"} ${u.nick}`);
+              showToast(ok ? u.banned ? "\u0420\u0430\u0437\u0431\u0430\u043D\u0435\u043D" : "\u0417\u0430\u0431\u0430\u043D\u0435\u043D \u0438 \u043A\u0438\u043A\u043D\u0443\u0442" : "\u041E\u0448\u0438\u0431\u043A\u0430 \u0441\u0435\u0440\u0432\u0435\u0440\u0430");
+              void adminSrvFetch().then(render);
+            });
+          }
+        });
+      });
     };
     search.addEventListener("input", render);
     filter.addEventListener("change", render);
+    host.querySelector("#admUserRefresh")?.addEventListener("click", () => {
+      void adminSrvFetch().then(() => {
+        render();
+        showToast("\u0421\u043F\u0438\u0441\u043E\u043A \u043E\u0431\u043D\u043E\u0432\u043B\u0451\u043D");
+      });
+    });
+    host.querySelector("#admUserGiveAll")?.addEventListener("click", () => {
+      const on = users.filter((u) => u.online);
+      on.forEach((u) => {
+        u.shards += 500;
+        if (u.pid === meta.pid) shardsAdd(500);
+      });
+      saveAdminUsers(users);
+      void Promise.all((adminSrvUsers ?? []).filter((u) => u.status !== "offline").map((u) => adminSrvPost("/api/admin/adjust", { login: u.login, shards: u.shards + 500 })));
+      admLog(`\u043C\u0430\u0441\u0441\u043E\u0432\u0430\u044F \u0432\u044B\u0434\u0430\u0447\u0430 +500 \u{1FA99} (${on.length} \u043B\u043E\u043A\u0430\u043B\u044C\u043D\u043E + \u0441\u0435\u0440\u0432\u0435\u0440\u043D\u044B\u0435 \u043E\u043D\u043B\u0430\u0439\u043D)`);
+      render();
+      showToast("\u{1F381} +500 \u{1FA99} \u0432\u0441\u0435\u043C \u043E\u043D\u043B\u0430\u0439\u043D");
+    });
     host.querySelector("#admUserAdd")?.addEventListener("click", () => {
       const nick = prompt("\u041D\u0438\u043A \u043D\u043E\u0432\u043E\u0433\u043E \u0438\u0433\u0440\u043E\u043A\u0430", "NewPlayer");
       if (!nick) return;
-      users.push({ pid: `ec-` + Math.random().toString(36).slice(2, 7), nick: nick.trim(), avatarFac: "Aurites", frame: "bronze", level: 1, mmr: 1e3, wins: 0, losses: 0, shards: 1200, gems: 100, banned: false, lastSeen: (/* @__PURE__ */ new Date()).toISOString().slice(0, 10) });
+      users.push({ pid: `ec-` + Math.random().toString(36).slice(2, 7), nick: nick.trim(), avatarFac: "Aurites", frame: "bronze", level: 1, mmr: 1e3, wins: 0, losses: 0, shards: 1200, gems: 100, banned: false, lastSeen: (/* @__PURE__ */ new Date()).toISOString().slice(0, 10), online: false, lastSeenTs: Date.now() });
       saveAdminUsers(users);
       render();
       showToast("\u0418\u0433\u0440\u043E\u043A \u0441\u043E\u0437\u0434\u0430\u043D");
     });
     host.querySelector("#admUserExport")?.addEventListener("click", () => {
-      const csv = "pid,nick,mmr,level,wins,losses,shards,gems,banned\n" + users.map((u) => `${u.pid},${u.nick},${u.mmr},${u.level},${u.wins},${u.losses},${u.shards},${u.gems},${u.banned}`).join("\n");
+      const rows = (adminSrvUsers ?? []).map((u) => `${u.login},${u.nick},${u.mmr},${u.level},${u.wins},${u.losses},${u.shards},${u.gems},${u.banned},server,${u.status}`).concat(
+        users.map((u) => `${u.pid},${u.nick},${u.mmr},${u.level},${u.wins},${u.losses},${u.shards},${u.gems},${u.banned},local,${u.online ? "online" : "offline"}`)
+      );
+      const csv = "pid,nick,mmr,level,wins,losses,shards,gems,banned,source,status\n" + rows.join("\n");
       const blob = new Blob([csv], { type: "text/csv" });
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
@@ -27751,6 +28841,11 @@
       a.click();
       URL.revokeObjectURL(a.href);
     });
+    window.clearInterval(adminSrvTimer);
+    adminSrvTimer = window.setInterval(() => {
+      if (adminTab === "users") void adminSrvFetch().then(render);
+    }, 12e3);
+    void adminSrvFetch().then(render);
     render();
   }
   function renderAdminEconomy(host) {
@@ -28152,6 +29247,11 @@
       <div style="font-size:.62rem;color:#8b93ab;margin-top:.4rem">\u041A\u043B\u0438\u0435\u043D\u0442\u0441\u043A\u0438\u0435 \u043D\u0430\u0441\u0442\u0440\u043E\u0439\u043A\u0438 \u0432 ec_settings_v1</div>
     </div>
   </div>
+  <div class="admCard" style="margin-top:.6rem"><h4>\u{1F310} \u0421\u0435\u0440\u0432\u0435\u0440: \u0440\u0435\u0430\u043B\u044C\u043D\u044B\u0435 \u0438\u0433\u0440\u043E\u043A\u0438</h4>
+    <div style="font-size:.72rem;color:#cbb98a">\u0410\u0434\u043C\u0438\u043D-\u043A\u043B\u044E\u0447 meta-\u0441\u0435\u0440\u0432\u0435\u0440\u0430 (env ADMIN_KEY, \u043F\u043E \u0443\u043C\u043E\u043B\u0447\u0430\u043D\u0438\u044E <b style="color:#ffe9b0">echo-admin</b>). \u0421 \u043A\u043B\u044E\u0447\u043E\u043C \u0432\u043A\u043B\u0430\u0434\u043A\u0430 \xAB\u0418\u0433\u0440\u043E\u043A\u0438\xBB \u043F\u043E\u043A\u0430\u0437\u044B\u0432\u0430\u0435\u0442 \u0440\u0435\u0430\u043B\u044C\u043D\u044B\u0445 \u0437\u0430\u0440\u0435\u0433\u0438\u0441\u0442\u0440\u0438\u0440\u043E\u0432\u0430\u043D\u043D\u044B\u0445 \u0438\u0433\u0440\u043E\u043A\u043E\u0432 \u0438 \u0438\u0445 \u043E\u043D\u043B\u0430\u0439\u043D-\u0441\u0442\u0430\u0442\u0443\u0441, \u0430 \u043F\u0440\u0430\u0432\u043A\u0438 \u0443\u0445\u043E\u0434\u044F\u0442 \u043D\u0430 \u0441\u0435\u0440\u0432\u0435\u0440.</div>
+    <div class="admField" style="margin-top:.4rem"><label>\u041A\u043B\u044E\u0447</label><input id="admSrvKey" placeholder="echo-admin" value="${esc(adminKeyGet())}"><button class="btn" id="admSrvKeySave">\u0421\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C</button><button class="btn" id="admSrvPing">\u041F\u0440\u043E\u0432\u0435\u0440\u0438\u0442\u044C</button></div>
+    <div id="admSrvPingLog" style="font-size:.66rem;color:#8b93ab;margin-top:.3rem">\u2014</div>
+  </div>
   <div class="admCard" style="margin-top:.6rem"><h4>\u{1F510} \u0411\u0435\u0437\u043E\u043F\u0430\u0441\u043D\u043E\u0441\u0442\u044C</h4><div style="font-size:.72rem;color:#cbb98a">\u041F\u0430\u0440\u043E\u043B\u044C \u043F\u0440\u043E\u0442\u043E\u0442\u0438\u043F\u0430 admin \u0445\u0440\u0430\u043D\u0438\u0442\u0441\u044F \u0442\u043E\u043B\u044C\u043A\u043E \u0432 \u0431\u0440\u0430\u0443\u0437\u0435\u0440\u0435. \u0414\u043B\u044F \u043F\u0440\u043E\u0434\u0430: <code style="background:rgba(0,0,0,.3);padding:.1rem .3rem;border-radius:4px">POST /api/admin/login \u2192 JWT role:admin</code> + \u043F\u0440\u043E\u0432\u0435\u0440\u043A\u0430 Authorization: Bearer \u043D\u0430 /api/admin/*.</div></div>`;
     host.querySelector("#admSysExport")?.addEventListener("click", () => {
       const data = { meta, shards: shardsGet(), gems: gemsGet(), owned: Array.from(getOwnedMap().entries()), decks: loadCustomDecks() };
@@ -28198,6 +29298,25 @@
       if (!confirm("\u041E\u0447\u0438\u0441\u0442\u0438\u0442\u044C \u0412\u0421\u0401 (localStorage ec_*)?")) return;
       Object.keys(window.localStorage).filter((k) => k.startsWith("ec_")).forEach((k) => window.localStorage.removeItem(k));
       location.reload();
+    });
+    host.querySelector("#admSrvKeySave")?.addEventListener("click", () => {
+      const v = host.querySelector("#admSrvKey").value.trim();
+      try {
+        window.localStorage.setItem("ec_admin_key_v1", v);
+      } catch {
+      }
+      showToast(v ? "\u041A\u043B\u044E\u0447 \u0441\u043E\u0445\u0440\u0430\u043D\u0451\u043D" : "\u041A\u043B\u044E\u0447 \u043E\u0447\u0438\u0449\u0435\u043D");
+    });
+    host.querySelector("#admSrvPing")?.addEventListener("click", async () => {
+      const log = host.querySelector("#admSrvPingLog");
+      const key = host.querySelector("#admSrvKey").value.trim() || adminKeyGet();
+      try {
+        const r = await window.fetch(`${META_API()}/api/admin/users`, { headers: { "x-admin-key": key } });
+        const j = await r.json().catch(() => ({}));
+        log.textContent = r.ok ? `\u2705 \u0441\u0435\u0440\u0432\u0435\u0440 \u043D\u0430 \u0441\u0432\u044F\u0437\u0438: ${(j.users ?? []).length} \u0438\u0433\u0440\u043E\u043A\u043E\u0432` : `\u274C ${r.status}: ${j.error ?? ""}`;
+      } catch {
+        log.textContent = "\u274C \u0441\u0435\u0440\u0432\u0435\u0440 \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u0435\u043D (\u0437\u0430\u043F\u0443\u0441\u0442\u0438 npm run server:meta, \u043F\u043E\u0440\u0442 8081)";
+      }
     });
     host.querySelector("#admSysBgTest")?.addEventListener("click", async () => {
       const log = host.querySelector("#admSysBgLog");
@@ -28361,12 +29480,13 @@
     if (!backdrop) return;
     const tableSkin = String(meta.tableSkin || "classic");
     const tableUrl = [`/cosm/tables/${encodeURIComponent(tableSkin)}`];
-    const imgUrls = [...tableUrl, `/bg/battle/battle_${fac}`, `/bg/battle/battle`, `img/board_arena.png`];
+    const imgUrls = [...tableUrl, `/bg/battle/battle_${fac}`, `/bg/battle/battle`, `img/board_arena.jpg`];
     const vidUrls = [`/bg/animated/battle/battle_${fac}`, `/bg/animated/battle/battle`];
     const loadImg = (idx) => {
       if (idx >= imgUrls.length) {
         if (imgEl) imgEl.classList.remove("show");
         backdrop.classList.remove("hasCustomBg");
+        backdrop.classList.remove("hasTableArt");
         loadVid(0);
         return;
       }
@@ -28376,9 +29496,10 @@
         if (imgEl) {
           imgEl.src = url;
           imgEl.classList.add("show");
-          imgEl.style.opacity = "0.92";
+          imgEl.style.opacity = "1";
         }
         backdrop.classList.add("hasCustomBg");
+        backdrop.classList.toggle("hasTableArt", url.startsWith("/cosm/tables/"));
         if (vidEl) {
           vidEl.classList.remove("show");
           vidEl.style.display = "none";
@@ -28415,10 +29536,16 @@
     audioUnlock();
     musicStart();
     Audio_.uiClick();
+    if (battle.net) {
+      battle.net.close();
+      battle.net = null;
+    }
+    battle.lastWasNet = false;
     applyBattleBg(picked);
     battle.playerFaction = picked;
     battle.playerDeckId = sel("deckPick").value;
     const fromMenu = battle.launchMode === "menu";
+    if (battle.launchMode !== "event") battle.eventId = null;
     if (fromMenu) {
       const ev = sel("enemyFaction").value;
       battle.enemyFaction = ev === "__random" ? FACTION_IDS[Math.floor(Math.random() * FACTION_IDS.length)] : ev;
@@ -28429,6 +29556,7 @@
       battle.bossHp = 0;
       battle.tutLesson = 0;
       battle.campNode = null;
+      battle.eventId = null;
     }
     battle.launchMode = "menu";
     void (async () => {
@@ -28481,6 +29609,55 @@
   btn("btnSkip").addEventListener("click", () => battle.endTurnNow());
   btn("btnAutoBattle").addEventListener("click", () => battle.closeCombatWindow());
   btn("btnSkipCombat").addEventListener("click", () => battle.skipCombat());
+  btn("btnAttackAll").addEventListener("click", () => battle.startMassAttack());
+  window.setInterval(() => {
+    const b = $("battle");
+    if (!b || b.classList.contains("hidden")) return;
+    const W = window.innerWidth, H = window.innerHeight;
+    const known = /* @__PURE__ */ new Set([
+      "backdrop",
+      "tableSurface",
+      "mulligan",
+      "gameover",
+      "cardModal",
+      "graveModal",
+      "journalModal",
+      "replayModal",
+      "factionModal",
+      "levelUpFx",
+      "boosterModal",
+      "cosmPreview",
+      "upgradeModal",
+      "profileModal",
+      "adminModal",
+      "topbar",
+      "toast",
+      "screenFlash",
+      "vignettePulse"
+    ]);
+    for (const elx of Array.from(document.body.children)) {
+      if (known.has(elx.id)) continue;
+      const st = getComputedStyle(elx);
+      if (st.display === "none" || st.visibility === "hidden" || parseFloat(st.opacity) < 0.45) continue;
+      const r = elx.getBoundingClientRect();
+      if (r.width < W * 0.55 || r.height < H * 0.55) continue;
+      const m = st.backgroundColor.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/);
+      if (!m) continue;
+      const a = m[4] === void 0 ? 1 : +m[4];
+      if (a < 0.45) continue;
+      const lum = (0.2125 * +m[1] + 0.7152 * +m[2] + 0.0722 * +m[3]) * a;
+      if (lum > 55) continue;
+      const entry = { t: (/* @__PURE__ */ new Date()).toISOString(), el: elx.id || "." + String(elx.className).split(" ")[0] || "(\u0431\u0435\u0437 id)", z: st.zIndex, lum: Math.round(lum) };
+      console.warn("[ec-v3.17] \u043F\u043E\u0434\u043E\u0437\u0440\u0438\u0442\u0435\u043B\u044C\u043D\u043E\u0435 \u0442\u0451\u043C\u043D\u043E\u0435 \u043F\u0435\u0440\u0435\u043A\u0440\u044B\u0442\u0438\u0435 \u0432 \u0431\u043E\u044E:", entry);
+      try {
+        const arr = JSON.parse(localStorage.getItem("ec_darklog") ?? "[]");
+        arr.push(entry);
+        localStorage.setItem("ec_darklog", JSON.stringify(arr.slice(-12)));
+        if (arr.length === 1) pushLog("\u0414\u0438\u0430\u0433\u043D\u043E\u0441\u0442\u0438\u043A\u0430: \u0432 \u0431\u043E\u044E \u043F\u043E\u044F\u0432\u0438\u043B\u043E\u0441\u044C \u043D\u0435\u0448\u0442\u0430\u0442\u043D\u043E\u0435 \u0442\u0451\u043C\u043D\u043E\u0435 \u043F\u0435\u0440\u0435\u043A\u0440\u044B\u0442\u0438\u0435 \u2014 \u0437\u0430\u043F\u0438\u0441\u0430\u043D\u043E \u0432 \u0436\u0443\u0440\u043D\u0430\u043B (F12/Console)", "sys");
+      } catch {
+      }
+    }
+  }, 1e3);
   btn("btnBoosters").addEventListener("click", () => openBoosterPanel(btn("btnBoosters")));
   btn("btnProfile").addEventListener("click", () => openProfile());
   btn("btnProfileClose").addEventListener("click", () => navigateApp("back"));
@@ -28593,10 +29770,13 @@
     { id: "mythic", ru: "\u041C\u0438\u0444\u0438\u0447\u0435\u0441\u043A\u0438\u0439 \xB7 \u0432\u0441\u0435 \u0431\u043E\u0441\u0441\u044B", req: () => FACTION_IDS.every((f) => meta.campaign[f]) }
   ];
   var PREMIUM_AVATARS = {
-    arch: { ru: "\u0410\u0440\u0445\u043E\u043D\u0442", glyph: "\u2727", req: () => (meta.avatarsOwned ?? []).includes("arch") },
-    lich: { ru: "\u041B\u0438\u0447", glyph: "\u{1F480}", req: () => !!meta.ach.packs10 },
-    lunar: { ru: "\u041B\u0443\u043D\u043D\u044B\u0439 \u0410\u0440\u0445\u043E\u043D\u0442", glyph: "\u263E", req: () => (meta.avatarsOwned ?? []).includes("lunar") }
+    arch: { ru: "\u0410\u0440\u0445\u043E\u043D\u0442", glyph: "\u2727", req: () => (meta.avatarsOwned ?? []).includes("arch"), bonus: { xp: 3 } },
+    lich: { ru: "\u041B\u0438\u0447", glyph: "\u{1F480}", req: () => !!meta.ach.packs10, bonus: { sh: 3 } },
+    lunar: { ru: "\u041B\u0443\u043D\u043D\u044B\u0439 \u0410\u0440\u0445\u043E\u043D\u0442", glyph: "\u263E", req: () => (meta.avatarsOwned ?? []).includes("lunar"), bonus: { bp: 4 } },
     // пропуск 40 ур. (премиум)
+    dragon: { ru: "\u0414\u0440\u0430\u043A\u043E\u043D \u0426\u0438\u0442\u0430\u0434\u0435\u043B\u0438", glyph: "\u{1F409}", req: () => (meta.avatarsOwned ?? []).includes("dragon"), bonus: { xp: 5 } },
+    phoenix: { ru: "\u0424\u0435\u043D\u0438\u043A\u0441", glyph: "\u{1F525}", req: () => (meta.avatarsOwned ?? []).includes("phoenix"), bonus: { sh: 4 } },
+    runekeep: { ru: "\u0425\u0440\u0430\u043D\u0438\u0442\u0435\u043B\u044C \u0420\u0443\u043D", glyph: "\u2748", req: () => (meta.avatarsOwned ?? []).includes("runekeep"), bonus: { bp: 5 } }
   };
   function avaGlyph() {
     const pa = PREMIUM_AVATARS[meta.avatarFac];
@@ -28779,7 +29959,7 @@
     const head = `
     <section class="profileHero">
       <div class="prfHead">
-        <div class="fava avaBig frame-${meta.frame || "bronze"}">${avaGlyph()}${PREMIUM_AVATARS[meta.avatarFac] ? "" : `<img src="/heroes/${encodeURIComponent(meta.avatarFac)}" alt="" onerror="this.remove()">`}</div>
+        <div class="fava avaBig frame-${meta.frame || "bronze"}">${avaGlyph()}${`<img src="/heroes/${encodeURIComponent(meta.avatarFac)}" alt="" onerror="this.remove()">`}</div>
         <div class="profileIdentity">
           <div class="profileNameRow">
             <input id="nickInput" maxlength="16" value="${esc(meta.nick ?? "\u0413\u043E\u0441\u0442\u044C")}" aria-label="\u041D\u0438\u043A\u043D\u0435\u0439\u043C" title="3\u201316 \u0441\u0438\u043C\u0432\u043E\u043B\u043E\u0432; \u0443\u043D\u0438\u043A\u0430\u043B\u044C\u043D\u043E\u0441\u0442\u044C \u043F\u0440\u043E\u0432\u0435\u0440\u044F\u0435\u0442\u0441\u044F \u043D\u0430 \u0441\u0435\u0440\u0432\u0435\u0440\u0435">
@@ -28817,26 +29997,17 @@
       const stuckC = /* @__PURE__ */ new Map();
       for (const m of t) for (const id of m.stuck) stuckC.set(id, (stuckC.get(id) ?? 0) + 1);
       const topStuck = [...stuckC.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([id, n]) => `${db.get(id)?.name ?? id} \xD7${n}`).join(", ") || "\u2014";
-      const qs = meta.quests.map((q) => {
-        const done = q.prog >= q.goal;
-        return `<div class="setRow profileQuestRow" style="margin:0">
-        <div class="profileQuestText">${esc(QUEST_RU[q.id]?.(q) ?? q.id)} \u2014 ${q.prog}/${q.goal}${done ? '<small class="questInlineReset questReset" data-quest-reset="daily" data-reset-prefix="\u0421\u0431\u0440\u043E\u0441 \u0447\u0435\u0440\u0435\u0437">\u2014</small>' : ""}</div>
-        <button class="btn qClaim" data-q="${esc(q.id)}" ${done && !q.claimed ? "" : "disabled"}>
-          ${q.claimed ? "\u041F\u043E\u043B\u0443\u0447\u0435\u043D\u043E" : `\u{1FA99}${DAILY_REWARD[q.id] ?? 0}`}</button></div>`;
-      }).join("");
-      const wqs = (meta.wquests ?? []).map((q) => {
-        const done = q.prog >= q.goal;
-        return `<div class="setRow profileQuestRow" style="margin:0">
-        <div class="profileQuestText profileWeeklyQuestText">${esc(WQUEST_RU[q.id] ?? q.id)} \u2014 ${q.prog}/${q.goal}${done ? '<small class="questInlineReset questReset" data-quest-reset="weekly" data-reset-prefix="\u0421\u0431\u0440\u043E\u0441 \u0447\u0435\u0440\u0435\u0437">\u2014</small>' : ""}</div>
-        <button class="btn wqClaim" data-q="${esc(q.id)}" ${done && !q.claimed ? "" : "disabled"}>
-          ${q.claimed ? "\u041F\u043E\u043B\u0443\u0447\u0435\u043D\u043E" : `\u{1FA99}${WEEK_REWARD[q.id] ?? 0} +250 BP`}</button></div>`;
-      }).join("");
       const achs = ACH_DEFS.map((a) => {
         const [p, g] = a.prog();
         return `<div class="jl ${meta.ach[a.id] ? "you" : ""}" title="\u041D\u0430\u0433\u0440\u0430\u0434\u0430: ${a.rewardRu}">
       <img class="achIco" src="img/ico_ach_${a.ico}.png" alt="" onerror="this.remove()">${meta.ach[a.id] ? "\u{1F3C6}" : "\u{1F512}"} ${a.ru} \u2014 <b>${p}/${g}</b></div>`;
       }).join("");
-      const avas = FACTION_IDS.map((f) => `<button class="btn avaBtn${meta.avatarFac === f ? " sel" : ""}" data-f="${f}" title="${FACTION_RU[f]}">${FACTION_SIGIL[f]}</button>`).join("") + Object.entries(PREMIUM_AVATARS).map(([id, a]) => `<button class="btn avaBtn${meta.avatarFac === id ? " sel" : ""}" data-f="${id}" ${a.req() ? "" : "disabled"} title="${a.ru}">${a.req() ? a.glyph : "\u{1F512}"}</button>`).join("");
+      const avaCircle = (id, title, glyph, locked) => `<button type="button" class="avaCircle${meta.avatarFac === id ? " sel" : ""}${locked ? " locked" : ""}" data-f="${id}" ${locked ? "disabled" : ""}
+        title="${esc(title)}${locked ? " \xB7 \u{1F512} \u0437\u0430\u043A\u0440\u044B\u0442" : ""}" aria-label="\u0410\u0432\u0430\u0442\u0430\u0440: ${esc(title)}" aria-pressed="${meta.avatarFac === id}">
+        <span class="avaCircleGlyph" aria-hidden="true">${locked ? "\u{1F512}" : glyph}</span>
+        <img src="/heroes/${encodeURIComponent(id)}" alt="" loading="lazy" onload="this.parentElement.classList.add('hasImg')" onerror="this.remove()">
+      </button>`;
+      const avas = FACTION_IDS.map((f) => avaCircle(f, FACTION_RU[f], FACTION_SIGIL[f], false)).join("") + Object.entries(PREMIUM_AVATARS).map(([id, a]) => avaCircle(id, a.ru, a.glyph, !a.req())).join("");
       const frames = FRAME_DEFS.map((fr) => `<button class="btn frameBtn${meta.frame === fr.id ? " sel" : ""}" data-fr="${fr.id}" title="${fr.ru}">${fr.req() ? "\u25C6" : "\u{1F512}"} ${fr.ru}</button>`).join("");
       bodyHtml = `
       <div class="profileOverviewGrid">
@@ -28853,12 +30024,19 @@
         </section>
         <section class="profilePanel profileCustomizationPanel">
           <h3 class="profilePanelTitle">\u041F\u0435\u0440\u0441\u043E\u043D\u0430\u043B\u0438\u0437\u0430\u0446\u0438\u044F</h3>
-          <h4 class="shopH">\u0410\u0432\u0430\u0442\u0430\u0440 \xB7 5 \u0444\u0440\u0430\u043A\u0446\u0438\u0439 + \u043F\u0440\u0435\u043C\u0438\u0443\u043C</h4><div class="ptabs profileChoiceGrid">${avas}</div>
+          <h4 class="shopH">\u0410\u0432\u0430\u0442\u0430\u0440 \xB7 5 \u0444\u0440\u0430\u043A\u0446\u0438\u0439 + \u043F\u0440\u0435\u043C\u0438\u0443\u043C</h4><div class="avaCircleRow">${avas}</div>
           <h4 class="shopH">\u0420\u0430\u043C\u043A\u0430 \xB7 \u043D\u0430\u0433\u0440\u0430\u0434\u044B \u0434\u043E\u0441\u0442\u0438\u0436\u0435\u043D\u0438\u0439</h4><div class="ptabs profileChoiceGrid">${frames}</div>
         </section>
       </div>
-      <section class="profilePanel profileTasksPanel"><h3 class="profilePanelTitle">\u0417\u0430\u0434\u0430\u043D\u0438\u044F \u0434\u043D\u044F</h3>${qs}</section>
-      <section class="profilePanel profileTasksPanel"><h3 class="profilePanelTitle">\u0417\u0430\u0434\u0430\u043D\u0438\u044F \u043D\u0435\u0434\u0435\u043B\u0438</h3>${wqs}</section>
+      <section class="questDashboard profileQuestsCompact" aria-label="\u0417\u0430\u0434\u0430\u043D\u0438\u044F">
+        <header class="questDashboardHeader"><h2>\u0417\u0430\u0434\u0430\u043D\u0438\u044F</h2></header>
+        <div class="questDashboardGroups">
+          <section class="questGroup"><header class="questGroupHeader"><h3>\u0415\u0436\u0435\u0434\u043D\u0435\u0432\u043D\u044B\u0435</h3><span class="questReset" data-quest-reset="daily" data-reset-prefix="\u0421\u0431\u0440\u043E\u0441 \u0447\u0435\u0440\u0435\u0437">\u2014</span></header>
+            <div class="questList" role="list">${meta.quests.map((q) => renderQuestTask(q, "daily")).join("")}</div></section>
+          <section class="questGroup"><header class="questGroupHeader"><h3>\u0415\u0436\u0435\u043D\u0435\u0434\u0435\u043B\u044C\u043D\u044B\u0435</h3><span class="questReset" data-quest-reset="weekly" data-reset-prefix="\u0421\u0431\u0440\u043E\u0441 \u0447\u0435\u0440\u0435\u0437">\u2014</span></header>
+            <div class="questList" role="list">${(meta.wquests ?? []).map((q) => renderQuestTask(q, "weekly")).join("")}</div></section>
+        </div>
+      </section>
       <section class="profilePanel profileTasksPanel"><h3 class="profilePanelTitle">\u0414\u043E\u0441\u0442\u0438\u0436\u0435\u043D\u0438\u044F</h3>${achs}</section>`;
     }
     if (profTab === "ranked") {
@@ -28908,58 +30086,44 @@
     `;
     }
     if (profTab === "cosm") {
-      const sleeves = [
-        { id: "classic", name: "\u042D\u0445\u043E-\u0426\u0438\u0442\u0430\u0434\u0435\u043B\u044C", owned: true },
-        { id: "arena", name: "\u0410\u0440\u0435\u043D\u0430", owned: true },
-        { id: "sky", name: "\u041D\u0435\u0431\u0435\u0441\u043D\u044B\u0435 \u043E\u0441\u0442\u0440\u043E\u0432\u0430", owned: true },
-        { id: "arena2", name: "\u0410\u0440\u0435\u043D\u0430 \u0412\u0438\u0442\u0430", owned: true },
-        { id: "stained", name: "\u0412\u0438\u0442\u0440\u0430\u0436", owned: true },
-        { id: "forest", name: "\u041B\u0435\u0441\u043D\u043E\u0439 \u0440\u0430\u0437\u0432\u0435\u0434\u0447\u0438\u043A", owned: true },
-        { id: "mage", name: "\u0421\u0438\u043D\u0438\u0439 \u043C\u0430\u0433", owned: true },
-        { id: "locked1", name: "\u041A\u043E\u0441\u043C\u0438\u0447\u0435\u0441\u043A\u043E\u0435 \u043C\u043E\u0440\u0435", owned: false },
-        { id: "locked2", name: "\u0413\u043E\u0440\u043D\u044B\u0439 \u0434\u0440\u0430\u043A\u043E\u043D", owned: false },
-        { id: "lotus", name: "\u0427\u0451\u0440\u043D\u044B\u0439 \u043B\u043E\u0442\u043E\u0441", owned: false },
-        { id: "locked3", name: "\u0411\u043E\u043B\u043E\u0442\u043D\u044B\u0439 \u0440\u0438\u0442\u0443\u0430\u043B", owned: false },
-        { id: "locked4", name: "\u041C\u043E\u0440\u043E\u0437\u043D\u044B\u0439 \u0432\u0435\u0442\u0435\u0440", owned: false }
-      ];
-      const grid = sleeves.map((s) => `
-      <div class="sleeveCard ${meta.backEq === s.id ? "sel" : ""}" data-sleeve="${s.id}" title="${s.name}">
-        <img src="/art/${s.id === "lotus" ? "Neutral/lotus" : "Neutral/neu_01"}.png" alt="" loading="lazy" onerror="this.style.display='none'">
-        ${!s.owned ? '<div class="lock">\u{1F512}</div>' : ""}
-        <div class="sleeveName">${s.name}</div>
-      </div>
-    `).join("");
+      const eqBack = meta.backEq || "classic";
+      const backTile = (id, b) => {
+        const own = (meta.backsOwned ?? []).includes(id) || id === "classic";
+        const how = own ? eqBack === id ? "\u0412\u044B\u0431\u0440\u0430\u043D\u0430" : "\u0412\u044B\u0431\u0440\u0430\u0442\u044C" : b.bpOnly ? "\u041F\u0440\u043E\u043F\u0443\u0441\u043A" : `\u{1FA99}${b.price}`;
+        return `<button type="button" class="cosmBackTile${eqBack === id ? " sel" : ""}${own ? "" : " locked"}" data-sleeve="${id}" ${own ? "" : 'data-locked="1"'} title="${esc(b.ru)}">
+        <span class="cosmBackCard cardback back-${id}">${cosmImg("backs", id, "cbArt")}${own ? "" : '<span class="lock">\u{1F512}</span>'}</span>
+        <span class="cosmBackName">${esc(b.ru)}${bonusTag(b.bonus)}</span><span class="cosmBackState">${how}</span></button>`;
+      };
+      const grid = Object.entries(SHOP_BACKS).map(([id, b]) => backTile(id, b)).join("");
+      const eqInfo = SHOP_BACKS[eqBack] ?? SHOP_BACKS.classic;
+      const skinChip = (kind, id, ru, own, on, b) => `<button type="button" class="cosmSkinChip cosmPrev${on ? " sel" : ""}${own ? "" : " locked"}" data-kind="${kind}" data-id="${id}" title="${own ? "\u0412\u044B\u0431\u0440\u0430\u0442\u044C" : "\u041F\u0440\u0435\u0434\u043F\u0440\u043E\u0441\u043C\u043E\u0442\u0440"}">${own ? "" : "\u{1F512} "}${esc(ru)}${bonusTag(b)}</button>`;
+      const tables = Object.entries(TABLE_SKINS).map(([id, t]) => skinChip("table", id, t.ru, id === "classic" || (meta.tablesOwned ?? []).includes(id), (meta.tableSkin ?? "classic") === id, t.bonus)).join("");
+      const runes = Object.entries(RUNE_SKINS).map(([id, t]) => skinChip("rune", id, t.ru, id === "classic" || (meta.runesOwned ?? []).includes(id), (meta.runeSkin ?? "classic") === id, t.bonus)).join("");
       const borderlessProgress = Math.min(BORDERLESS_EVENT_WINS, meta.borderlessEventWins ?? 0);
       const borderlessPanel = `<section class="borderlessProfilePanel">
       <div class="borderlessProfileHead"><div><span class="profileEyebrow">\u0422\u0415 \u0416\u0415 \u041A\u0410\u0420\u0422\u042B \xB7 \u0422\u041E\u041B\u042C\u041A\u041E \u0411\u0415\u0417 \u0420\u0410\u041C\u041E\u041A</span>
         <h3>Borderless <b>${ownedBorderless}<i> / ${ALL_CARDS.length}</i></b></h3></div>
         <span class="borderlessGem" aria-hidden="true">\u25C7</span></div>
       <div class="profileMeter borderlessMeter"><i style="width:${ownedBorderless / ALL_CARDS.length * 100}%"></i></div>
-      <p>\u0415\u0449\u0451 ${ALL_CARDS.length} \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u043E\u043D\u043D\u044B\u0445 \u0432\u0430\u0440\u0438\u0430\u043D\u0442\u043E\u0432: \u0442\u0435 \u0436\u0435 \u043D\u0430\u0437\u0432\u0430\u043D\u0438\u044F \u0438 \u0430\u0440\u0442, \u043D\u043E \u0431\u0435\u0437 \u0441\u0442\u0430\u043D\u0434\u0430\u0440\u0442\u043D\u043E\u0439 \u0440\u0430\u043C\u043A\u0438. \u041F\u0440\u0430\u0432\u0438\u043B\u0430 \u0438 \u0445\u0430\u0440\u0430\u043A\u0442\u0435\u0440\u0438\u0441\u0442\u0438\u043A\u0438 \u043D\u0435 \u043C\u0435\u043D\u044F\u044E\u0442\u0441\u044F. \u041F\u043E\u043B\u0443\u0447\u0435\u043D\u0438\u0435: \u0441\u043E\u0431\u044B\u0442\u0438\u0435 \u0438\u043B\u0438 \u0448\u0430\u043D\u0441 <b>0,1% \u043D\u0430 \u0431\u0443\u0441\u0442\u0435\u0440</b>.</p>
+      <p>\u0422\u0435 \u0436\u0435 \u043D\u0430\u0437\u0432\u0430\u043D\u0438\u044F \u0438 \u0430\u0440\u0442, \u043D\u043E \u0431\u0435\u0437 \u0441\u0442\u0430\u043D\u0434\u0430\u0440\u0442\u043D\u043E\u0439 \u0440\u0430\u043C\u043A\u0438. \u041F\u0440\u0430\u0432\u0438\u043B\u0430 \u043D\u0435 \u043C\u0435\u043D\u044F\u044E\u0442\u0441\u044F. \u041F\u043E\u043B\u0443\u0447\u0435\u043D\u0438\u0435: \u0441\u043E\u0431\u044B\u0442\u0438\u0435 \u0438\u043B\u0438 \u0448\u0430\u043D\u0441 <b>0,1% \u043D\u0430 \u0431\u0443\u0441\u0442\u0435\u0440</b>.</p>
       <div class="borderlessEventMini">\u0421\u043E\u0431\u044B\u0442\u0438\u0435 \xAB\u0413\u0430\u043B\u0435\u0440\u0435\u044F \u0431\u0435\u0437 \u0433\u0440\u0430\u043D\u0438\u0446\xBB \xB7 \u0440\u0435\u0439\u0442\u0438\u043D\u0433\u043E\u0432\u044B\u0435 \u043F\u043E\u0431\u0435\u0434\u044B: <b>${borderlessProgress}/${BORDERLESS_EVENT_WINS}</b></div>
       <button type="button" class="btn borderlessBrowse" id="btnProfileBorderlessCollection">\u041E\u0442\u043A\u0440\u044B\u0442\u044C Borderless \u0432 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u0438 \u2192</button>
     </section>`;
       bodyHtml = borderlessPanel + `
-      <div style="display:flex;gap:1rem;align-items:flex-start;flex-wrap:wrap">
-        <div class="sleeveGrid">${grid}</div>
-        <div class="sleevePreview">
-          <img src="/art/Neutral/neu_01.png" alt="Black Lotus" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:.92" onerror="this.style.display='none'">
-          <div style="position:absolute;inset:0;background:radial-gradient(60% 50% at 50% 50%,rgba(120,40,255,.18),transparent 70%)"></div>
-          <div style="position:relative;z-index:1;text-align:center;color:#ffe9b0;font-family:Philosopher,serif">
-            <div style="font-size:2.6rem">\u{1F338}</div>
-            <div style="font-size:.78rem">Black Lotus</div>
-            <div style="font-size:.62rem;color:#cbb98a">\u041F\u0440\u0435\u043C\u0438\u0443\u043C \u0441\u0442\u0438\u043B\u044C \u2014 \u0438\u0437 \u043F\u0440\u043E\u043F\u0443\u0441\u043A\u0430</div>
-          </div>
-          <div style="position:absolute;right:8px;bottom:8px;display:flex;gap:6px;z-index:1">
-            <span style="width:22px;height:22px;border-radius:50%;background:radial-gradient(circle at 30% 30%,#3fd6c8,#1a5a56);border:1px solid #1a5a56"></span>
-            <span style="width:22px;height:22px;border-radius:50%;background:radial-gradient(circle at 30% 30%,#ffd87a,#8a5a12);border:1px solid #8a5a12"></span>
-            <span style="width:22px;height:22px;border-radius:50%;background:radial-gradient(circle at 30% 30%,#ff7a18,#a33a0a);border:1px solid #a33a0a"></span>
-          </div>
+      <div class="cosmProfileLayout">
+        <div class="cosmProfileMain">
+          <h4 class="cosmProfileH">\u0420\u0443\u0431\u0430\u0448\u043A\u0438 \u043A\u0430\u0440\u0442</h4>
+          <div class="cosmBackGrid">${grid}</div>
+          <h4 class="cosmProfileH">\u0421\u0442\u043E\u043B</h4><div class="cosmSkinRow">${tables}</div>
+          <h4 class="cosmProfileH">\u0410\u043D\u0438\u043C\u0430\u0446\u0438\u044F \u0440\u0443\u043D</h4><div class="cosmSkinRow">${runes}</div>
         </div>
-      </div>
-      <div class="jl" style="opacity:.65">\u0421\u0442\u0438\u043B\u0438 \u043A\u0430\u0440\u0442 \u2014 \u0440\u0443\u0431\u0430\u0448\u043A\u0438 \u0438 \u0441\u043A\u0438\u043D\u044B. \u{1F512} \u043E\u0442\u043A\u0440\u044B\u0432\u0430\u044E\u0442\u0441\u044F \u0432 \u043C\u0430\u0433\u0430\u0437\u0438\u043D\u0435 \u0438 \u043F\u0440\u043E\u043F\u0443\u0441\u043A\u0435. \u041A\u043B\u0438\u043A \u043F\u043E \u0441\u0442\u0438\u043B\u044E \u2014 \u043F\u0440\u0435\u0434\u043F\u0440\u043E\u0441\u043C\u043E\u0442\u0440 (\u043A\u0430\u043A \u043D\u0430 \u0441\u043A\u0440\u0438\u043D\u0435 7).</div>
-      <div style="display:flex;justify-content:flex-end;margin-top:.6rem"><button class="btn" id="btnSleeveDefault" style="background:linear-gradient(180deg,#ff9c2a,#e05a0a);color:#fff;border:none;border-radius:999px;padding:.45rem 1.1rem">Set Default</button></div>
-    `;
+        <aside class="cosmProfilePreview" aria-label="\u0422\u0435\u043A\u0443\u0449\u0430\u044F \u0440\u0443\u0431\u0430\u0448\u043A\u0430">
+          <div class="cosmBackCard big cardback back-${eqBack}">${cosmImg("backs", eqBack, "cbArt")}</div>
+          <div class="cosmPrevName">${esc(eqInfo.ru)}</div>
+          <div class="cosmPrevSub">\u0420\u0443\u0431\u0430\u0448\u043A\u0430 \u0432 \u0431\u043E\u044E \u0438 \u043F\u0440\u0438 \u043E\u0442\u043A\u0440\u044B\u0442\u0438\u0438 \u0431\u0443\u0441\u0442\u0435\u0440\u043E\u0432</div>
+          <button class="btn" id="btnSleeveDefault">\u0421\u0431\u0440\u043E\u0441\u0438\u0442\u044C \u043D\u0430 \u043A\u043B\u0430\u0441\u0441\u0438\u043A\u0443</button>
+        </aside>
+      </div>`;
     }
     if (profTab === "facs") {
       const tot = Math.max(1, FACTION_IDS.reduce((a, f) => a + (meta.facW[f] ?? 0), 0));
@@ -29022,7 +30186,11 @@
       }
       return;
     }
-    const sc = target?.closest?.(".sleeveCard");
+    const sc = target?.closest?.(".sleeveCard, .cosmBackTile");
+    if (sc?.dataset.locked) {
+      showToast("\u{1F512} \u0420\u0443\u0431\u0430\u0448\u043A\u0430 \u043E\u0442\u043A\u0440\u044B\u0432\u0430\u0435\u0442\u0441\u044F \u0432 \u043C\u0430\u0433\u0430\u0437\u0438\u043D\u0435 \u0438\u043B\u0438 \u0431\u043E\u0435\u0432\u043E\u043C \u043F\u0440\u043E\u043F\u0443\u0441\u043A\u0435");
+      return;
+    }
     if (sc?.dataset.sleeve && !sc.querySelector(".lock")) {
       Audio_.uiClick();
       meta.backEq = sc.dataset.sleeve;
@@ -29034,7 +30202,12 @@
     }
     if (ev.target?.id === "btnSleeveDefault") {
       Audio_.uiClick();
-      showToast("\u0421\u0442\u0438\u043B\u044C \u043F\u043E \u0443\u043C\u043E\u043B\u0447\u0430\u043D\u0438\u044E \u0441\u043E\u0445\u0440\u0430\u043D\u0451\u043D");
+      meta.backEq = "classic";
+      metaSave();
+      document.body.dataset.back = "classic";
+      void applyCosmArt();
+      openProfile();
+      showToast("\u0420\u0443\u0431\u0430\u0448\u043A\u0430 \u0441\u0431\u0440\u043E\u0448\u0435\u043D\u0430 \u043D\u0430 \u043A\u043B\u0430\u0441\u0441\u0438\u043A\u0443");
     }
   });
   function openReplay(ts) {
@@ -29083,21 +30256,63 @@
   });
   var SHOP_BACKS = {
     classic: { ru: "\u041A\u043B\u0430\u0441\u0441\u0438\u043A\u0430 (\u0437\u043E\u043B\u043E\u0442\u043E)", price: 0 },
-    runes: { ru: "\u0420\u0443\u043D\u044B Citadeli", price: 300 },
-    ember: { ru: "\u0423\u0433\u043B\u0438 \u041F\u0438\u0440\u043E\u043C\u0430\u043D\u0442\u043E\u0432", price: 500 },
-    abyss: { ru: "\u0411\u0435\u0437\u0434\u043D\u0430", price: 0, bpOnly: true },
-    verdant: { ru: "\u0412\u0435\u0440\u0434\u0430\u043D\u0442", price: 0, bpOnly: true }
+    runes: { ru: "\u0420\u0443\u043D\u044B \u0426\u0438\u0442\u0430\u0434\u0435\u043B\u0438", price: ECONOMY.backs.runes },
+    ember: { ru: "\u0423\u0433\u043B\u0438 \u041F\u0438\u0440\u043E\u043C\u0430\u043D\u0442\u043E\u0432", price: ECONOMY.backs.ember, bonus: { sh: 2 } },
+    abyss: { ru: "\u0411\u0435\u0437\u0434\u043D\u0430", price: 0, bpOnly: true, bonus: { bp: 3 } },
+    verdant: { ru: "\u0412\u0435\u0440\u0434\u0430\u043D\u0442", price: 0, bpOnly: true, bonus: { xp: 2 } },
+    storm: { ru: "\u0428\u0442\u043E\u0440\u043C\u043E\u0432\u043E\u0439 \u0443\u0437\u043E\u0440", price: 1200, bonus: { sh: 2 } },
+    frost: { ru: "\u041B\u0435\u0434\u044F\u043D\u0430\u044F \u0432\u044F\u0437\u044C", price: 1500, bonus: { xp: 2 } },
+    gilded: { ru: "\u0417\u043E\u043B\u043E\u0447\u0451\u043D\u044B\u0439 \u043E\u0440\u043D\u0430\u043C\u0435\u043D\u0442", price: 800, bonus: { sh: 3 } },
+    shadow: { ru: "\u041F\u043E\u043A\u0440\u043E\u0432 \u0442\u0435\u043D\u0435\u0439", price: 1e3, bonus: { xp: 3 } }
   };
   var TABLE_SKINS = {
     classic: { ru: "\u041A\u043B\u0430\u0441\u0441\u0438\u0447\u0435\u0441\u043A\u0438\u0439 \u0441\u0442\u043E\u043B", price: 0, cur: "sh" },
-    terra: { ru: "\u0421\u0442\u043E\u043B \u0422\u0435\u0440\u0440\u0430\u043C\u043E\u0440\u0444\u043E\u0432 (\u043C\u043E\u0445 \u0438 \u043A\u0430\u043C\u0435\u043D\u044C)", price: 600, cur: "sh" },
-    necro: { ru: "\u0421\u0442\u043E\u043B \u041D\u0435\u043A\u0440\u0443\u0441\u043E\u0432 (\u043A\u043E\u0441\u0442\u044C \u0438 \u0442\u0435\u043D\u044C)", price: 200, cur: "gem" }
+    terra: { ru: "\u0421\u0442\u043E\u043B \u0422\u0435\u0440\u0440\u0430\u043C\u043E\u0440\u0444\u043E\u0432 (\u043C\u043E\u0445 \u0438 \u043A\u0430\u043C\u0435\u043D\u044C)", ...ECONOMY.tables.terra, bonus: { sh: 2 } },
+    necro: { ru: "\u0421\u0442\u043E\u043B \u041D\u0435\u043A\u0440\u0443\u0441\u043E\u0432 (\u043A\u043E\u0441\u0442\u044C \u0438 \u0442\u0435\u043D\u044C)", ...ECONOMY.tables.necro, bonus: { bp: 3 } },
+    tide: { ru: "\u041F\u0440\u0438\u043B\u0438\u0432\u043D\u044B\u0439 \u0441\u0442\u043E\u043B", price: 900, cur: "gem", bonus: { bp: 4 } },
+    ash: { ru: "\u041F\u0435\u043F\u0435\u043B\u0438\u0449\u0435", price: 1800, cur: "sh", bonus: { sh: 2 } },
+    grove: { ru: "\u0421\u0442\u043E\u043B \u0420\u043E\u0449\u0438", price: 2e3, cur: "sh", bonus: { xp: 2 } },
+    aurum: { ru: "\u0410\u0443\u0440\u0443\u043C-\u043F\u0440\u0435\u0441\u0442\u0438\u0436", price: 1400, cur: "gem", bonus: { xp: 3, sh: 2 } }
   };
   var RUNE_SKINS = {
     classic: { ru: "\u041A\u043B\u0430\u0441\u0441\u0438\u0447\u0435\u0441\u043A\u0438\u0435 \u0440\u0443\u043D\u044B", price: 0, cur: "sh" },
-    flame: { ru: "\u0420\u0443\u043D\u044B \xAB\u041F\u043B\u0430\u043C\u044F\xBB (\u0430\u043D\u0438\u043C\u0430\u0446\u0438\u044F)", price: 150, cur: "gem" }
+    flame: { ru: "\u0420\u0443\u043D\u044B \xAB\u041F\u043B\u0430\u043C\u044F\xBB (\u0430\u043D\u0438\u043C\u0430\u0446\u0438\u044F)", ...ECONOMY.runes.flame, bonus: { xp: 2 } },
+    storm: { ru: "\u0420\u0443\u043D\u044B \xAB\u0428\u0442\u043E\u0440\u043C\xBB", price: 900, cur: "sh", bonus: { xp: 2 } },
+    frost: { ru: "\u0420\u0443\u043D\u044B \xAB\u041B\u0451\u0434\xBB", price: 900, cur: "sh", bonus: { bp: 3 } },
+    nature: { ru: "\u0420\u0443\u043D\u044B \xAB\u041F\u0440\u0438\u0440\u043E\u0434\u0430\xBB", price: 600, cur: "gem", bonus: { sh: 2 } },
+    void: { ru: "\u0420\u0443\u043D\u044B \xAB\u0411\u0435\u0437\u0434\u043D\u0430\xBB", price: 900, cur: "gem", bonus: { xp: 4 } }
   };
-  var BUNDLES = FACTION_IDS.map((f) => ({ fac: f, price: 400 }));
+  var BUNDLES = FACTION_IDS.map((f) => ({ fac: f, price: ECONOMY.factionBundle }));
+  var SHOP_SETS = [
+    { id: "set-citadel", ru: "\u041D\u0430\u0431\u043E\u0440 \xAB\u0426\u0438\u0442\u0430\u0434\u0435\u043B\u044C\xBB", sub: "8 \u0431\u0443\u0441\u0442\u0435\u0440\u043E\u0432 + \u{1FA99}500 + \u0440\u0443\u0431\u0430\u0448\u043A\u0430 \xAB\u0428\u0442\u043E\u0440\u043C\u043E\u0432\u043E\u0439 \u0443\u0437\u043E\u0440\xBB", price: 1500, cur: "gem", packs: 8, coins: 500, back: "storm" },
+    { id: "set-vanguard", ru: "\u041D\u0430\u0431\u043E\u0440 \xAB\u0410\u0432\u0430\u043D\u0433\u0430\u0440\u0434\xBB", sub: "6 \u0431\u0443\u0441\u0442\u0435\u0440\u043E\u0432 + \u0441\u0442\u043E\u043B \xAB\u041F\u0435\u043F\u0435\u043B\u0438\u0449\u0435\xBB", price: 2500, cur: "sh", packs: 6, coins: 0, table: "ash" },
+    { id: "set-mythic", ru: "\u041C\u0438\u0444\u0438\u0447\u0435\u0441\u043A\u0438\u0439 \u043D\u0430\u0431\u043E\u0440", sub: "3 \u043C\u0438\u0444\u0438\u0447\u0435\u0441\u043A\u0438\u0445 \u0431\u0443\u0441\u0442\u0435\u0440\u0430 + \u0440\u0443\u043D\u044B \xAB\u0411\u0435\u0437\u0434\u043D\u0430\xBB", price: 2800, cur: "gem", packs: 3, coins: 0, rune: "void" },
+    { id: "set-heroes", ru: "\u041D\u0430\u0431\u043E\u0440 \u0413\u0435\u0440\u043E\u0435\u0432", sub: "6 \u0431\u0443\u0441\u0442\u0435\u0440\u043E\u0432 + \u{1FA99}300 + \u0430\u0432\u0430\u0442\u0430\u0440 \xAB\u0424\u0435\u043D\u0438\u043A\u0441\xBB \u{1F525}", price: 3200, cur: "sh", packs: 6, coins: 300, avatar: "phoenix" }
+  ];
+  function bonusTag(b) {
+    if (!b) return "";
+    const p = [];
+    if (b.xp) p.push(`+${b.xp}% XP`);
+    if (b.sh) p.push(`+${b.sh}% \u{1FA99}`);
+    if (b.bp) p.push(`+${b.bp}% BP`);
+    return p.length ? ` <span class="cosmBonus" title="\u0411\u043E\u043D\u0443\u0441 \u043D\u0430\u0434\u0435\u0442\u043E\u0439 \u043A\u043E\u0441\u043C\u0435\u0442\u0438\u043A\u0438">${p.join(" \xB7 ")}</span>` : "";
+  }
+  function cosmBonusTotal() {
+    const t = { xp: 0, sh: 0, bp: 0 };
+    const add2 = (b) => {
+      if (b) {
+        t.xp += b.xp || 0;
+        t.sh += b.sh || 0;
+        t.bp += b.bp || 0;
+      }
+    };
+    add2(SHOP_BACKS[meta.backEq || "classic"]?.bonus);
+    add2(TABLE_SKINS[meta.tableSkin || "classic"]?.bonus);
+    add2(RUNE_SKINS[meta.runeSkin || "classic"]?.bonus);
+    const av = PREMIUM_AVATARS[meta.avatarFac];
+    if (av && av.req()) add2(av.bonus);
+    return t;
+  }
   var shopTab = "boosters";
   function cosmImg(kind, id, cls) {
     return `<img class="${cls}" src="/cosm/${kind}/${id}?t=${Date.now()}" alt="" loading="lazy" onerror="this.remove()">`;
@@ -29153,6 +30368,16 @@
     return `<div class="ofCard${hl}"><div class="ofArt ${cls}">${artInner}</div>
     <div class="ofName">${name}</div><div class="ofSub">${sub}</div><div class="ofBuy">${btnHtml}</div></div>`;
   }
+  document.addEventListener("load", (ev) => {
+    const img = ev.target;
+    if (!(img instanceof HTMLImageElement)) return;
+    if (img.classList.contains("ofArtImg")) img.closest(".ofArt")?.classList.add("hasArt");
+    else if (img.classList.contains("boosterInvArt")) img.closest(".boosterInvVisual")?.classList.add("hasArt");
+    else if (img.classList.contains("packOfferArtImg")) {
+      img.closest(".packVis")?.classList.add("hasArt");
+      img.closest(".packOfferArt")?.classList.add("hasPackArt");
+    }
+  }, true);
   function openShop() {
     setAppRoute("store");
     $("menu").classList.add("hidden");
@@ -29167,13 +30392,7 @@
     const title = (TABS.find((t) => t[0] === shopTab) ?? TABS[0])[1];
     let h = `<div class="shTop"><div class="shTitle">${title}</div><div class="shWallet">${wallet}</div></div>`;
     if (shopTab === "boosters") {
-      const PACK_OFFERS = [
-        { id: "p1", ru: "1 \u0411\u0443\u0441\u0442\u0435\u0440", gem: 200, gold: 300, qty: 1, kind: "pack" },
-        { id: "p15", ru: "15 \u0411\u0443\u0441\u0442\u0435\u0440\u043E\u0432", gem: 3e3, gold: 3900, qty: 15, kind: "pack", hl: true },
-        { id: "m1", ru: "1 \u041C\u0438\u0444\u0438\u0447\u0435\u0441\u043A\u0438\u0439", gem: 260, gold: 400, qty: 1, kind: "mythic" },
-        { id: "m10", ru: "10 \u041C\u0438\u0444\u0438\u0447\u0435\u0441\u043A\u0438\u0445", gem: 2600, gold: 3600, qty: 10, kind: "mythic" },
-        { id: "p1b", ru: "1 \u0411\u0443\u0441\u0442\u0435\u0440", gem: 200, gold: 300, qty: 1, kind: "pack" }
-      ];
+      const PACK_OFFERS = Object.entries(ECONOMY.offers).map(([id, o]) => ({ id, ...o }));
       const packVisHtml = (kind, qty) => {
         const artMyth = cosmImg("offers", "booster_premium", "packOfferArtImg");
         const artBooster = cosmImg("offers", "booster", "packOfferArtImg");
@@ -29190,18 +30409,18 @@
       h += `<div class="packStoreRow">` + PACK_OFFERS.map((o) => `
       <div class="packOffer ${o.hl ? "hl" : ""}">
         <div class="packOfferArt">${o.hl ? '<span class="packBadge">\u2605 Best Value</span>' : ""}${packVisHtml(o.kind, o.qty)}</div>
-        <div class="packOfferTitle">${o.ru}${o.qty > 1 ? ` \xB7 ${o.qty}\xD7` : ""}${freeInfo && o.id === "p1" ? freeInfo : ""}</div>
+        <div class="packOfferTitle">${o.ru}${o.save ? ` <span class="packSave">\u2212${o.save}%</span>` : ""}${freeInfo && o.id === "p1" ? freeInfo : ""}</div>
         <div class="packOfferPrices">
           <button class="priceBtn gem buyPackOffer" data-offer="${o.id}" data-cur="gem"><span class="ico">\u{1F48E}</span> ${o.gem.toLocaleString("ru-RU")}</button>
           <button class="priceBtn gold buyPackOffer" data-offer="${o.id}" data-cur="gold"><span class="ico">\u{1FA99}</span> ${o.gold.toLocaleString("ru-RU")}</button>
         </div>
       </div>`).join("") + `</div>`;
-      h += `<details style="margin:.4rem 0 0"><summary style="cursor:pointer;font-size:.68rem;color:#a99a7a;letter-spacing:.04em">\u0424\u0440\u0430\u043A\u0446\u0438\u043E\u043D\u043D\u044B\u0435 \u043D\u0430\u0431\u043E\u0440\u044B \xB7 \u{1FA99}350</summary><div class="ofRow" style="padding-top:.5rem">` + FACTION_IDS.map((f) => ofCard(
+      h += `<details style="margin:.4rem 0 0"><summary style="cursor:pointer;font-size:.68rem;color:#a99a7a;letter-spacing:.04em">\u0424\u0440\u0430\u043A\u0446\u0438\u043E\u043D\u043D\u044B\u0435 \u043D\u0430\u0431\u043E\u0440\u044B \xB7 \u{1FA99}${ECONOMY.factionPack}</summary><div class="ofRow" style="padding-top:.5rem">` + FACTION_IDS.map((f) => ofCard(
         `a-fac f-${f}`,
         cosmImg("offers", "pack_" + f, "ofArtImg") + `<span class="ofSig">${FACTION_SIGIL[f]}</span>`,
         `\u041D\u0430\u0431\u043E\u0440 ${FACTION_RU[f]}`,
         "5 \u043A\u0430\u0440\u0442 \u043E\u0434\u043D\u043E\u0439 \u0444\u0440\u0430\u043A\u0446\u0438\u0438",
-        `<button class="btn price gold buyFacPack" data-f="${f}">\u{1FA99}350</button>`
+        `<button class="btn price gold buyFacPack" data-f="${f}">\u{1FA99}${ECONOMY.factionPack}</button>`
       )).join("") + `</div></details>`;
       h += `<div class="shopNavBottom"><span class="navItem">Featured</span><span class="navItem">Gems</span><span class="navItem sel">Packs</span><span class="navItem">Daily Deals</span><span class="navItem" data-goto="bundles">Bundles</span><span class="navItem">Avatars</span><span class="navItem">Sleeves</span><span class="navItem">Pets</span></div>`;
       h += `<div class="packStoreFoot">\u0414\u0443\u0431\u043B\u0438\u043A\u0430\u0442\u044B \u0441\u0432\u0435\u0440\u0445 4 \u043A\u043E\u043F\u0438\u0439 \u043F\u0440\u0435\u0432\u0440\u0430\u0449\u0430\u044E\u0442\u0441\u044F \u0432 \u043C\u043E\u043D\u0435\u0442\u044B (1/2/5/20/100). \u041E\u043F\u043B\u0430\u0442\u0430 \u{1F48E} \u2014 \u0433\u0435\u043C\u044B, \u{1FA99} \u2014 \u043C\u043E\u043D\u0435\u0442\u044B. \u0411\u0443\u0441\u0442\u0435\u0440\u044B \u043A\u043E\u043F\u044F\u0442\u0441\u044F \u0438 \u043E\u0442\u043A\u0440\u044B\u0432\u0430\u044E\u0442\u0441\u044F \u0432 \u0440\u0430\u0437\u0434\u0435\u043B\u0435 \xAB\u0411\u0443\u0441\u0442\u0435\u0440\u044B\xBB.</div>`;
@@ -29212,7 +30431,7 @@
         cosmImg("bundles", "starter", "ofArtImg") + '<span class="ofBig">\u{1F0CF}</span>',
         "\u041D\u0430\u0431\u043E\u0440 \u043D\u043E\u0432\u0438\u0447\u043A\u0430",
         "10 \u043A\u0430\u0440\u0442 \u0431\u0430\u0437\u044B (\u043A\u0440\u0438\u0432\u0430\u044F 1\u20133, \u043F\u043E 2 \u043D\u0430 \u0444\u0440\u0430\u043A\u0446\u0438\u044E) \xB7 \u043E\u0434\u043D\u0430 \u043F\u043E\u043A\u0443\u043F\u043A\u0430 \u043D\u0430 \u0430\u043A\u043A\u0430\u0443\u043D\u0442",
-        `<button class="btn price gold" id="btnStarter" ${meta.starter ? "disabled" : ""}>${meta.starter ? "\u041A\u0443\u043F\u043B\u0435\u043D" : "\u{1FA99}800"}</button>`
+        `<button class="btn price gold" id="btnStarter" ${meta.starter ? "disabled" : ""}>${meta.starter ? "\u041A\u0443\u043F\u043B\u0435\u043D" : `\u{1FA99}${ECONOMY.starter}`}</button>`
       ) + BUNDLES.map((b) => {
         const bought = (meta.bundles ?? []).includes(b.fac);
         return ofCard(
@@ -29222,7 +30441,16 @@
           "10 \u0431\u0443\u0441\u0442\u0435\u0440\u043E\u0432 + \u{1FA99}500 + \u044D\u043A\u0441\u043A\u043B\u044E\u0437\u0438\u0432\u043D\u044B\u0439 \u0430\u0432\u0430\u0442\u0430\u0440 \xAB\u0410\u0440\u0445\u043E\u043D\u0442\xBB \u2727 \xB7 \u0440\u0430\u0437\u043E\u0432\u0430\u044F \u043F\u043E\u043A\u0443\u043F\u043A\u0430",
           `<button class="btn price gem buyBundle" data-f="${b.fac}" ${bought ? "disabled" : ""}>${bought ? "\u041A\u0443\u043F\u043B\u0435\u043D" : `\u{1F48E}${b.price}`}</button>`
         );
-      }).join("") + `</div><div class="jl" style="opacity:.75">\u0412 \u0440\u0435\u043B\u0438\u0437\u0435 \u0441\u0442\u0430\u0440\u0442\u043E\u0432\u044B\u0435 \u043D\u0430\u0431\u043E\u0440\u044B \u043F\u043E\u043A\u0443\u043F\u0430\u044E\u0442\u0441\u044F \u0437\u0430 \u0440\u0435\u0430\u043B\u044C\u043D\u044B\u0435 \u0434\u0435\u043D\u044C\u0433\u0438; \u0432 \u043F\u0440\u043E\u0442\u043E\u0442\u0438\u043F\u0435 \u2014 \u0437\u0430 \u0433\u0435\u043C\u044B \u{1F48E}.</div>`;
+      }).join("") + `</div><div class="ofGroup" style="margin-top:.6rem">\u0422\u0435\u043C\u0430\u0442\u0438\u0447\u0435\u0441\u043A\u0438\u0435 \u043D\u0430\u0431\u043E\u0440\u044B</div><div class="ofRow">` + SHOP_SETS.map((st) => {
+        const bought = (meta.setsOwned ?? []).includes(st.id);
+        return ofCard(
+          `a-set s-${st.id}`,
+          cosmImg("sets", st.id, "ofArtImg") + '<span class="ofBig">\u{1F381}</span>',
+          st.ru,
+          st.sub,
+          `<button class="btn price ${st.cur === "gem" ? "gem" : "gold"} buySet" data-set="${st.id}" ${bought ? "disabled" : ""}>${bought ? "\u041A\u0443\u043F\u043B\u0435\u043D" : st.cur === "gem" ? `\u{1F48E}${st.price}` : `\u{1FA99}${st.price}`}</button>`
+        );
+      }).join("") + `</div><div class="jl" style="opacity:.75">\u0412 \u0440\u0435\u043B\u0438\u0437\u0435 \u0441\u0442\u0430\u0440\u0442\u043E\u0432\u044B\u0435 \u043D\u0430\u0431\u043E\u0440\u044B \u043F\u043E\u043A\u0443\u043F\u0430\u044E\u0442\u0441\u044F \u0437\u0430 \u0440\u0435\u0430\u043B\u044C\u043D\u044B\u0435 \u0434\u0435\u043D\u044C\u0433\u0438; \u0432 \u043F\u0440\u043E\u0442\u043E\u0442\u0438\u043F\u0435 \u2014 \u0437\u0430 \u0433\u0435\u043C\u044B \u{1F48E}. \u041A\u043B\u044E\u0447-\u0430\u0440\u0442\u044B \u043D\u0430\u0431\u043E\u0440\u043E\u0432: art_raw/cosm/sets/&lt;id&gt;.png.</div>`;
     }
     if (shopTab === "cosm") {
       const tile = (art, name, sub, prev, buy) => `<div class="ofCard sm"><div class="ofArt a-cosm">${art}</div><div class="ofName">${name}</div>
@@ -29235,7 +30463,7 @@
         return tile(
           `<i class="cardback mini back-${id}">${cosmImg("backs", id, "cbArt")}</i>`,
           `\u0420\u0443\u0431\u0430\u0448\u043A\u0430 \xAB${b.ru}\xBB`,
-          locked ? "\u043D\u0430\u0433\u0440\u0430\u0434\u0430 \u0431\u043E\u0435\u0432\u043E\u0433\u043E \u043F\u0440\u043E\u043F\u0443\u0441\u043A\u0430" : ownedB ? eq ? "\u043D\u0430\u0434\u0435\u0442\u0430" : "\u0432 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u0438" : `\u{1FA99}${b.price}`,
+          (locked ? "\u043D\u0430\u0433\u0440\u0430\u0434\u0430 \u0431\u043E\u0435\u0432\u043E\u0433\u043E \u043F\u0440\u043E\u043F\u0443\u0441\u043A\u0430" : ownedB ? eq ? "\u043D\u0430\u0434\u0435\u0442\u0430" : "\u0432 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u0438" : `\u{1FA99}${b.price}`) + bonusTag(b.bonus),
           prevBtn("back", id, "\u041F\u0440\u0435\u0434\u043F\u0440\u043E\u0441\u043C\u043E\u0442\u0440: \u043A\u0430\u043A \u0440\u0443\u0431\u0430\u0448\u043A\u0430 \u0432\u044B\u0433\u043B\u044F\u0434\u0438\u0442 \u043D\u0430 \u043A\u0430\u0440\u0442\u0435"),
           `<button class="btn price gold smBtn backBtn" data-b="${id}" ${ownedB ? eq ? "disabled" : "" : locked ? "disabled" : `data-price="${b.price}"`}>${ownedB ? eq ? "\u041D\u0430\u0434\u0435\u0442\u0430" : "\u041D\u0430\u0434\u0435\u0442\u044C" : locked ? "\u{1F512}" : `\u{1FA99}${b.price}`}</button>`
         );
@@ -29245,8 +30473,8 @@
         const eq = (meta.tableSkin || "classic") === id;
         return tile(
           `<i class="ofSw t-${id}">${cosmImg("tables", id, "ofSwImg")}</i>`,
-          `\u0421\u0442\u043E\u043B \xAB${k.ru}\xBB`,
-          ownedT ? eq ? "\u043D\u0430\u0434\u0435\u0442" : "\u0432 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u0438" : k.cur === "gem" ? `\u{1F48E}${k.price}` : `\u{1FA99}${k.price}`,
+          `${k.ru}`,
+          (ownedT ? eq ? "\u043D\u0430\u0434\u0435\u0442" : "\u0432 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u0438" : k.cur === "gem" ? `\u{1F48E}${k.price}` : `\u{1FA99}${k.price}`) + bonusTag(k.bonus),
           prevBtn("table", id, "\u041F\u0440\u0435\u0434\u043F\u0440\u043E\u0441\u043C\u043E\u0442\u0440: \u0444\u0440\u0430\u0433\u043C\u0435\u043D\u0442 \u0438\u0433\u0440\u043E\u0432\u043E\u0433\u043E \u0441\u0442\u043E\u043B\u0430"),
           `<button class="btn price ${k.cur === "gem" ? "gem" : "gold"} smBtn tableBtn" data-id="${id}" ${ownedT && eq ? "disabled" : ""}>${ownedT ? eq ? "\u041D\u0430\u0434\u0435\u0442" : "\u041D\u0430\u0434\u0435\u0442\u044C" : k.cur === "gem" ? `\u{1F48E}${k.price}` : `\u{1FA99}${k.price}`}</button>`
         );
@@ -29256,8 +30484,8 @@
         const eq = (meta.runeSkin || "classic") === id;
         return tile(
           `<i class="ofSw r-${id}">${cosmImg("runes", id, "rcImg")}\u2726</i>`,
-          `\u0420\u0443\u043D\u044B \xAB${k.ru}\xBB`,
-          ownedR ? eq ? "\u043D\u0430\u0434\u0435\u0442\u044B" : "\u0432 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u0438" : k.cur === "gem" ? `\u{1F48E}${k.price}` : `\u{1FA99}${k.price}`,
+          `${k.ru}`,
+          (ownedR ? eq ? "\u043D\u0430\u0434\u0435\u0442\u044B" : "\u0432 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u0438" : k.cur === "gem" ? `\u{1F48E}${k.price}` : `\u{1FA99}${k.price}`) + bonusTag(k.bonus),
           prevBtn("rune", id, "\u041F\u0440\u0435\u0434\u043F\u0440\u043E\u0441\u043C\u043E\u0442\u0440: \u0430\u043D\u0438\u043C\u0430\u0446\u0438\u044F \u0440\u0443\u043D"),
           `<button class="btn price ${k.cur === "gem" ? "gem" : "gold"} smBtn runeBtn" data-id="${id}" ${ownedR && eq ? "disabled" : ""}>${ownedR ? eq ? "\u041D\u0430\u0434\u0435\u0442\u0430" : "\u041D\u0430\u0434\u0435\u0442\u044C" : k.cur === "gem" ? `\u{1F48E}${k.price}` : `\u{1FA99}${k.price}`}</button>`
         );
@@ -29309,7 +30537,36 @@
     const cp = t?.closest?.(".cosmPrev");
     if (cp?.dataset.kind) {
       Audio_.uiClick();
-      openCosmPreview(cp.dataset.kind, cp.dataset.id ?? "");
+      const kind = cp.dataset.kind;
+      const id = cp.dataset.id ?? "";
+      const chip = t?.closest?.(".cosmSkinChip");
+      if (chip) {
+        if (chip.classList.contains("locked")) {
+          openCosmPreview(kind, id);
+          return;
+        }
+        if (kind === "table" && TABLE_SKINS[id]) {
+          meta.tableSkin = id;
+          metaSave();
+          applySettings();
+          void applyCosmArt();
+          if (!$("battle").classList.contains("hidden")) applyBattleBg(battle.playerFaction);
+          openProfile();
+          showToast(`\u0421\u0442\u043E\u043B \xAB${TABLE_SKINS[id].ru}\xBB \u0432\u044B\u0431\u0440\u0430\u043D`);
+        } else if (kind === "rune" && RUNE_SKINS[id]) {
+          meta.runeSkin = id;
+          metaSave();
+          applySettings();
+          void applyCosmArt();
+          if (!$("battle").classList.contains("hidden")) applyBattleBg(battle.playerFaction);
+          openProfile();
+          showToast(`\u0420\u0443\u043D\u044B \xAB${RUNE_SKINS[id].ru}\xBB \u0432\u044B\u0431\u0440\u0430\u043D\u044B`);
+        } else {
+          openCosmPreview(kind, id);
+        }
+        return;
+      }
+      openCosmPreview(kind, id);
       return;
     }
     if (t?.id === "buyPack") {
@@ -29320,8 +30577,10 @@
       shardsAdd(-PACK_PRICE);
       meta.freeOpens = (meta.freeOpens ?? 0) + 1;
       metaSave();
-      openBoosterPanel();
-      showToast("\u0411\u0443\u0441\u0442\u0435\u0440 \u0434\u043E\u0431\u0430\u0432\u043B\u0435\u043D \u0432 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u044E \u043F\u0430\u043A\u043E\u0432 \u2014 \u0432\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u0435\u0433\u043E, \u0447\u0442\u043E\u0431\u044B \u0432\u0441\u043A\u0440\u044B\u0442\u044C");
+      renderShards();
+      renderPackInventory();
+      openShop();
+      showToast("\u{1F381} \u0411\u0443\u0441\u0442\u0435\u0440 \u0434\u043E\u0431\u0430\u0432\u043B\u0435\u043D \u0432 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u044E \u043F\u0430\u043A\u043E\u0432 \u2014 \u043E\u0442\u043A\u0440\u043E\u0439\u0442\u0435 \u0435\u0433\u043E \u0432 \u0440\u0430\u0437\u0434\u0435\u043B\u0435 \xAB\u0411\u0443\u0441\u0442\u0435\u0440\u044B\xBB");
       return;
     }
     const fp = t?.closest?.(".buyFacPack");
@@ -29330,11 +30589,11 @@
         showToast("\u0421\u043D\u0430\u0447\u0430\u043B\u0430 \u0432\u0441\u043A\u0440\u043E\u0439\u0442\u0435 \u0432\u044B\u0431\u0440\u0430\u043D\u043D\u044B\u0439 \u0431\u0443\u0441\u0442\u0435\u0440");
         return;
       }
-      if (shardsGet() < 350) {
-        showToast("\u041D\u0443\u0436\u043D\u043E 350 \u043C\u043E\u043D\u0435\u0442");
+      if (shardsGet() < ECONOMY.factionPack) {
+        showToast(`\u041D\u0443\u0436\u043D\u043E ${ECONOMY.factionPack} \u043C\u043E\u043D\u0435\u0442`);
         return;
       }
-      shardsAdd(-350);
+      shardsAdd(-ECONOMY.factionPack);
       openBoosterPanel();
       const slots = drawFactionPack(fp.dataset.f);
       renderShards();
@@ -29345,13 +30604,7 @@
     if (po?.dataset.offer) {
       const id = po.dataset.offer;
       const cur = po.dataset.cur;
-      const MAP = {
-        p1: { gem: 200, gold: 300, qty: 1, kind: "pack" },
-        p15: { gem: 3e3, gold: 3900, qty: 15, kind: "pack" },
-        m1: { gem: 260, gold: 400, qty: 1, kind: "mythic" },
-        m10: { gem: 2600, gold: 3600, qty: 10, kind: "mythic" },
-        p1b: { gem: 200, gold: 300, qty: 1, kind: "pack" }
-      };
+      const MAP = ECONOMY.offers;
       const o = MAP[id];
       if (!o) return;
       if (cur === "gem") {
@@ -29370,13 +30623,17 @@
       if (o.kind === "mythic") {
         meta.premOpens = (meta.premOpens ?? 0) + o.qty;
         metaSave();
-        openBoosterPanel();
-        showToast(`\u2726 ${o.qty} \u043F\u0440\u0435\u043C\u0438\u0443\u043C-\u0431\u0443\u0441\u0442\u0435\u0440\u043E\u0432 \u0434\u043E\u0431\u0430\u0432\u043B\u0435\u043D\u043E \u0432 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u044E \u043F\u0430\u043A\u043E\u0432`);
+        renderShards();
+        renderPackInventory();
+        openShop();
+        showToast(`\u2726 ${o.qty} \u043F\u0440\u0435\u043C\u0438\u0443\u043C-\u0431\u0443\u0441\u0442\u0435\u0440\u0430(\u043E\u0432) \u0434\u043E\u0431\u0430\u0432\u043B\u0435\u043D\u043E \u0432 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u044E \u043F\u0430\u043A\u043E\u0432 \u2014 \u0440\u0430\u0437\u0434\u0435\u043B \xAB\u0411\u0443\u0441\u0442\u0435\u0440\u044B\xBB`);
       } else {
         meta.freeOpens = (meta.freeOpens ?? 0) + o.qty;
         metaSave();
-        openBoosterPanel();
-        showToast(`\u{1F381} ${o.qty} \u0431\u0443\u0441\u0442\u0435\u0440\u043E\u0432 \u0434\u043E\u0431\u0430\u0432\u043B\u0435\u043D\u043E \u0432 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u044E \u043F\u0430\u043A\u043E\u0432`);
+        renderShards();
+        renderPackInventory();
+        openShop();
+        showToast(`\u{1F381} ${o.qty} \u0431\u0443\u0441\u0442\u0435\u0440(\u0430) \u0434\u043E\u0431\u0430\u0432\u043B\u0435\u043D\u043E \u0432 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u044E \u043F\u0430\u043A\u043E\u0432 \u2014 \u0440\u0430\u0437\u0434\u0435\u043B \xAB\u0411\u0443\u0441\u0442\u0435\u0440\u044B\xBB`);
       }
       return;
     }
@@ -29387,15 +30644,18 @@
       return;
     }
     if (t?.id === "buyBundle11") {
-      if (shardsGet() < 2700) {
-        showToast("\u041D\u0443\u0436\u043D\u043E 2700 \u043C\u043E\u043D\u0435\u0442");
+      const b11 = ECONOMY.pack.gold * 10;
+      if (shardsGet() < b11) {
+        showToast(`\u041D\u0443\u0436\u043D\u043E ${b11} \u043C\u043E\u043D\u0435\u0442`);
         return;
       }
-      shardsAdd(-2700);
+      shardsAdd(-b11);
       meta.freeOpens = (meta.freeOpens ?? 0) + 11;
       metaSave();
-      openBoosterPanel();
-      showToast("\u{1F381} \u041D\u0430\u0431\u043E\u0440 \xAB10+1\xBB: 11 \u0431\u0443\u0441\u0442\u0435\u0440\u043E\u0432 \u0434\u043E\u0431\u0430\u0432\u043B\u0435\u043D\u044B \u0432 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u044E \u043F\u0430\u043A\u043E\u0432");
+      renderShards();
+      renderPackInventory();
+      openShop();
+      showToast("\u{1F381} \u041D\u0430\u0431\u043E\u0440 \xAB10+1\xBB: 11 \u0431\u0443\u0441\u0442\u0435\u0440\u043E\u0432 \u0434\u043E\u0431\u0430\u0432\u043B\u0435\u043D\u044B \u0432 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u044E \u043F\u0430\u043A\u043E\u0432 \u2014 \u0440\u0430\u0437\u0434\u0435\u043B \xAB\u0411\u0443\u0441\u0442\u0435\u0440\u044B\xBB");
       return;
     }
     const bb = t?.closest?.(".backBtn");
@@ -29487,8 +30747,11 @@
       return;
     }
     if (t?.id === "btnStarter" && !meta.starter) {
-      if (shardsGet() < 800) return;
-      shardsAdd(-800);
+      if (shardsGet() < ECONOMY.starter) {
+        showToast(`\u041D\u0443\u0436\u043D\u043E ${ECONOMY.starter} \u043C\u043E\u043D\u0435\u0442`);
+        return;
+      }
+      shardsAdd(-ECONOMY.starter);
       meta.starter = true;
       metaSave();
       renderShards();
@@ -29519,6 +30782,45 @@
       openBoosterPanel();
       showToast(`\u{1F381} \u041D\u0430\u0431\u043E\u0440 \xAB${FACTION_RU[fac]}\xBB: 10 \u0431\u0443\u0441\u0442\u0435\u0440\u043E\u0432 \u0434\u043E\u0431\u0430\u0432\u043B\u0435\u043D\u044B \u0432 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u044E \u043F\u0430\u043A\u043E\u0432`);
     }
+    const bs = t?.closest?.(".buySet");
+    if (bs?.dataset.set) {
+      const st2 = SHOP_SETS.find((x) => x.id === bs.dataset.set);
+      if (!st2 || (meta.setsOwned ?? []).includes(st2.id)) return;
+      if (st2.cur === "gem") {
+        if (gemsGet() < st2.price) {
+          showToast(`\u041D\u0443\u0436\u043D\u043E \u{1F48E}${st2.price}`);
+          return;
+        }
+        gemsAdd(-st2.price);
+      } else {
+        if (shardsGet() < st2.price) {
+          showToast(`\u041D\u0443\u0436\u043D\u043E \u{1FA99}${st2.price}`);
+          return;
+        }
+        shardsAdd(-st2.price);
+      }
+      meta.setsOwned = [...meta.setsOwned ?? [], st2.id];
+      meta.freeOpens = (meta.freeOpens ?? 0) + st2.packs;
+      if (st2.coins) shardsAdd(st2.coins);
+      if (st2.back && !(meta.backsOwned ?? []).includes(st2.back)) {
+        meta.backsOwned = [...meta.backsOwned ?? [], st2.back];
+        meta.backEq = st2.back;
+      }
+      if (st2.table && !(meta.tablesOwned ?? []).includes(st2.table)) {
+        meta.tablesOwned = [...meta.tablesOwned ?? [], st2.table];
+        meta.tableSkin = st2.table;
+      }
+      if (st2.rune && !(meta.runesOwned ?? []).includes(st2.rune)) {
+        meta.runesOwned = [...meta.runesOwned ?? [], st2.rune];
+        meta.runeSkin = st2.rune;
+      }
+      if (st2.avatar && !(meta.avatarsOwned ?? []).includes(st2.avatar)) meta.avatarsOwned = [...meta.avatarsOwned ?? [], st2.avatar];
+      metaSave();
+      applySettings();
+      renderShards();
+      showToast(`\u{1F381} \xAB${st2.ru}\xBB: +${st2.packs} \u0431\u0443\u0441\u0442\u0435\u0440\u043E\u0432 \u0438 \u043A\u043E\u0441\u043C\u0435\u0442\u0438\u043A\u0430!`);
+      openShop();
+    }
   });
   document.body.dataset.back = meta.backEq || "classic";
   document.addEventListener("click", (ev) => {
@@ -29529,7 +30831,7 @@
       openProfile();
       return;
     }
-    const ava = t0?.closest?.(".avaBtn");
+    const ava = t0?.closest?.(".avaBtn, .avaCircle");
     if (ava?.dataset.f) {
       const id = ava.dataset.f;
       const pa = PREMIUM_AVATARS[id];
@@ -29997,6 +31299,9 @@
     $("campBody").innerHTML = `<div class="jl" style="opacity:.8">\u041A\u0430\u0440\u0442\u0430 \u043C\u0438\u0440\u0430 \u042D\u0445\u043E-\u0426\u0438\u0442\u0430\u0434\u0435\u043B\u0438: 5 \u0440\u0435\u0433\u0438\u043E\u043D\u043E\u0432, \u0432 \u043A\u0430\u0436\u0434\u043E\u043C \u2014 \u0446\u0435\u043F\u043E\u0447\u043A\u0430 \u0438\u0437
     3 \u0431\u043E\u0451\u0432 \u0438 \u0431\u043E\u0441\u0441\u0430. \u0411\u043E\u0441\u0441\u044B: \u043F\u043E\u0432\u044B\u0448\u0435\u043D\u043D\u043E\u0435 \u0437\u0434\u043E\u0440\u043E\u0432\u044C\u0435 \u0438 \u0443\u043D\u0438\u043A\u0430\u043B\u044C\u043D\u0430\u044F \u0441\u0438\u043B\u0430 \u0433\u0435\u0440\u043E\u044F. \u0421\u043B\u043E\u0436\u043D\u043E\u0441\u0442\u0438 \u041D\u043E\u0440\u043C\u0430\u043B\u044C\u043D\u043E/\u0413\u0435\u0440\u043E\u0438\u0447\u0435\u0441\u043A\u0438/\u041C\u0438\u0444\u0438\u0447\u0435\u0441\u043A\u0438 \u2014
     \u043D\u0430\u0433\u0440\u0430\u0434\u044B \xD71/\xD71.5/\xD72 (\u0437\u0432\u0451\u0437\u0434\u044B \u2605). \u041A\u0430\u043C\u043F\u0430\u043D\u0438\u044F \u043D\u0435 \u0432\u043B\u0438\u044F\u0435\u0442 \u043D\u0430 \u0440\u0435\u0439\u0442\u0438\u043D\u0433.</div>${loreBox}${regions}`;
+    closeAllScreens();
+    $("menu").classList.add("hidden");
+    setAppRoute("campaign");
     $("campaignModal").classList.remove("hidden");
   }
   document.addEventListener("click", (ev) => {
@@ -30034,190 +31339,237 @@
     }
   });
   var LESSONS = [
-    { ru: "\u0423\u0440\u043E\u043A 1 \xB7 \u041E\u0441\u043D\u043E\u0432\u044B", hint: "\u041F\u043E \u0448\u0430\u0433\u0430\u043C: \u0440\u0443\u043D\u0430 \u2192 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E (\xAB\u0412\u0435\u0442\u0435\u0440\u0430\u043D \u041E\u0441\u0430\u0434\u044B\xBB) \u2192 \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0435 (\xAB\u041B\u0443\u0447 \u0420\u0430\u0441\u0441\u0432\u0435\u0442\u0430\xBB). \u0418\u0433\u0440\u0430 \u043F\u043E\u0434\u0441\u0432\u0435\u0447\u0438\u0432\u0430\u0435\u0442 \u043D\u0443\u0436\u043D\u0443\u044E \u043A\u0430\u0440\u0442\u0443 \u0438 \u0431\u043B\u043E\u043A\u0438\u0440\u0443\u0435\u0442 \u043E\u0441\u0442\u0430\u043B\u044C\u043D\u044B\u0435 \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u044F.", need: "\u0420\u0430\u0437\u044B\u0433\u0440\u0430\u0439\u0442\u0435 \u0440\u0443\u043D\u0443, \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u0438 \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0435", reward: "\u{1FA99}100" },
-    { ru: "\u0423\u0440\u043E\u043A 2 \xB7 \u0411\u043E\u0439", hint: "\u0410\u0442\u0430\u043A\u0443\u0439\u0442\u0435 \u0446\u0435\u043B\u044C \u0441\u0432\u043E\u0438\u043C \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E\u043C, \u0437\u0430\u0442\u0435\u043C \u0432\u0441\u0442\u0430\u043D\u044C\u0442\u0435 \u041F\u0440\u043E\u0432\u043E\u043A\u0430\u0446\u0438\u0435\u0439 \u26E8: \u0430\u0442\u0430\u043A\u0438 \u0432\u0440\u0430\u0433\u0430 \u043E\u0431\u044F\u0437\u0430\u043D\u044B \u0431\u0438\u0442\u044C \u043F\u0440\u043E\u0432\u043E\u043A\u0430\u0442\u043E\u0440\u0430 \u2014 \u0442\u0430\u043A \u0440\u0430\u0431\u043E\u0442\u0430\u0435\u0442 \u0431\u043B\u043E\u043A.", need: "\u041D\u0430\u043D\u0435\u0441\u0438\u0442\u0435 \u0443\u0440\u043E\u043D \u0432 \u0431\u043E\u044E", reward: "\u{1FA99}100" },
-    { ru: "\u0423\u0440\u043E\u043A 3 \xB7 \u041A\u043B\u044E\u0447\u0435\u0432\u044B\u0435 \u043C\u0435\u0445\u0430\u043D\u0438\u043A\u0438", hint: "\u0412\u0430\u043C\u043F\u0438\u0440\u0438\u0437\u043C \u{1FA78} (\u0443\u0440\u043E\u043D \u043B\u0435\u0447\u0438\u0442 \u0433\u0435\u0440\u043E\u044F), \u041D\u0435\u0443\u043B\u043E\u0432\u0438\u043C\u043E\u0441\u0442\u044C \u{1F441} (\u043D\u0435\u043B\u044C\u0437\u044F \u0432\u044B\u0431\u0440\u0430\u0442\u044C \u0446\u0435\u043B\u044C\u044E \u2014 \u043D\u0430\u0448\u0430 \xAB\u043D\u0435\u0443\u044F\u0437\u0432\u0438\u043C\u043E\u0441\u0442\u044C\xBB) \u0438 \u0411\u043E\u0435\u0432\u043E\u0439 \u043A\u043B\u0438\u0447 \u2726. \u041A\u0430\u0440\u0442\u044B \u0443\u0436\u0435 \u0432 \u0440\u0443\u043A\u0435 \u2014 \u0440\u0430\u0437\u044B\u0433\u0440\u0430\u0439\u0442\u0435 \u0432\u0441\u0435 \u0442\u0440\u0438.", need: "\u0420\u0430\u0437\u044B\u0433\u0440\u0430\u0439\u0442\u0435 \u0432\u0441\u0435 \u0442\u0440\u0438 \u043C\u0435\u0445\u0430\u043D\u0438\u043A\u0438", reward: "\u{1FA99}150" },
-    { ru: "\u0423\u0440\u043E\u043A 4 \xB7 \u0420\u0435\u0441\u0443\u0440\u0441\u044B", hint: "\u041A\u0440\u0438\u0432\u0430\u044F \u043C\u0430\u043D\u044B: \u043F\u043E\u0447\u0435\u043C\u0443 \u043D\u0435\u043B\u044C\u0437\u044F \u0441\u044B\u0433\u0440\u0430\u0442\u044C \u043A\u0430\u0440\u0442\u0443 \u0437\u0430 5\u2726 \u043D\u0430 2-\u0439 \u0445\u043E\u0434. \u041C\u0430\u043D\u0430 +1 \u0437\u0430 \u0445\u043E\u0434; \u0441\u044B\u0433\u0440\u0430\u0439\u0442\u0435 3+ \u043A\u0430\u0440\u0442\u044B \u043A 3-\u043C\u0443 \u0445\u043E\u0434\u0443 \u2014 \u043D\u0435 \u043A\u043E\u043F\u0438\u0442\u0435 \u0434\u043E\u0440\u043E\u0433\u043E\u0435.", need: "3+ \u043A\u0430\u0440\u0442\u044B \u043A 3-\u043C\u0443 \u0445\u043E\u0434\u0443", reward: "\u{1F48E}100 + 5 \u0431\u0443\u0441\u0442\u0435\u0440\u043E\u0432" }
+    { ru: "\u0423\u0440\u043E\u043A 1 \xB7 \u041E\u0441\u043D\u043E\u0432\u044B", hint: "\u0422\u0440\u0438 \u0445\u043E\u0434\u0430: 1\u2726 \u2014 \u0440\u0443\u043D\u0430, 2\u2726 \u2014 \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0435 \xAB\u041B\u0443\u0447 \u0420\u0430\u0441\u0441\u0432\u0435\u0442\u0430\xBB, 3\u2726 \u2014 \xAB\u0412\u0435\u0442\u0435\u0440\u0430\u043D \u041E\u0441\u0430\u0434\u044B\xBB. \u0418\u0433\u0440\u0430 \u043F\u043E\u0434\u0441\u0432\u0435\u0447\u0438\u0432\u0430\u0435\u0442 \u043D\u0443\u0436\u043D\u0443\u044E \u043A\u0430\u0440\u0442\u0443 \u0438 \u0431\u043B\u043E\u043A\u0438\u0440\u0443\u0435\u0442 \u043E\u0441\u0442\u0430\u043B\u044C\u043D\u044B\u0435 \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u044F.", need: "\u0420\u0430\u0437\u044B\u0433\u0440\u0430\u0439\u0442\u0435 \u0440\u0443\u043D\u0443, \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u0438 \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0435", reward: "\u{1FA99}100" },
+    { ru: "\u0423\u0440\u043E\u043A 2 \xB7 \u0411\u043E\u0439", hint: "\u041F\u0440\u0438\u0437\u043E\u0432\u0438\u0442\u0435 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u0441 \u041F\u0440\u043E\u0432\u043E\u043A\u0430\u0446\u0438\u0435\u0439 \u26E8, \u043F\u0435\u0440\u0435\u0434\u0430\u0439\u0442\u0435 \u0445\u043E\u0434 (\u0432\u0440\u0430\u0433 \u043E\u0431\u044F\u0437\u0430\u043D \u0431\u0438\u0442\u044C \u043F\u0440\u043E\u0432\u043E\u043A\u0430\u0442\u043E\u0440\u0430), \u0430 \u043D\u0430 \u0441\u043B\u0435\u0434\u0443\u044E\u0449\u0435\u043C \u0445\u043E\u0434\u0443 \u0430\u0442\u0430\u043A\u0443\u0439\u0442\u0435.", need: "\u041D\u0430\u043D\u0435\u0441\u0438\u0442\u0435 \u0443\u0440\u043E\u043D \u0432 \u0431\u043E\u044E", reward: "\u{1FA99}100" },
+    { ru: "\u0423\u0440\u043E\u043A 3 \xB7 \u041A\u043B\u044E\u0447\u0435\u0432\u044B\u0435 \u043C\u0435\u0445\u0430\u043D\u0438\u043A\u0438", hint: "\u0422\u0440\u0438 \u0445\u043E\u0434\u0430: \u041D\u0435\u0443\u043B\u043E\u0432\u0438\u043C\u043E\u0441\u0442\u044C \u{1F441} (1\u2726), \u0412\u0430\u043C\u043F\u0438\u0440\u0438\u0437\u043C \u{1FA78} (2\u2726), \u0411\u043E\u0435\u0432\u043E\u0439 \u043A\u043B\u0438\u0447 \u2726 (2\u2726) \u0438 \u0430\u0442\u0430\u043A\u0430 \u0423\u043F\u044B\u0440\u0451\u043C.", need: "\u0420\u0430\u0437\u044B\u0433\u0440\u0430\u0439\u0442\u0435 \u0432\u0441\u0435 \u0442\u0440\u0438 \u043C\u0435\u0445\u0430\u043D\u0438\u043A\u0438", reward: "\u{1FA99}150" },
+    { ru: "\u0423\u0440\u043E\u043A 4 \xB7 \u0420\u0435\u0441\u0443\u0440\u0441\u044B", hint: "\u041A\u0440\u0438\u0432\u0430\u044F \u043C\u0430\u043D\u044B: 5\u2726 \u043D\u0430 1-\u043C \u0445\u043E\u0434\u0443 \u043D\u0435 \u0441\u044B\u0433\u0440\u0430\u0442\u044C. \u041C\u0430\u043D\u0430 +1 \u0437\u0430 \u0445\u043E\u0434 \u2014 \u0441\u044B\u0433\u0440\u0430\u0439\u0442\u0435 \u043F\u043E \u043A\u0430\u0440\u0442\u0435 \u043D\u0430 1\u2726, 2\u2726 \u0438 3\u2726.", need: "\u0421\u044B\u0433\u0440\u0430\u0439\u0442\u0435 \u043A\u0430\u0440\u0442\u0443 \u043D\u0430 \u043A\u0430\u0436\u0434\u043E\u043C \u0438\u0437 \u0442\u0440\u0451\u0445 \u0445\u043E\u0434\u043E\u0432", reward: "\u{1F48E}100 + 5 \u0431\u0443\u0441\u0442\u0435\u0440\u043E\u0432" }
   ];
   var tutHandSel = (id) => `#hand [data-card-id="${id}"]`;
   var TUT_TGT = "#playerBoard,#enemyBoard,#playerRunes,#enemyRunes,#playerHero,#enemyHero,#enemyPortrait,#btnEndTurn";
   var TUT_HANDS = {
-    1: ["aur_r07", "neu_03", "aur_s01"],
-    // руна «Обетный монолит» → «Ветеран Осады» → «Луч Рассвета»
+    1: ["aur_r07", "aur_s01", "neu_03"],
+    // ход 1 (1✦): руна → ход 2 (2✦): заклинание → ход 3 (3✦): существо
     2: ["aur_01"],
-    // «Послушник Света» — Провокация ⛨
-    3: ["nec_03", "eth_01", "aur_03"],
-    // Вампиризм / Неуловимость / Боевой клич
-    4: ["aur_09", "aur_01"]
-    // «Серафим Зари» 5✦ (кривая маны) + дешёвая 1✦
+    // «Послушник Света» 1✦ — Провокация ⛨
+    3: ["eth_01", "nec_03", "aur_03"],
+    // 1✦ Неуловимость → 2✦ Вампиризм → 2✦ Боевой клич
+    4: ["aur_09", "aur_01", "aur_03", "aur_s01"]
+    // 5✦ «рано» + кривая 1✦ → 2✦ → 1✦
   };
-  var TUT_STEP_FIRST = { 1: 1, 2: 6, 3: 11, 4: 16 };
+  var tutE = () => battle.engine;
+  var tutMana = () => tutE()?.p(0 /* Player */).mana ?? 0;
+  var tutMaxMana = () => {
+    const p = tutE()?.p(0 /* Player */);
+    return p ? p.maxMana + p.bonusMana : 0;
+  };
+  var tutMyMain = () => tutE()?.activeSide === 0 /* Player */ && tutE()?.phase === "Main" /* Main */;
+  var tutTurnBack = () => (tutE()?.turn ?? 0) > battle.tutMark && tutMyMain();
+  var tutStat = (k) => tutE()?.stats[0 /* Player */]?.[k] ?? 0;
+  var tutOnBoard = (id) => !!tutE()?.p(0 /* Player */).creatures.some((u) => u.cardId === id);
+  var END = ["#btnEndTurn"];
+  var TUT_STEP_FIRST = { 1: 1, 2: 7, 3: 11, 4: 18 };
   var TUT_STEPS = [
-    /* --- урок 1 · Основы (шаги 1-5): руна → существо → заклинание --- */
+    /* --- урок 1 · Основы: ход 1 → руна (1✦), ход 2 → заклинание (1✦ из 2), ход 3 → существо (3✦) --- */
     {
       id: 1,
       lesson: 1,
-      message: "\u0420\u0430\u0437\u044B\u0433\u0440\u0430\u0439\u0442\u0435 \u0440\u0443\u043D\u0443 \xAB\u041E\u0431\u0435\u0442\u043D\u044B\u0439 \u043C\u043E\u043D\u043E\u043B\u0438\u0442\xBB (1\u2726): \u043A\u043B\u0438\u043A\u043D\u0438\u0442\u0435 \u043A\u0430\u0440\u0442\u0443, \u0437\u0430\u0442\u0435\u043C \u0441\u0432\u043E\u0451 \u043F\u043E\u043B\u0435. \u0420\u0443\u043D\u044B \u0434\u0430\u044E\u0442 \u042D\u0445\u043E \u2014 \u043F\u043E\u0441\u0442\u043E\u044F\u043D\u043D\u044B\u0435 \u0443\u0441\u0438\u043B\u0438\u0442\u0435\u043B\u0438.",
+      mana: 1,
+      message: "\u0425\u043E\u0434 1 \xB7 \u0443 \u0432\u0430\u0441 1\u2726. \u0420\u0430\u0437\u044B\u0433\u0440\u0430\u0439\u0442\u0435 \u0440\u0443\u043D\u0443 \xAB\u041E\u0431\u0435\u0442\u043D\u044B\u0439 \u043C\u043E\u043D\u043E\u043B\u0438\u0442\xBB (1\u2726): \u043A\u043B\u0438\u043A\u043D\u0438\u0442\u0435 \u043A\u0430\u0440\u0442\u0443, \u0437\u0430\u0442\u0435\u043C \u0441\u0432\u043E\u0451 \u043F\u043E\u043B\u0435. \u0420\u0443\u043D\u044B \u2014 \u043F\u043E\u0441\u0442\u043E\u044F\u043D\u043D\u044B\u0435 \u0443\u0441\u0438\u043B\u0438\u0442\u0435\u043B\u0438.",
       hi: () => document.querySelector(tutHandSel("aur_r07")),
-      ok: () => (battle.engine?.stats[0 /* Player */].runesPlayed ?? 0) >= 1,
+      ok: () => tutStat("runesPlayed") >= 1,
       allow: [tutHandSel("aur_r07"), TUT_TGT]
     },
     {
       id: 2,
       lesson: 1,
-      message: "\u0422\u0435\u043F\u0435\u0440\u044C \u0440\u0430\u0437\u044B\u0433\u0440\u0430\u0439\u0442\u0435 \xAB\u0412\u0435\u0442\u0435\u0440\u0430\u043D\u0430 \u041E\u0441\u0430\u0434\u044B\xBB (3\u2726) \u2014 \u0434\u043E\u0436\u0434\u0438\u0442\u0435\u0441\u044C \u043C\u0430\u043D\u044B, \u043A\u043B\u0438\u043A\u043D\u0438\u0442\u0435 \u043A\u0430\u0440\u0442\u0443, \u0437\u0430\u0442\u0435\u043C \u043F\u043E\u043B\u0435.",
-      hi: () => document.querySelector(tutHandSel("neu_03")),
-      ok: () => (battle.engine?.stats[0 /* Player */].creaturesSummoned ?? 0) >= 1,
-      allow: [tutHandSel("neu_03"), TUT_TGT]
+      message: "\u041C\u0430\u043D\u0430 \u043F\u043E\u0442\u0440\u0430\u0447\u0435\u043D\u0430 (0\u2726). \u0417\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u0435 \u0445\u043E\u0434 \u2014 \u0432 \u043D\u0430\u0447\u0430\u043B\u0435 \u0441\u043B\u0435\u0434\u0443\u044E\u0449\u0435\u0433\u043E \u043C\u0430\u043A\u0441\u0438\u043C\u0443\u043C \u043C\u0430\u043D\u044B \u0432\u044B\u0440\u0430\u0441\u0442\u0435\u0442 \u0434\u043E 2\u2726.",
+      hi: () => $("btnEndTurn"),
+      ok: tutTurnBack,
+      allow: END
     },
     {
       id: 3,
       lesson: 1,
-      message: "\u0420\u0430\u0437\u044B\u0433\u0440\u0430\u0439\u0442\u0435 \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0435 \xAB\u041B\u0443\u0447 \u0420\u0430\u0441\u0441\u0432\u0435\u0442\u0430\xBB (1\u2726): \u043A\u043B\u0438\u043A\u043D\u0438\u0442\u0435 \u043A\u0430\u0440\u0442\u0443, \u0437\u0430\u0442\u0435\u043C \u0446\u0435\u043B\u044C \u2014 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u0438\u043B\u0438 \u0433\u0435\u0440\u043E\u044F.",
+      mana: 1,
+      message: "\u0425\u043E\u0434 2 \xB7 \u0443 \u0432\u0430\u0441 2\u2726. \u0420\u0430\u0437\u044B\u0433\u0440\u0430\u0439\u0442\u0435 \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0435 \xAB\u041B\u0443\u0447 \u0420\u0430\u0441\u0441\u0432\u0435\u0442\u0430\xBB (1\u2726): \u043A\u043B\u0438\u043A\u043D\u0438\u0442\u0435 \u043A\u0430\u0440\u0442\u0443, \u0437\u0430\u0442\u0435\u043C \u0446\u0435\u043B\u044C \u2014 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u0438\u043B\u0438 \u0433\u0435\u0440\u043E\u044F \u0432\u0440\u0430\u0433\u0430.",
       hi: () => document.querySelector(tutHandSel("aur_s01")),
-      ok: () => (battle.engine?.stats[0 /* Player */].spellsCast ?? 0) >= 1,
+      ok: () => tutStat("spellsCast") >= 1,
       allow: [tutHandSel("aur_s01"), TUT_TGT]
     },
     {
       id: 4,
       lesson: 1,
-      message: "\u041E\u0442\u043B\u0438\u0447\u043D\u043E! \u0417\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u0435 \u0445\u043E\u0434 \u2014 \u043A\u043D\u043E\u043F\u043A\u0430 \u043F\u043E\u0434\u0441\u0432\u0435\u0447\u0435\u043D\u0430.",
+      message: "\u041E\u0441\u0442\u0430\u043B\u0430\u0441\u044C 1\u2726 \u2014 \u043D\u0430 \xAB\u0412\u0435\u0442\u0435\u0440\u0430\u043D\u0430 \u041E\u0441\u0430\u0434\u044B\xBB (3\u2726) \u043D\u0435 \u0445\u0432\u0430\u0442\u0430\u0435\u0442. \u0417\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u0435 \u0445\u043E\u0434.",
       hi: () => $("btnEndTurn"),
-      ok: () => (battle.engine?.turn ?? 0) > battle.tutMark,
-      allow: ["#btnEndTurn"]
+      ok: tutTurnBack,
+      allow: END
     },
     {
       id: 5,
       lesson: 1,
-      message: "\u0417\u0430\u043A\u0440\u0435\u043F\u0438\u043C: \u0441\u044B\u0433\u0440\u0430\u0439\u0442\u0435 \u043B\u044E\u0431\u0443\u044E \u043A\u0430\u0440\u0442\u0443 \u0438\u043B\u0438 \u0437\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u0435 \u0445\u043E\u0434.",
-      hi: () => null,
-      ok: () => (battle.engine?.stats[0 /* Player */].cardsPlayed ?? 0) > battle.tutMarkCards || (battle.engine?.turn ?? 0) > battle.tutMark,
-      allow: ["#hand", TUT_TGT]
+      mana: 3,
+      message: "\u0425\u043E\u0434 3 \xB7 \u0443 \u0432\u0430\u0441 3\u2726. \u0422\u0435\u043F\u0435\u0440\u044C \u0445\u0432\u0430\u0442\u0430\u0435\u0442: \u0440\u0430\u0437\u044B\u0433\u0440\u0430\u0439\u0442\u0435 \xAB\u0412\u0435\u0442\u0435\u0440\u0430\u043D\u0430 \u041E\u0441\u0430\u0434\u044B\xBB (3\u2726) \u043D\u0430 \u0441\u0432\u043E\u0451 \u043F\u043E\u043B\u0435.",
+      hi: () => document.querySelector(tutHandSel("neu_03")),
+      ok: () => tutStat("creaturesSummoned") >= 1,
+      allow: [tutHandSel("neu_03"), TUT_TGT]
     },
-    /* --- урок 2 · Бой (шаги 6-10): атака, блок, Провокация --- */
     {
       id: 6,
-      lesson: 2,
-      message: "\u0411\u043E\u0439! \u041F\u0440\u0438\u0437\u043E\u0432\u0438\u0442\u0435 \xAB\u041F\u043E\u0441\u043B\u0443\u0448\u043D\u0438\u043A\u0430 \u0421\u0432\u0435\u0442\u0430\xBB (1\u2726) \u2014 \u0443 \u043D\u0435\u0433\u043E \u041F\u0440\u043E\u0432\u043E\u043A\u0430\u0446\u0438\u044F \u26E8.",
-      hi: () => document.querySelector(tutHandSel("aur_01")),
-      ok: () => (battle.engine?.stats[0 /* Player */].creaturesSummoned ?? 0) >= 1,
-      allow: [tutHandSel("aur_01"), TUT_TGT]
+      lesson: 1,
+      message: "\u0420\u0443\u043D\u0430, \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0435 \u0438 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u0440\u0430\u0437\u044B\u0433\u0440\u0430\u043D\u044B! \u0417\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u0435 \u0445\u043E\u0434, \u0447\u0442\u043E\u0431\u044B \u0437\u0430\u043A\u043E\u043D\u0447\u0438\u0442\u044C \u0443\u0440\u043E\u043A.",
+      hi: () => $("btnEndTurn"),
+      ok: () => (tutE()?.turn ?? 0) > battle.tutMark || tutE()?.activeSide === 1 /* Opponent */,
+      allow: END
     },
+    /* --- урок 2 · Бой: призыв → болезнь призыва → атака на следующем ходу --- */
     {
       id: 7,
       lesson: 2,
-      message: "\u0410\u0442\u0430\u043A\u0443\u0439\u0442\u0435: \u043A\u043B\u0438\u043A\u043D\u0438\u0442\u0435 \u0441\u0432\u043E\u0451 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E (\u0437\u043E\u043B\u043E\u0442\u043E\u0435 \u0441\u0432\u0435\u0447\u0435\u043D\u0438\u0435), \u0437\u0430\u0442\u0435\u043C \u0446\u0435\u043B\u044C \u2014 \u0432\u0440\u0430\u0436\u0435\u0441\u043A\u043E\u0435 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u0438\u043B\u0438 \u0433\u0435\u0440\u043E\u044F.",
-      hi: () => document.querySelector("#playerBoard .card"),
-      ok: () => (battle.engine?.stats[0 /* Player */].damageDealt ?? 0) >= 1,
-      allow: [TUT_TGT]
+      mana: 1,
+      message: "\u0425\u043E\u0434 1 \xB7 1\u2726. \u041F\u0440\u0438\u0437\u043E\u0432\u0438\u0442\u0435 \xAB\u041F\u043E\u0441\u043B\u0443\u0448\u043D\u0438\u043A\u0430 \u0421\u0432\u0435\u0442\u0430\xBB (1\u2726) \u2014 \u0443 \u043D\u0435\u0433\u043E \u041F\u0440\u043E\u0432\u043E\u043A\u0430\u0446\u0438\u044F \u26E8.",
+      hi: () => document.querySelector(tutHandSel("aur_01")),
+      ok: () => tutStat("creaturesSummoned") >= 1,
+      allow: [tutHandSel("aur_01"), TUT_TGT]
     },
     {
       id: 8,
       lesson: 2,
-      message: "\u0423\u0440\u043E\u043D \u043D\u0430\u043D\u0435\u0441\u0451\u043D! \u0417\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u0435 \u0445\u043E\u0434 \u2014 \u0432\u0440\u0430\u0433 \u041E\u0411\u042F\u0417\u0410\u041D \u0431\u0438\u0442\u044C \xAB\u041F\u043E\u0441\u043B\u0443\u0448\u043D\u0438\u043A\u0430\xBB \u26E8: \u0442\u0430\u043A \u0440\u0430\u0431\u043E\u0442\u0430\u0435\u0442 \u0431\u043B\u043E\u043A\u0438\u0440\u043E\u0432\u0430\u043D\u0438\u0435.",
+      message: "\u0422\u043E\u043B\u044C\u043A\u043E \u0447\u0442\u043E \u043F\u0440\u0438\u0437\u0432\u0430\u043D\u043D\u043E\u0435 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u0430\u0442\u0430\u043A\u0443\u0435\u0442 \u0441\u043E \u0441\u043B\u0435\u0434\u0443\u044E\u0449\u0435\u0433\u043E \u0445\u043E\u0434\u0430. \u0417\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u0435 \u0445\u043E\u0434 \u2014 \u0432\u0440\u0430\u0433 \u043E\u0431\u044F\u0437\u0430\u043D \u0431\u0438\u0442\u044C \u0432 \u041F\u0440\u043E\u0432\u043E\u043A\u0430\u0446\u0438\u044E \u26E8.",
       hi: () => $("btnEndTurn"),
-      ok: () => (battle.engine?.turn ?? 0) > battle.tutMark,
-      allow: ["#btnEndTurn"]
+      ok: tutTurnBack,
+      allow: END
     },
     {
       id: 9,
       lesson: 2,
-      message: "\u0421\u043C\u043E\u0442\u0440\u0438\u0442\u0435: \u0430\u0442\u0430\u043A\u0438 \u0432\u0440\u0430\u0433\u0430 \u0443\u0448\u043B\u0438 \u0432 \u041F\u0440\u043E\u0432\u043E\u043A\u0430\u0446\u0438\u044E \u2014 \u0433\u0435\u0440\u043E\u0439 \u0437\u0430\u0449\u0438\u0449\u0451\u043D. \u0414\u043E\u0436\u0434\u0438\u0442\u0435\u0441\u044C \u0441\u0432\u043E\u0435\u0433\u043E \u0445\u043E\u0434\u0430.",
+      message: "\u0412\u0430\u0448 \u0445\u043E\u0434: \u043A\u043B\u0438\u043A\u043D\u0438\u0442\u0435 \xAB\u041F\u043E\u0441\u043B\u0443\u0448\u043D\u0438\u043A\u0430\xBB (\u0437\u043E\u043B\u043E\u0442\u043E\u0435 \u0441\u0432\u0435\u0447\u0435\u043D\u0438\u0435), \u0437\u0430\u0442\u0435\u043C \u0446\u0435\u043B\u044C \u2014 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u0438\u043B\u0438 \u0433\u0435\u0440\u043E\u044F \u0432\u0440\u0430\u0433\u0430.",
       hi: () => document.querySelector('#playerBoard [data-card-id="aur_01"]') ?? document.querySelector("#playerBoard .card"),
-      ok: () => battle.engine?.activeSide === 0 /* Player */ && battle.engine?.phase === "Main" /* Main */,
-      allow: [TUT_TGT]
+      ok: () => tutStat("damageDealt") > battle.tutMarkDmg || !tutE()?.p(0 /* Player */).creatures.length,
+      allow: [TUT_TGT, "#hand"]
     },
     {
       id: 10,
       lesson: 2,
-      message: "\u0423\u0440\u043E\u043A 2 \u043F\u0440\u043E\u0439\u0434\u0435\u043D: \u0430\u0442\u0430\u043A\u0430, \u0431\u043B\u043E\u043A, \u041F\u0440\u043E\u0432\u043E\u043A\u0430\u0446\u0438\u044F. \u0417\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u0435 \u0445\u043E\u0434.",
+      message: "\u0423\u0440\u043E\u043D \u043D\u0430\u043D\u0435\u0441\u0451\u043D \u2014 \u044D\u0442\u043E \u0430\u0442\u0430\u043A\u0430. \u0417\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u0435 \u0445\u043E\u0434, \u0447\u0442\u043E\u0431\u044B \u0437\u0430\u043A\u043E\u043D\u0447\u0438\u0442\u044C \u0443\u0440\u043E\u043A.",
       hi: () => $("btnEndTurn"),
-      ok: () => (battle.engine?.turn ?? 0) > battle.tutMark,
-      allow: ["#btnEndTurn"]
+      ok: () => (tutE()?.turn ?? 0) > battle.tutMark || tutE()?.activeSide === 1 /* Opponent */,
+      allow: END
     },
-    /* --- урок 3 · Ключевые механики (шаги 11-15): Вампиризм, Неуловимость, Боевой клич --- */
+    /* --- урок 3 · Механики: ход 1 Неуловимость (1✦), ход 2 Вампиризм (2✦), ход 3 Боевой клич (2✦) + атака Упырём --- */
     {
       id: 11,
       lesson: 3,
-      message: "\u0412\u0430\u043C\u043F\u0438\u0440\u0438\u0437\u043C \u{1FA78}: \u0440\u0430\u0437\u044B\u0433\u0440\u0430\u0439\u0442\u0435 \xAB\u0423\u043F\u044B\u0440\u044F-\u043C\u0430\u0440\u043E\u0434\u0451\u0440\u0430\xBB (2\u2726) \u2014 \u0435\u0433\u043E \u0443\u0440\u043E\u043D \u043B\u0435\u0447\u0438\u0442 \u0432\u0430\u0448\u0435\u0433\u043E \u0433\u0435\u0440\u043E\u044F.",
-      hi: () => document.querySelector(tutHandSel("nec_03")),
-      ok: () => battle.tutPlayedPub("nec_03"),
-      allow: [tutHandSel("nec_03"), TUT_TGT]
-    },
-    {
-      id: 12,
-      lesson: 3,
-      message: "\u0410\u0442\u0430\u043A\u0443\u0439\u0442\u0435 \u0423\u043F\u044B\u0440\u0451\u043C: HP \u0433\u0435\u0440\u043E\u044F \u0432\u043E\u0441\u0441\u0442\u0430\u043D\u043E\u0432\u0438\u0442\u0441\u044F \u2014 \u044D\u0442\u043E \u0412\u0430\u043C\u043F\u0438\u0440\u0438\u0437\u043C \u0432 \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0438. (\u041D\u0435\u0442 \u043C\u0430\u043D\u044B/\u0430\u0442\u0430\u043A\u0438 \u2014 \u0437\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u0435 \u0445\u043E\u0434.)",
-      hi: () => document.querySelector('#playerBoard [data-card-id="nec_03"]'),
-      ok: () => (battle.engine?.stats[0 /* Player */].healingDone ?? 0) > 0 || (battle.engine?.stats[0 /* Player */].damageDealt ?? 0) > battle.tutMarkDmg,
-      allow: [TUT_TGT]
-    },
-    {
-      id: 13,
-      lesson: 3,
-      message: "\u041D\u0435\u0443\u043B\u043E\u0432\u0438\u043C\u043E\u0441\u0442\u044C \u{1F441} (\u043D\u0435\u0443\u044F\u0437\u0432\u0438\u043C\u043E\u0441\u0442\u044C): \xAB\u042D\u0444\u0438\u0440\u043D\u044B\u0439 \u0440\u0430\u0437\u0432\u0435\u0434\u0447\u0438\u043A\xBB (1\u2726) \u043D\u0435 \u043C\u043E\u0436\u0435\u0442 \u0431\u044B\u0442\u044C \u0432\u044B\u0431\u0440\u0430\u043D \u0446\u0435\u043B\u044C\u044E \u0432\u0440\u0430\u0433\u043E\u043C. \u0420\u0430\u0437\u044B\u0433\u0440\u0430\u0439\u0442\u0435 \u0435\u0433\u043E.",
+      mana: 1,
+      message: "\u0425\u043E\u0434 1 \xB7 1\u2726. \u041D\u0435\u0443\u043B\u043E\u0432\u0438\u043C\u043E\u0441\u0442\u044C \u{1F441}: \xAB\u042D\u0444\u0438\u0440\u043D\u044B\u0439 \u0440\u0430\u0437\u0432\u0435\u0434\u0447\u0438\u043A\xBB (1\u2726) \u043D\u0435 \u043C\u043E\u0436\u0435\u0442 \u0431\u044B\u0442\u044C \u0432\u044B\u0431\u0440\u0430\u043D \u0446\u0435\u043B\u044C\u044E \u0432\u0440\u0430\u0433\u043E\u043C. \u0420\u0430\u0437\u044B\u0433\u0440\u0430\u0439\u0442\u0435 \u0435\u0433\u043E.",
       hi: () => document.querySelector(tutHandSel("eth_01")),
       ok: () => battle.tutPlayedPub("eth_01"),
       allow: [tutHandSel("eth_01"), TUT_TGT]
     },
     {
+      id: 12,
+      lesson: 3,
+      message: "\u041C\u0430\u043D\u0430 \u0437\u0430\u043A\u043E\u043D\u0447\u0438\u043B\u0430\u0441\u044C. \u0417\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u0435 \u0445\u043E\u0434.",
+      hi: () => $("btnEndTurn"),
+      ok: tutTurnBack,
+      allow: END
+    },
+    {
+      id: 13,
+      lesson: 3,
+      mana: 2,
+      message: "\u0425\u043E\u0434 2 \xB7 2\u2726. \u0412\u0430\u043C\u043F\u0438\u0440\u0438\u0437\u043C \u{1FA78}: \u0440\u0430\u0437\u044B\u0433\u0440\u0430\u0439\u0442\u0435 \xAB\u0423\u043F\u044B\u0440\u044F-\u043C\u0430\u0440\u043E\u0434\u0451\u0440\u0430\xBB (2\u2726) \u2014 \u0435\u0433\u043E \u0443\u0440\u043E\u043D \u043B\u0435\u0447\u0438\u0442 \u0432\u0430\u0448\u0435\u0433\u043E \u0433\u0435\u0440\u043E\u044F.",
+      hi: () => document.querySelector(tutHandSel("nec_03")),
+      ok: () => battle.tutPlayedPub("nec_03"),
+      allow: [tutHandSel("nec_03"), TUT_TGT]
+    },
+    {
       id: 14,
       lesson: 3,
-      message: "\u0411\u043E\u0435\u0432\u043E\u0439 \u043A\u043B\u0438\u0447 \u2726: \xAB\u0420\u0430\u0441\u0441\u0432\u0435\u0442\u043D\u044B\u0439 \u043A\u0430\u043F\u0435\u043B\u043B\u0430\u043D\xBB (2\u2726) \u0441\u0440\u0430\u0431\u0430\u0442\u044B\u0432\u0430\u0435\u0442 \u043F\u0440\u0438 \u0432\u044B\u0445\u043E\u0434\u0435 \u043D\u0430 \u043F\u043E\u043B\u0435. \u0420\u0430\u0437\u044B\u0433\u0440\u0430\u0439\u0442\u0435 \u0435\u0433\u043E.",
+      message: "\u041C\u0430\u043D\u0430 \u043F\u043E\u0442\u0440\u0430\u0447\u0435\u043D\u0430. \u0417\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u0435 \u0445\u043E\u0434 \u2014 \u0423\u043F\u044B\u0440\u044C \u0441\u043C\u043E\u0436\u0435\u0442 \u0430\u0442\u0430\u043A\u043E\u0432\u0430\u0442\u044C \u043D\u0430 \u0441\u043B\u0435\u0434\u0443\u044E\u0449\u0435\u043C.",
+      hi: () => $("btnEndTurn"),
+      ok: tutTurnBack,
+      allow: END
+    },
+    {
+      id: 15,
+      lesson: 3,
+      mana: 2,
+      message: "\u0425\u043E\u0434 3 \xB7 3\u2726. \u0411\u043E\u0435\u0432\u043E\u0439 \u043A\u043B\u0438\u0447 \u2726: \xAB\u0420\u0430\u0441\u0441\u0432\u0435\u0442\u043D\u044B\u0439 \u043A\u0430\u043F\u0435\u043B\u043B\u0430\u043D\xBB (2\u2726) \u0441\u0440\u0430\u0431\u0430\u0442\u044B\u0432\u0430\u0435\u0442 \u043F\u0440\u0438 \u0432\u044B\u0445\u043E\u0434\u0435 \u043D\u0430 \u043F\u043E\u043B\u0435. \u0420\u0430\u0437\u044B\u0433\u0440\u0430\u0439\u0442\u0435 \u0435\u0433\u043E.",
       hi: () => document.querySelector(tutHandSel("aur_03")),
       ok: () => battle.tutPlayedPub("aur_03"),
       allow: [tutHandSel("aur_03"), TUT_TGT]
     },
     {
-      id: 15,
-      lesson: 3,
-      message: "\u0412\u0441\u0435 \u0442\u0440\u0438 \u043C\u0435\u0445\u0430\u043D\u0438\u043A\u0438 \u0432 \u0434\u0435\u043B\u0435! \u0417\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u0435 \u0445\u043E\u0434.",
-      hi: () => $("btnEndTurn"),
-      ok: () => (battle.engine?.turn ?? 0) > battle.tutMark,
-      allow: ["#btnEndTurn"]
-    },
-    /* --- урок 4 · Ресурсы (шаги 16-20): кривая маны --- */
-    {
       id: 16,
-      lesson: 4,
-      message: "\u041C\u0430\u043D\u0430 \u0440\u0430\u0441\u0442\u0451\u0442 \u043D\u0430 +1 \u043A\u0430\u0436\u0434\u044B\u0439 \u0445\u043E\u0434 (\u0434\u043E 10). \u041A\u043B\u0438\u043A\u043D\u0438\u0442\u0435 \xAB\u0421\u0435\u0440\u0430\u0444\u0438\u043C\u0430 \u0417\u0430\u0440\u0438\xBB (5\u2726) \u2014 \u0440\u0430\u043D\u043E, \u043C\u0430\u043D\u044B \u043D\u0435 \u0445\u0432\u0430\u0442\u0438\u0442. \u042D\u0442\u043E \u0438 \u0435\u0441\u0442\u044C \u043A\u0440\u0438\u0432\u0430\u044F \u043C\u0430\u043D\u044B.",
-      hi: () => document.querySelector(tutHandSel("aur_09")),
-      ok: () => battle.tutTapPub(),
-      allow: [tutHandSel("aur_09"), "#btnEndTurn"]
+      lesson: 3,
+      message: "\u0410\u0442\u0430\u043A\u0443\u0439\u0442\u0435 \u0423\u043F\u044B\u0440\u0451\u043C \u2014 \u0443\u0440\u043E\u043D \u0432\u044B\u043B\u0435\u0447\u0438\u0442 \u0433\u0435\u0440\u043E\u044F (\u0412\u0430\u043C\u043F\u0438\u0440\u0438\u0437\u043C). \u0415\u0441\u043B\u0438 \u0423\u043F\u044B\u0440\u044F \u0443\u0436\u0435 \u043D\u0435\u0442 \u2014 \u0437\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u0435 \u0445\u043E\u0434.",
+      hi: () => document.querySelector('#playerBoard [data-card-id="nec_03"]'),
+      ok: () => tutStat("damageDealt") > battle.tutMarkDmg || !tutOnBoard("nec_03") || (tutE()?.turn ?? 0) > battle.tutMark,
+      allow: [TUT_TGT, "#hand"]
     },
     {
       id: 17,
+      lesson: 3,
+      message: "\u0412\u0441\u0435 \u0442\u0440\u0438 \u043C\u0435\u0445\u0430\u043D\u0438\u043A\u0438 \u0432 \u0434\u0435\u043B\u0435! \u0417\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u0435 \u0445\u043E\u0434, \u0447\u0442\u043E\u0431\u044B \u0437\u0430\u043A\u043E\u043D\u0447\u0438\u0442\u044C \u0443\u0440\u043E\u043A.",
+      hi: () => $("btnEndTurn"),
+      ok: () => (tutE()?.turn ?? 0) > battle.tutMark || tutE()?.activeSide === 1 /* Opponent */,
+      allow: END
+    },
+    /* --- урок 4 · Ресурсы: кривая маны 1✦ → 2✦ → 3✦ --- */
+    {
+      id: 18,
       lesson: 4,
-      message: "\u0414\u043E\u0440\u043E\u0433\u0438\u0435 \u043A\u0430\u0440\u0442\u044B \u2014 \u043D\u0430 \u043F\u043E\u0437\u0434\u043D\u0438\u0439 \u0445\u043E\u0434. \u0421\u044B\u0433\u0440\u0430\u0439\u0442\u0435 \u0434\u0435\u0448\u0451\u0432\u0443\u044E: \xAB\u041F\u043E\u0441\u043B\u0443\u0448\u043D\u0438\u043A \u0421\u0432\u0435\u0442\u0430\xBB (1\u2726).",
+      mana: 1,
+      message: "\u0425\u043E\u0434 1 \xB7 1\u2726. \u041A\u043B\u0438\u043A\u043D\u0438\u0442\u0435 \xAB\u0421\u0435\u0440\u0430\u0444\u0438\u043C\u0430 \u0417\u0430\u0440\u0438\xBB (5\u2726) \u2014 \u043C\u0430\u043D\u044B \u043D\u0435 \u0445\u0432\u0430\u0442\u0438\u0442: \u0434\u043E\u0440\u043E\u0433\u0438\u0435 \u043A\u0430\u0440\u0442\u044B \u0436\u0434\u0443\u0442 \u043F\u043E\u0437\u0434\u043D\u0438\u0445 \u0445\u043E\u0434\u043E\u0432.",
+      hi: () => document.querySelector(tutHandSel("aur_09")),
+      ok: () => battle.tutTapPub(),
+      allow: [tutHandSel("aur_09")]
+    },
+    {
+      id: 19,
+      lesson: 4,
+      mana: 1,
+      message: "\u0418\u0433\u0440\u0430\u0439\u0442\u0435 \u043F\u043E \u043A\u0440\u0438\u0432\u043E\u0439: \u043D\u0430 1\u2726 \u2014 \xAB\u041F\u043E\u0441\u043B\u0443\u0448\u043D\u0438\u043A \u0421\u0432\u0435\u0442\u0430\xBB (1\u2726).",
       hi: () => document.querySelector(tutHandSel("aur_01")),
       ok: () => battle.tutPlayedPub("aur_01"),
       allow: [tutHandSel("aur_01"), TUT_TGT]
     },
     {
-      id: 18,
-      lesson: 4,
-      message: "\u0417\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u0435 \u0445\u043E\u0434 \u2014 \u043C\u0430\u043D\u044B \u0441\u0442\u0430\u043D\u0435\u0442 \u0431\u043E\u043B\u044C\u0448\u0435.",
-      hi: () => $("btnEndTurn"),
-      ok: () => (battle.engine?.turn ?? 0) > battle.tutMark,
-      allow: ["#btnEndTurn"]
-    },
-    {
-      id: 19,
-      lesson: 4,
-      message: "\u041C\u0430\u043D\u0430 \u0432\u044B\u0440\u043E\u0441\u043B\u0430! \u0421\u044B\u0433\u0440\u0430\u0439\u0442\u0435 \u0435\u0449\u0451 2 \u043A\u0430\u0440\u0442\u044B \u2014 \u043D\u0435 \u043A\u043E\u043F\u0438\u0442\u0435 \u0434\u043E\u0440\u043E\u0433\u043E\u0435, \u0438\u0433\u0440\u0430\u0439\u0442\u0435 \u043F\u043E \u043A\u0440\u0438\u0432\u043E\u0439.",
-      hi: () => null,
-      ok: () => (battle.engine?.stats[0 /* Player */].cardsPlayed ?? 0) >= battle.tutMarkCards + 2,
-      allow: ["#hand", TUT_TGT]
-    },
-    {
       id: 20,
       lesson: 4,
-      message: "\u041A\u0440\u0438\u0432\u0430\u044F \u043C\u0430\u043D\u044B \u043E\u0441\u0432\u043E\u0435\u043D\u0430! \u0417\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u0435 \u0445\u043E\u0434 \u2014 \u043D\u0430\u0433\u0440\u0430\u0434\u0430 \u0437\u0430 \u0432\u0441\u0435 \u0443\u0440\u043E\u043A\u0438 \u0436\u0434\u0451\u0442 \u0432 \u043C\u0435\u043D\u044E \xAB\u{1F393} \u041E\u0431\u0443\u0447\u0435\u043D\u0438\u0435\xBB.",
+      message: "\u0417\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u0435 \u0445\u043E\u0434 \u2014 \u0441\u0442\u0430\u043D\u0435\u0442 2\u2726.",
       hi: () => $("btnEndTurn"),
-      ok: () => (battle.engine?.turn ?? 0) > battle.tutMark,
-      allow: ["#btnEndTurn"]
+      ok: tutTurnBack,
+      allow: END
+    },
+    {
+      id: 21,
+      lesson: 4,
+      mana: 2,
+      message: "\u0425\u043E\u0434 2 \xB7 2\u2726. \u041F\u043E\u0442\u0440\u0430\u0442\u044C\u0442\u0435 \u0432\u0441\u044E \u043C\u0430\u043D\u0443: \xAB\u0420\u0430\u0441\u0441\u0432\u0435\u0442\u043D\u044B\u0439 \u043A\u0430\u043F\u0435\u043B\u043B\u0430\u043D\xBB (2\u2726).",
+      hi: () => document.querySelector(tutHandSel("aur_03")),
+      ok: () => battle.tutPlayedPub("aur_03"),
+      allow: [tutHandSel("aur_03"), TUT_TGT]
+    },
+    {
+      id: 22,
+      lesson: 4,
+      message: "\u0417\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u0435 \u0445\u043E\u0434 \u2014 \u0441\u0442\u0430\u043D\u0435\u0442 3\u2726.",
+      hi: () => $("btnEndTurn"),
+      ok: tutTurnBack,
+      allow: END
+    },
+    {
+      id: 23,
+      lesson: 4,
+      mana: 1,
+      message: "\u0425\u043E\u0434 3 \xB7 3\u2726. \u0421\u044B\u0433\u0440\u0430\u0439\u0442\u0435 \xAB\u041B\u0443\u0447 \u0420\u0430\u0441\u0441\u0432\u0435\u0442\u0430\xBB (1\u2726) \u2014 \u0442\u0440\u0435\u0442\u044C\u044F \u043A\u0430\u0440\u0442\u0430 \u0437\u0430 \u0442\u0440\u0438 \u0445\u043E\u0434\u0430, \u043A\u0440\u0438\u0432\u0430\u044F \u043E\u0441\u0432\u043E\u0435\u043D\u0430.",
+      hi: () => document.querySelector(tutHandSel("aur_s01")),
+      ok: () => battle.tutPlayedPub("aur_s01"),
+      allow: [tutHandSel("aur_s01"), TUT_TGT]
     }
   ];
+  var TUT_LESSON_STEPS = (lesson) => TUT_STEPS.filter((st) => st.lesson === lesson);
   function tutCoach(text) {
     const n = $("tutCoach");
     if (!n) return;
@@ -30410,9 +31762,22 @@
       applySettings();
     });
   });
-  btn("btnMenu").addEventListener("click", () => openHomeScreen());
+  btn("btnMenu").addEventListener("click", () => {
+    if (battle.net && battle.running) {
+      if (!window.confirm("\u0412\u044B\u0439\u0442\u0438 \u0438\u0437 \u043E\u043D\u043B\u0430\u0439\u043D-\u043C\u0430\u0442\u0447\u0430? \u042D\u0442\u043E \u0437\u0430\u0441\u0447\u0438\u0442\u0430\u0435\u0442\u0441\u044F \u043A\u0430\u043A \u043F\u043E\u0440\u0430\u0436\u0435\u043D\u0438\u0435.")) return;
+      battle.net.concede();
+      return;
+    }
+    openHomeScreen();
+  });
   btn("btnAgain").addEventListener("click", () => {
     $("gameover").classList.add("hidden");
+    if (battle.lastWasNet || battle.net) {
+      battle.lastWasNet = false;
+      openHomeScreen();
+      openOnline();
+      return;
+    }
     battle.start().catch((err) => reportFatal("restart", err));
   });
   btn("btnGoMenu").addEventListener("click", () => openHomeScreen());
@@ -30663,13 +32028,30 @@
     document.getElementById("authLogin")?.focus();
   }
   function closeAuth() {
+    if (authGateOn()) return;
     document.getElementById("authModal")?.classList.add("hidden");
+  }
+  function authGateOn() {
+    return !!document.getElementById("authModal")?.classList.contains("gate");
+  }
+  function authRequired() {
+    return !window.EC_NO_AUTH_GATE;
+  }
+  function authGateCheck() {
+    const m = document.getElementById("authModal");
+    if (!m || !authRequired()) return;
+    if (meta.signedIn && authGet()) {
+      m.classList.remove("gate");
+      return;
+    }
+    m.classList.add("gate");
+    openAuth("login");
   }
   async function pullProfile(pid) {
     try {
       const ctl = new AbortController();
       const t = window.setTimeout(() => ctl.abort(), 2e3);
-      const r = await window.fetch(`${META_API()}/api/profile?pid=${encodeURIComponent(pid)}`, { signal: ctl.signal });
+      const r = await authFetch(`${META_API()}/api/profile?pid=${encodeURIComponent(pid)}`, { signal: ctl.signal });
       window.clearTimeout(t);
       if (!r.ok) return;
       const gp = await r.json();
@@ -30713,6 +32095,15 @@
         if (c.tableSkin) meta.tableSkin = c.tableSkin;
         if (c.runeSkin) meta.runeSkin = c.runeSkin;
       }
+      meta.lastSynced = {
+        shards: shardsGet(),
+        gems: meta.gems ?? 0,
+        freeOpens: meta.freeOpens ?? 0,
+        mmr: meta.mmr,
+        wins: meta.wins,
+        losses: meta.losses,
+        bpXp: meta.bpXp ?? 0
+      };
       metaSave();
     } catch {
     }
@@ -30729,8 +32120,8 @@
       setErr("\u041B\u043E\u0433\u0438\u043D:3\u201320 \u0441\u0438\u043C\u0432\u043E\u043B\u043E\u0432, \u043B\u0430\u0442\u0438\u043D\u0438\u0446\u0430/\u0446\u0438\u0444\u0440\u044B/_.-");
       return;
     }
-    if (pw.length < 4) {
-      setErr("\u041F\u0430\u0440\u043E\u043B\u044C: \u043C\u0438\u043D\u0438\u043C\u0443\u043C4 \u0441\u0438\u043C\u0432\u043E\u043B\u0430");
+    if (pw.length < 8) {
+      setErr("\u041F\u0430\u0440\u043E\u043B\u044C: \u043C\u0438\u043D\u0438\u043C\u0443\u043C 8 \u0441\u0438\u043C\u0432\u043E\u043B\u043E\u0432");
       return;
     }
     try {
@@ -30748,21 +32139,25 @@
         setErr(j.error || `\u041E\u0448\u0438\u0431\u043A\u0430 \u0441\u0435\u0440\u0432\u0435\u0440\u0430 (${r.status})`);
         return;
       }
+      authSet(j);
       const accPid = String(j.pid || meta.pid);
-      if (accPid && accPid !== meta.pid) {
-        meta.pid = accPid;
+      if (meta.nick === "\u0413\u043E\u0441\u0442\u044C") meta.nick = String(j.login || login);
+      if (accPid) {
+        if (accPid !== meta.pid) meta.pid = accPid;
+        await syncProfile();
         await pullProfile(accPid);
       }
-      if (meta.nick === "\u0413\u043E\u0441\u0442\u044C") meta.nick = String(j.login || login);
       meta.signedIn = true;
       metaSave();
       syncProfile();
       syncAccountRow();
       renderShards();
+      document.getElementById("authModal")?.classList.remove("gate");
       closeAuth();
+      void friendsRefresh();
       showToast(authMode === "login" ? `\u{1F511} \u0412\u044B \u0432\u043E\u0448\u043B\u0438: ${j.login}` : `\u{1F389} \u0410\u043A\u043A\u0430\u0443\u043D\u0442 \u0441\u043E\u0437\u0434\u0430\u043D: ${j.login}`);
     } catch {
-      setErr("\u0421\u0435\u0440\u0432\u0435\u0440 \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u0435\u043D \u2014 \u0437\u0430\u043F\u0443\u0441\u0442\u0438 `npm run server:meta` (:8081) \u0438\u043B\u0438 \u0438\u0433\u0440\u0430\u0439 \u043B\u043E\u043A\u0430\u043B\u044C\u043D\u043E \u043A\u0430\u043A \u0413\u043E\u0441\u0442\u044C");
+      setErr("\u0421\u0435\u0440\u0432\u0435\u0440 \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u0435\u043D. \u0417\u0430\u043F\u0443\u0441\u0442\u0438\u0442\u0435 npm run server:meta (\u043F\u043E\u0440\u0442 8081) \u0438 \u043F\u043E\u043F\u0440\u043E\u0431\u0443\u0439\u0442\u0435 \u0441\u043D\u043E\u0432\u0430.");
     }
   }
   document.getElementById("btnLoginOpen")?.addEventListener("click", () => openAuth("login"));
@@ -30791,9 +32186,14 @@
     });
   }
   syncAccountRow();
+  authGateCheck();
   var logoutB = document.getElementById("btnLogout");
   if (logoutB) logoutB.addEventListener("click", () => {
     if (!window.confirm("\u0412\u044B\u0439\u0442\u0438 \u0438\u0437 \u0430\u043A\u043A\u0430\u0443\u043D\u0442\u0430? \u041B\u043E\u043A\u0430\u043B\u044C\u043D\u044B\u0439 \u043F\u0440\u043E\u0433\u0440\u0435\u0441\u0441 \u0441\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u0441\u044F.")) return;
+    const tok = authGet();
+    if (tok) void window.fetch(`${META_API()}/api/auth/logout`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ refreshToken: tok.refreshToken }) }).catch(() => void 0);
+    if (tok) void window.fetch(`${META_API()}/api/presence`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${tok.accessToken}` }, body: JSON.stringify({ status: "offline" }) }).catch(() => void 0);
+    authSet(null);
     meta.signedIn = false;
     meta.nick = "\u0413\u043E\u0441\u0442\u044C";
     metaSave();
@@ -30801,6 +32201,8 @@
     document.getElementById("settingsScrim")?.classList.add("hidden");
     syncAccountRow();
     showToast("\u{1F44B} \u0412\u044B \u0432\u044B\u0448\u043B\u0438 \u0438\u0437 \u0430\u043A\u043A\u0430\u0443\u043D\u0442\u0430");
+    friendsClose();
+    authGateCheck();
   });
   ["colFaction", "colType", "colRarity", "colCost", "colKw", "colStyle"].forEach((id) => sel(id).addEventListener("change", renderCollection));
   $("colOwned").addEventListener("change", renderCollection);
@@ -30852,7 +32254,7 @@
       <span title="\u0421\u0442\u043E\u0438\u043C\u043E\u0441\u0442\u044C \u043C\u0430\u043D\u044B">\u2726 ${c.cost}</span>
       ${c.type === "Creature" /* Creature */ ? `<span title="\u0410\u0442\u0430\u043A\u0430">\u2694 ${c.attack ?? 0}</span><span title="\u0417\u0434\u043E\u0440\u043E\u0432\u044C\u0435">\u2764 ${c.health ?? 0}</span>` : ""}
     </div>
-    <div class="cmText">${kws.length ? `<span class="cmKw">${kws.map((k) => `<strong class="cardKeyword">${esc(k)}</strong>`).join(" \xB7 ")}.</span> ` : ""}${highlightCardKeywords(cardText(c) || bi("\u0411\u0435\u0437 \u0442\u0435\u043A\u0441\u0442\u0430 \u0441\u043F\u043E\u0441\u043E\u0431\u043D\u043E\u0441\u0442\u0438.", "No ability text."))}</div>
+    <div class="cmText">${c.type === "Creature" /* Creature */ && !isEN() ? cardBodyHtml(c) : `${kws.length ? `<span class="cmKw">${kws.map((k) => `<strong class="cardKeyword">${esc(k)}</strong>`).join(" \xB7 ")}.</span> ` : ""}${highlightCardKeywords(cardText(c) || bi("\u0411\u0435\u0437 \u0442\u0435\u043A\u0441\u0442\u0430 \u0441\u043F\u043E\u0441\u043E\u0431\u043D\u043E\u0441\u0442\u0438.", "No ability text."))}`}</div>
     ${cardFlavor(c) ? `<div class="cmFlavor">${esc(cardFlavor(c))}</div>` : ""}`;
     $("cmStylePicker").querySelectorAll("[data-cm-style]").forEach((button) => {
       button.addEventListener("click", () => {
@@ -31344,98 +32746,231 @@
     resolve: (id) => resolveDeck(id, deckList),
     pool: (faction) => POOL_CARDS.filter((c) => c.faction === faction || c.faction === "Neutral" /* Neutral */).map((c) => ({ id: c.id, rarity: c.rarity }))
   };
-  var RULES_HTML = `
-<h3 style="color:var(--gold-hi);letter-spacing:.1em;margin:.6rem 0">\u0426\u0435\u043B\u044C \u0438 \u0440\u0435\u0441\u0443\u0440\u0441\u044B</h3>
-<p>\u0421\u043D\u0438\u0437\u044C\u0442\u0435 \u0437\u0434\u043E\u0440\u043E\u0432\u044C\u0435 \u0433\u0435\u0440\u043E\u044F \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430 \u0441 <b>30</b> \u0434\u043E <b>0</b>. \u041A\u043E\u043B\u043E\u0434\u0430 \u2014 \u043C\u0438\u043D\u0438\u043C\u0443\u043C <b>60</b> \u043A\u0430\u0440\u0442, \u043D\u0435 \u0431\u043E\u043B\u0435\u0435 <b>4</b> \u043A\u043E\u043F\u0438\u0439 \u043B\u044E\u0431\u043E\u0439 \u043A\u0430\u0440\u0442\u044B (\u0432\u043A\u043B\u044E\u0447\u0430\u044F \u043B\u0435\u0433\u0435\u043D\u0434\u0430\u0440\u043D\u044B\u0435); \u0432\u0435\u0440\u0445\u043D\u0435\u0433\u043E \u043B\u0438\u043C\u0438\u0442\u0430 \u0438 \u0441\u0430\u0439\u0434\u0431\u043E\u0440\u0434\u0430 \u043D\u0435\u0442. \u0421\u0442\u0430\u0440\u0442\u043E\u0432\u0430\u044F \u0440\u0443\u043A\u0430 \u2014 <b>5</b>,
-\u043C\u0443\u043B\u043B\u0438\u0433\u0430\u043D \u0434\u043E\u0441\u0442\u0443\u043F\u0435\u043D <b>\u043E\u0434\u0438\u043D \u0440\u0430\u0437</b> \u0437\u0430 \u0438\u0433\u0440\u0443. \u041C\u0430\u043A\u0441\u0438\u043C\u0443\u043C \u043C\u0430\u043D\u044B \u0440\u0430\u0441\u0442\u0451\u0442 \u043D\u0430 1 \u043A\u0430\u0436\u0434\u044B\u0439 \u0445\u043E\u0434 (\u0434\u043E 10) \u0438 \u043F\u043E\u043B\u043D\u043E\u0441\u0442\u044C\u044E \u0432\u043E\u0441\u043F\u043E\u043B\u043D\u044F\u0435\u0442\u0441\u044F
-\u0432 \u0444\u0430\u0437\u0435 \xAB\u0420\u0435\u0441\u0443\u0440\u0441\u044B\xBB. <b>\u041D\u0435\u0438\u0441\u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u043D\u043D\u0430\u044F \u043C\u0430\u043D\u0430 \u0441\u043E\u0445\u0440\u0430\u043D\u044F\u0435\u0442\u0441\u044F \u0434\u043E \u0432\u0430\u0448\u0435\u0433\u043E \u0441\u043B\u0435\u0434\u0443\u044E\u0449\u0435\u0433\u043E \u0445\u043E\u0434\u0430</b> \u2014 \u043E\u0441\u0442\u0430\u0432\u043B\u044F\u0439\u0442\u0435 \u043C\u0430\u043D\u0443 \u0434\u043B\u044F <b>\u043C\u0433\u043D\u043E\u0432\u0435\u043D\u043D\u044B\u0445 \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0439 \u0432 \u0445\u043E\u0434 \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430</b> (\u043A\u0430\u043A \u0432 MTG). \u041F\u0443\u0441\u0442\u0430\u044F \u043A\u043E\u043B\u043E\u0434\u0430 \u2192 <b>\u0443\u0441\u0442\u0430\u043B\u043E\u0441\u0442\u044C</b>: \u043A\u0430\u0436\u0434\u044B\u0439 \u0434\u043E\u0431\u043E\u0440 \u043D\u0430\u043D\u043E\u0441\u0438\u0442 \u0440\u0430\u0441\u0442\u0443\u0449\u0438\u0439 \u0443\u0440\u043E\u043D.
-\u041D\u0430 \u0434\u043E\u0441\u043A\u0435 \u043D\u0435 \u0431\u043E\u043B\u0435\u0435 <b>7</b> \u0441\u0443\u0449\u0435\u0441\u0442\u0432 \u0438 <b>3</b> \u0440\u0443\u043D \u0443 \u043A\u0430\u0436\u0434\u043E\u0433\u043E \u0438\u0433\u0440\u043E\u043A\u0430.</p>
-
-<h3 style="color:var(--gold-hi);letter-spacing:.1em;margin:.9rem 0">\u041F\u044F\u0442\u044C \u0444\u0430\u0437 \u0445\u043E\u0434\u0430</h3>
-<ol style="padding-left:1.2rem;line-height:2">
-<li><b>\u041D\u0430\u0447\u0430\u043B\u043E</b> \u2014 \u0430\u043A\u0442\u0438\u0432\u0438\u0440\u0443\u044E\u0442\u0441\u044F \u0440\u0443\u043D\u044B, \u043F\u0430\u0441\u0441\u0438\u0432\u043A\u0438 \u0438 \u0442\u0440\u0438\u0433\u0433\u0435\u0440\u044B \u0441\u0443\u0449\u0435\u0441\u0442\u0432, \u0442\u0438\u043A\u0430\u0435\u0442 \u0413\u043E\u0440\u0435\u043D\u0438\u0435, \u0440\u0430\u0437\u0440\u0435\u0448\u0430\u044E\u0442\u0441\u044F \u0440\u0438\u0442\u0443\u0430\u043B\u044B.</li>
-<li><b>\u0420\u0435\u0441\u0443\u0440\u0441\u044B</b> \u2014 +1 \u043A \u043C\u0430\u043A\u0441\u0438\u043C\u0443\u043C\u0443 \u043C\u0430\u043D\u044B, \u043F\u043E\u043B\u043D\u043E\u0435 \u0432\u043E\u0441\u043F\u043E\u043B\u043D\u0435\u043D\u0438\u0435 (<span style="color:#8ad0ff">\u0438\u0437\u0431\u044B\u0442\u043E\u043A \u043D\u0435 \u0441\u0433\u043E\u0440\u0430\u0435\u0442 \u2014 \u043A\u043E\u043F\u0438\u0442\u0435 \u0434\u043B\u044F \u043C\u0433\u043D\u043E\u0432\u0435\u043D\u043D\u044B\u0445</span>), \u0434\u043E\u0431\u043E\u0440 \u043A\u0430\u0440\u0442\u044B.</li>
-<li><b>\u041E\u0441\u043D\u043E\u0432\u043D\u0430\u044F</b> \u2014 \u0440\u043E\u0437\u044B\u0433\u0440\u044B\u0448 \u041B\u042E\u0411\u042B\u0425 \u043A\u0430\u0440\u0442. <b>\u041C\u0433\u043D\u043E\u0432\u0435\u043D\u043D\u044B\u0435 (\u26A1)</b> \u043C\u043E\u0436\u043D\u043E \u0438\u0433\u0440\u0430\u0442\u044C \u0438 \u0437\u0434\u0435\u0441\u044C, \u0438 \u0432\u043D\u0435 \u0435\u0451.</li>
-<li><b>\u0411\u0438\u0442\u0432\u0430</b> \u2014 <b>\u0440\u0443\u0447\u043D\u0430\u044F</b>: \u0432\u044B \u043E\u0431\u044A\u044F\u0432\u043B\u044F\u0435\u0442\u0435 \u0430\u0442\u0430\u043A\u0443\u044E\u0449\u0438\u0445 \u0441\u0442\u0440\u0435\u043B\u043A\u043E\u0439. \u0414\u043E \u0438 \u043F\u043E\u0441\u043B\u0435 \u043E\u0431\u044A\u044F\u0432\u043B\u0435\u043D\u0438\u044F \u0430\u0442\u0430\u043A <b>\u043E\u0431\u0430 \u0438\u0433\u0440\u043E\u043A\u0430 \u043F\u043E\u043B\u0443\u0447\u0430\u044E\u0442 \u043F\u0440\u0438\u043E\u0440\u0438\u0442\u0435\u0442 \u0434\u043B\u044F \u043C\u0433\u043D\u043E\u0432\u0435\u043D\u043D\u044B\u0445</b>. \xAB\u041F\u0440\u043E\u043F\u0443\u0441\u0442\u0438\u0442\u044C \u0431\u043E\u0439\xBB \u2014 \u0437\u0430\u043A\u043E\u043D\u0447\u0438\u0442\u044C \u0431\u0435\u0437 \u0430\u0442\u0430\u043A.</li>
-<li><b>\u041A\u043E\u043D\u0435\u0446</b> \u2014 \u043D\u0430\u0447\u0438\u0441\u043B\u0435\u043D\u0438\u0435 \u042D\u0445\u043E-\u043E\u0447\u043A\u0430, \u0438\u0441\u0442\u0435\u0447\u0435\u043D\u0438\u0435 \u044D\u0444\u0444\u0435\u043A\u0442\u043E\u0432, \u0441\u0440\u043E\u043A \u0436\u0438\u0437\u043D\u0438 \u0440\u0443\u043D. \u041C\u0433\u043D\u043E\u0432\u0435\u043D\u043D\u044B\u0435 \u0435\u0449\u0451 \u043C\u043E\u0436\u043D\u043E \u0440\u0430\u0437\u044B\u0433\u0440\u0430\u0442\u044C \xAB\u0432 \u043A\u043E\u043D\u0435\u0446 \u0445\u043E\u0434\u0430\xBB.</li>
-</ol>
-
-<h3 style="color:var(--gold-hi);letter-spacing:.1em;margin:.9rem 0">\u26A1 \u041C\u0433\u043D\u043E\u0432\u0435\u043D\u043D\u044B\u0435 \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u044F \u2014 \u043A\u0430\u043A \u0432 MTG (\u0432\u0430\u0436\u043D\u043E)</h3>
-<p><b>\u041C\u0433\u043D\u043E\u0432\u0435\u043D\u043D\u043E\u0435 \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0435 (\u26A1 \u041C\u0433\u043D\u043E\u0432\u0435\u043D\u043D\u043E\u0435, Instant)</b> \u043F\u0440\u0438 \u043D\u0430\u043B\u0438\u0447\u0438\u0438 \u043C\u0430\u043D\u044B \u043C\u043E\u0436\u043D\u043E \u0440\u0430\u0437\u044B\u0433\u0440\u0430\u0442\u044C <b>\u0432 \u043B\u044E\u0431\u043E\u0439 \u043C\u043E\u043C\u0435\u043D\u0442, \u043A\u043E\u0433\u0434\u0430 \u0443 \u0432\u0430\u0441 \u0435\u0441\u0442\u044C \u043F\u0440\u0438\u043E\u0440\u0438\u0442\u0435\u0442</b> \u2014 \u043D\u0435 \u0442\u043E\u043B\u044C\u043A\u043E \u0432 \u0441\u0432\u043E\u0439 Main:</p>
-<ul style="padding-left:1.2rem;line-height:1.7;margin:.4rem 0">
-<li><b>\u0412 \u0432\u0430\u0448 \u0445\u043E\u0434:</b> \u0432 \u043E\u0441\u043D\u043E\u0432\u043D\u0443\u044E \u0444\u0430\u0437\u0443, \u0432 \u0444\u0430\u0437\u0435 \u0411\u0438\u0442\u0432\u044B (\u0434\u043E/\u043F\u043E\u0441\u043B\u0435 \u0430\u0442\u0430\u043A), \u0432 \u0444\u0430\u0437\u0435 \u041A\u043E\u043D\u0446\u0430.</li>
-<li><b>\u0412 \u0445\u043E\u0434 \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430:</b> \u0432 \u0435\u0433\u043E \u043E\u0441\u043D\u043E\u0432\u043D\u0443\u044E \u0444\u0430\u0437\u0443, \u043F\u0435\u0440\u0435\u0434 \u0435\u0433\u043E \u0430\u0442\u0430\u043A\u043E\u0439, \u0432 \u043A\u043E\u043D\u0446\u0435 \u0435\u0433\u043E \u0445\u043E\u0434\u0430 \u2014 \u043A\u0430\u0440\u0442\u044B \u043F\u043E\u0434\u0441\u0432\u0435\u0447\u0435\u043D\u044B <span style="display:inline-block;padding:0 .35em;border-radius:4px;background:rgba(120,220,255,.18);border:1px solid rgba(120,220,255,.35);color:#8ad0ff">\u26A1 instantReady</span> (\u0433\u043E\u043B\u0443\u0431\u0430\u044F \u043F\u0443\u043B\u044C\u0441\u0430\u0446\u0438\u044F + \u26A1 \u0431\u0435\u0439\u0434\u0436).</li>
-<li><b>\u0412 \u043E\u0442\u0432\u0435\u0442 \u043D\u0430 \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0435:</b> \u043B\u044E\u0431\u043E\u0435 \u043C\u0433\u043D\u043E\u0432\u0435\u043D\u043D\u043E\u0435 \u0443\u0445\u043E\u0434\u0438\u0442 \u0432 <b>\u0441\u0442\u0435\u043A LIFO</b> \u2014 \u043F\u043E\u0441\u043B\u0435\u0434\u043D\u0435\u0435 \u0441\u044B\u0433\u0440\u0430\u043D\u043D\u043E\u0435 \u0440\u0430\u0437\u0440\u0435\u0448\u0430\u0435\u0442\u0441\u044F \u043F\u0435\u0440\u0432\u044B\u043C. \u041F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A \u043F\u043E\u043B\u0443\u0447\u0430\u0435\u0442 \u043E\u043A\u043D\u043E \u043E\u0442\u0432\u0435\u0442\u0430.</li>
-</ul>
-<p><b>\u041F\u0440\u0438\u043E\u0440\u0438\u0442\u0435\u0442 \u0438 \u0441\u0442\u0435\u043A (MTG):</b></p>
-<ul style="padding-left:1.2rem;line-height:1.7;margin:.4rem 0">
-<li>\u041A\u043E\u0433\u0434\u0430 \u0432\u044B \u0440\u0430\u0437\u044B\u0433\u0440\u044B\u0432\u0430\u0435\u0442\u0435 \u043C\u0433\u043D\u043E\u0432\u0435\u043D\u043D\u043E\u0435, \u043E\u043D\u043E \u043F\u043E\u043F\u0430\u0434\u0430\u0435\u0442 \u0432 <b>\u0441\u0442\u0435\u043A</b>. \u0418\u0433\u0440\u0430 \u0436\u0434\u0451\u0442 <b>20 \u0441</b> (\u0438\u043D\u0434\u0438\u043A\u0430\u0442\u043E\u0440 <code>\u25F7 20 \u0441</code> \u0432 \u043F\u0440\u0430\u0432\u043E\u043C \u0434\u043E\u043A\u0435) \u2014 \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A \u043C\u043E\u0436\u0435\u0442 \u043E\u0442\u0432\u0435\u0442\u0438\u0442\u044C \u0441\u0432\u043E\u0438\u043C \u043C\u0433\u043D\u043E\u0432\u0435\u043D\u043D\u044B\u043C, \u043A\u043E\u0442\u043E\u0440\u043E\u0435 \u0432\u0441\u0442\u0430\u043D\u0435\u0442 \u0432\u044B\u0448\u0435 \u0432 \u0441\u0442\u0435\u043A\u0435.</li>
-<li>\u0415\u0441\u043B\u0438 \u043E\u0431\u0430 \u043F\u0430\u0441\u0443\u044E\u0442 \u2014 \u0441\u0442\u0435\u043A \u0440\u0430\u0437\u0440\u0435\u0448\u0430\u0435\u0442\u0441\u044F <b>\u0441\u0432\u0435\u0440\u0445\u0443 \u0432\u043D\u0438\u0437</b> (\u043F\u043E\u0441\u043B\u0435\u0434\u043D\u0438\u0439 \u043E\u0442\u0432\u0435\u0442 \u0441\u0440\u0430\u0431\u0430\u0442\u044B\u0432\u0430\u0435\u0442 \u043F\u0435\u0440\u0432\u044B\u043C). \u041A\u043D\u043E\u043F\u043A\u0430 <b>\xAB\u041F\u0430\u0441\xBB</b> \u0432 \u0434\u043E\u043A\u0435 \u2014 \u0432\u0440\u0443\u0447\u043D\u0443\u044E \u043F\u0435\u0440\u0435\u0434\u0430\u0442\u044C \u043F\u0440\u0438\u043E\u0440\u0438\u0442\u0435\u0442.</li>
-<li>\u0412 \u0441\u0438\u043C\u0443\u043B\u044F\u0446\u0438\u044F\u0445 \u0438 \u043F\u0440\u0438 \u0432\u043A\u043B\u044E\u0447\u0451\u043D\u043D\u043E\u043C <b>\u0410\u0432\u0442\u043E-\u043F\u0430\u0441</b> (\u2699 \u043D\u0430\u0441\u0442\u0440\u043E\u0439\u043A\u0438) \u043E\u043A\u043D\u043E \u043F\u0440\u043E\u043F\u0443\u0441\u043A\u0430\u0435\u0442\u0441\u044F \u0430\u0432\u0442\u043E\u043C\u0430\u0442\u0438\u0447\u0435\u0441\u043A\u0438. \u0412 \u0431\u043E\u044E \u2014 \u0418\u0418 \u043E\u0442\u0432\u0435\u0447\u0430\u0435\u0442 \u044D\u0432\u0440\u0438\u0441\u0442\u0438\u043A\u043E\u0439 (\u043B\u0435\u0447\u0438\u0442 \u226414 HP, \u0444\u0440\u0438\u0437\u0438\u0442 4+ \u0430\u0442\u0430\u043A\u0443, \u0434\u043E\u0431\u0438\u0432\u0430\u0435\u0442).</li>
-<li>\u041C\u0430\u043D\u0430 \u043D\u0435 \xAB\u0441\u0433\u043E\u0440\u0430\u0435\u0442\xBB \u043C\u0435\u0436\u0434\u0443 \u0444\u0430\u0437\u0430\u043C\u0438: \u043E\u0441\u0442\u0430\u0432\u044C\u0442\u0435 2\u20133 \u043C\u0430\u043D\u044B \u043F\u043E\u0441\u043B\u0435 \u0441\u0432\u043E\u0435\u0433\u043E Main \u2014 \u0438 \u0432 \u0445\u043E\u0434 \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430 \u0441\u043C\u043E\u0436\u0435\u0442\u0435 \xAB\u0432\u0441\u043F\u044B\u0448\u043A\u043E\u0439\xBB \u0434\u043E\u0431\u0438\u0442\u044C \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E, \u0432\u044B\u043B\u0435\u0447\u0438\u0442\u044C \u0433\u0435\u0440\u043E\u044F \u0438\u043B\u0438 \u0437\u0430\u043C\u043E\u0440\u043E\u0437\u0438\u0442\u044C \u0443\u0433\u0440\u043E\u0437\u0443.</li>
-</ul>
-<p style="color:var(--muted);font-size:.78rem">\u0414\u0432\u0438\u0436\u043E\u043A: <code>canPlay()</code> \u0442\u0435\u043F\u0435\u0440\u044C <code>isInstant \u2192 instantWindow===side || instantWindow===null ? allow : wait</code>, \u0432\u043D\u0435 \u043E\u043A\u043D\u0430 \u2014 instant speed \u0431\u0435\u0437 \u043F\u0440\u043E\u0432\u0435\u0440\u043A\u0438 <code>activeSide/phase</code>. \u041D\u0435\u043C\u043E\u0442\u0430/\u043C\u0430\u043D\u0430/\u0446\u0435\u043B\u0438 \u0432\u0441\u0451 \u0435\u0449\u0451 \u043F\u0440\u043E\u0432\u0435\u0440\u044F\u044E\u0442\u0441\u044F.</p>
-
-<h3 style="color:var(--gold-hi);letter-spacing:.1em;margin:.9rem 0">\u0420\u0438\u0442\u0443\u0430\u043B\u044B vs \u043C\u0433\u043D\u043E\u0432\u0435\u043D\u043D\u044B\u0435</h3>
-<p><b>\u25F7 \u0420\u0438\u0442\u0443\u0430\u043B</b> \u2014 \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0435 \u0441 \u0437\u0430\u0434\u0435\u0440\u0436\u043A\u043E\u0439 <b>1 \u0445\u043E\u0434</b>: \u0446\u0435\u043B\u044C \u0444\u0438\u043A\u0441\u0438\u0440\u0443\u0435\u0442\u0441\u044F \u043F\u0440\u0438 \u0440\u043E\u0437\u044B\u0433\u0440\u044B\u0448\u0435, \u0440\u0430\u0437\u0440\u0435\u0448\u0430\u0435\u0442\u0441\u044F <b>\u0432 \u043D\u0430\u0447\u0430\u043B\u0435 \u0432\u0430\u0448\u0435\u0433\u043E \u0441\u043B\u0435\u0434\u0443\u044E\u0449\u0435\u0433\u043E \u0445\u043E\u0434\u0430</b> (\u0441\u0438\u043B\u044C\u043D\u0435\u0435 \u043C\u0433\u043D\u043E\u0432\u0435\u043D\u043D\u043E\u0433\u043E \u0437\u0430 \u0442\u0443 \u0436\u0435 \u043C\u0430\u043D\u0443, \u043D\u043E \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A \u0432\u0438\u0434\u0438\u0442 \u043F\u043E\u0434\u0433\u043E\u0442\u043E\u0432\u043A\u0443). <b>\u041D\u0435\u043B\u044C\u0437\u044F</b> \u0438\u0433\u0440\u0430\u0442\u044C \u0432 \u043E\u0442\u0432\u0435\u0442, <b>\u043D\u0435 \u043F\u043E\u0432\u0442\u043E\u0440\u044F\u0435\u0442\u0441\u044F \u042D\u0445\u043E\u043C</b>, <b>\u043D\u0435 \u0438\u0434\u0451\u0442 \u0432 \u0441\u0442\u0435\u043A</b>.</p>
-<p><b>\u26A1 \u041C\u0433\u043D\u043E\u0432\u0435\u043D\u043D\u043E\u0435</b> \u2014 \u0441\u0440\u0430\u0431\u0430\u0442\u044B\u0432\u0430\u0435\u0442 \u0441\u0440\u0430\u0437\u0443, \u0443\u0445\u043E\u0434\u0438\u0442 \u0432 <b>\u0441\u0431\u0440\u043E\u0441</b>, \u043C\u043E\u0436\u0435\u0442 \u0431\u044B\u0442\u044C <b>\u043F\u043E\u0432\u0442\u043E\u0440\u0435\u043D\u043E \u042D\u0445\u043E\u043C</b>, \u0438\u0434\u0451\u0442 \u0432 <b>\u0441\u0442\u0435\u043A</b> \u0438 \u043C\u043E\u0436\u0435\u0442 \u0431\u044B\u0442\u044C \u0441\u044B\u0433\u0440\u0430\u043D\u043E <b>\u0432 \u0445\u043E\u0434 \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430</b>.</p>
-
-<h3 style="color:var(--gold-hi);letter-spacing:.1em;margin:.9rem 0">\u0411\u043E\u0439 \u2014 \u0432\u044B\u0431\u043E\u0440 \u0446\u0435\u043B\u0438</h3>
-<p><b>\u0411\u0438\u0442\u044C \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u043E\u0431\u044F\u0437\u0430\u0442\u0435\u043B\u044C\u043D\u043E \u0442\u043E\u043B\u044C\u043A\u043E \u0435\u0441\u043B\u0438</b> \u0443 \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430 \u0435\u0441\u0442\u044C <b>\u041F\u0440\u043E\u0432\u043E\u043A\u0430\u0446\u0438\u044F</b> (Taunt) \u0438\u043B\u0438 \u043A\u0430\u0440\u0442\u0430 \u043F\u0440\u044F\u043C\u043E \u043F\u0438\u0448\u0435\u0442 \xAB\u0431\u044C\u0451\u0442 \u0442\u043E\u043B\u044C\u043A\u043E \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E\xBB.
-\u0412\u043E \u0432\u0441\u0435\u0445 \u043E\u0441\u0442\u0430\u043B\u044C\u043D\u044B\u0445 \u0441\u043B\u0443\u0447\u0430\u044F\u0445 <b>\u043C\u043E\u0436\u0435\u0442\u0435 \u0431\u0438\u0442\u044C \u0433\u0435\u0440\u043E\u044F \u043D\u0430\u043F\u0440\u044F\u043C\u0443\u044E</b> (\u0434\u0430\u0436\u0435 \u0435\u0441\u043B\u0438 \u0435\u0441\u0442\u044C \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0430 \u0431\u0435\u0437 \u041F\u0440\u043E\u0432\u043E\u043A\u0430\u0446\u0438\u0438). \u041F\u0435\u0440\u0435\u0434 \u0431\u043B\u043E\u043A\u043E\u043C \u0443\u0440\u043E\u043D\u0430 \u043E\u0431\u0430 \u0438\u0433\u0440\u043E\u043A\u0430 \u043C\u043E\u0433\u0443\u0442 \u0441\u044B\u0433\u0440\u0430\u0442\u044C \u043C\u0433\u043D\u043E\u0432\u0435\u043D\u043D\u044B\u0435 (\u0431\u0430\u0444\u0444, \u0443\u0440\u043E\u043D, \u043B\u0435\u0447\u0435\u043D\u0438\u0435).</p>
-<ul style="padding-left:1.2rem;line-height:1.7;margin:.4rem 0">
-<li>\u0415\u0441\u043B\u0438 \u0435\u0441\u0442\u044C \u043F\u0440\u043E\u0432\u043E\u043A\u0430\u0442\u043E\u0440 (\u043D\u0435 \u043F\u043E\u0434 \u041D\u0435\u043C\u043E\u0442\u043E\u0439) \u2014 \u0433\u0435\u0440\u043E\u0439 \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u0435\u043D, \u043F\u043E\u0434\u0441\u0432\u0435\u0447\u0438\u0432\u0430\u044E\u0442\u0441\u044F \u0442\u043E\u043B\u044C\u043A\u043E \u043F\u0440\u043E\u0432\u043E\u043A\u0430\u0442\u043E\u0440\u044B.</li>
-<li>\u0415\u0441\u043B\u0438 \u043F\u0440\u043E\u0432\u043E\u043A\u0430\u0442\u043E\u0440\u043E\u0432 \u043D\u0435\u0442 \u2014 \u043F\u043E\u0434\u0441\u0432\u0435\u0447\u0438\u0432\u0430\u044E\u0442\u0441\u044F \u0432\u0441\u0435 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0430 + \u0433\u0435\u0440\u043E\u0439 (\u043A\u043B\u0438\u043A \u043F\u043E \u043F\u043E\u0440\u0442\u0440\u0435\u0442\u0443).</li>
-<li>\u041D\u0435\u043C\u043E\u0442\u0430 \u043E\u0442\u043A\u043B\u044E\u0447\u0430\u0435\u0442 \u041F\u0440\u043E\u0432\u043E\u043A\u0430\u0446\u0438\u044E.</li>
-</ul>
-<p style="color:var(--muted);font-size:.78rem">\u0413\u043E\u0442\u043E\u0432\u044B\u0435 \u043A \u0430\u0442\u0430\u043A\u0435 \u2014 \u0437\u043E\u043B\u043E\u0442\u043E\u0439 \u043F\u0443\u043B\u044C\u0441 <code>readyPulse</code> + \u2694, \u043C\u0433\u043D\u043E\u0432\u0435\u043D\u043D\u044B\u0435 \u2014 \u0433\u043E\u043B\u0443\u0431\u043E\u0439 <code>instantPulse</code> + \u26A1.</p>
-
-<h3 style="color:var(--gold-hi);letter-spacing:.1em;margin:.9rem 0">\u041A\u043B\u044E\u0447\u0435\u0432\u044B\u0435 \u0441\u043B\u043E\u0432\u0430 \u0441\u0443\u0449\u0435\u0441\u0442\u0432 \u2014 12 \u043C\u0435\u0445\u0430\u043D\u0438\u043A (\u0440\u0430\u0441\u0448\u0438\u0440\u0435\u043D\u043E v2.12.2)</h3>
-<table style="width:100%;border-collapse:collapse;font-size:.82rem;line-height:1.5">
-<tr><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)"><b>\u041F\u0440\u043E\u0432\u043E\u043A\u0430\u0446\u0438\u044F</b> <span style="color:#ffd87a">\u26E8</span></td><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)">\u041F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A \u043E\u0431\u044F\u0437\u0430\u043D \u0430\u0442\u0430\u043A\u043E\u0432\u0430\u0442\u044C \u044D\u0442\u043E \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E; \u0433\u0435\u0440\u043E\u0439 \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u0435\u043D \u043F\u043E\u043A\u0430 \u043F\u0440\u043E\u0432\u043E\u043A\u0430\u0442\u043E\u0440 \u0436\u0438\u0432. \u0421\u043D\u0438\u043C\u0430\u0435\u0442\u0441\u044F \u041D\u0435\u043C\u043E\u0442\u043E\u0439. <em>65 \u043A\u0430\u0440\u0442</em></td></tr>
-<tr><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)"><b>\u0420\u044B\u0432\u043E\u043A</b> <span style="color:#8ad0ff">\u26A1</span></td><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)">\u041C\u043E\u0436\u0435\u0442 \u0430\u0442\u0430\u043A\u043E\u0432\u0430\u0442\u044C \u0432 \u0445\u043E\u0434 \u043F\u0440\u0438\u0437\u044B\u0432\u0430 (\u0438\u0433\u043D\u043E\u0440\u0438\u0440\u0443\u0435\u0442 \xAB\u0431\u043E\u043B\u0435\u0437\u043D\u044C \u043F\u0440\u0438\u0437\u044B\u0432\u0430\xBB). <em>46 \u043A\u0430\u0440\u0442</em></td></tr>
-<tr><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)"><b>\u0411\u0443\u0440\u044F</b> <span style="color:#8ad0ff">\u{1F300}</span></td><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)">\u0414\u0432\u0435 \u0430\u0442\u0430\u043A\u0438 \u0437\u0430 \u0445\u043E\u0434 (\u0432\u0435\u0442\u0435\u0440). <em>12 \u043A\u0430\u0440\u0442</em></td></tr>
-<tr><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)"><b>\u041F\u0440\u043E\u0440\u044B\u0432</b> <span style="color:#ff9a4a">\u27A4</span></td><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)">\u0418\u0437\u0431\u044B\u0442\u043E\u0447\u043D\u044B\u0439 \u0443\u0440\u043E\u043D \u043D\u0430\u0434 \u0443\u0431\u0438\u0442\u044B\u043C \u0431\u043B\u043E\u043A\u0451\u0440\u043E\u043C \u043F\u0440\u043E\u0445\u043E\u0434\u0438\u0442 \u0432 \u0433\u0435\u0440\u043E\u044F \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430. <em>19 \u043A\u0430\u0440\u0442</em></td></tr>
-<tr><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)"><b>\u0412\u0430\u043C\u043F\u0438\u0440\u0438\u0437\u043C</b> <span style="color:#ff6b6b">\u{1FA78}</span></td><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)">\u0412\u0435\u0441\u044C \u043D\u0430\u043D\u0435\u0441\u0451\u043D\u043D\u044B\u0439 \u0431\u043E\u0435\u0432\u044B\u043C \u0443\u0440\u043E\u043D\u043E\u043C \u0443\u0440\u043E\u043D \u043B\u0435\u0447\u0438\u0442 \u0432\u0430\u0448\u0435\u0433\u043E \u0433\u0435\u0440\u043E\u044F. <em>45 \u043A\u0430\u0440\u0442</em></td></tr>
-<tr><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)"><b>\u041D\u0435\u0443\u043B\u043E\u0432\u0438\u043C\u043E\u0441\u0442\u044C</b> <span style="color:#b0b8c8">\u{1F441}</span></td><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)">\u041D\u0435 \u043C\u043E\u0436\u0435\u0442 \u0431\u044B\u0442\u044C \u0432\u044B\u0431\u0440\u0430\u043D\u043E \u0446\u0435\u043B\u044C\u044E \u0430\u0442\u0430\u043A\u0438 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E\u043C (\u0433\u0435\u0440\u043E\u0439 \u0431\u044C\u0451\u0442\u0441\u044F). <em>24 \u043A\u0430\u0440\u0442\u044B</em></td></tr>
-<tr><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)"><b>\u0411\u043E\u0436\u0435\u0441\u0442\u0432\u0435\u043D\u043D\u044B\u0439 \u0449\u0438\u0442</b> <span style="color:#ffd87a">\u{1F6E1}</span> <span style="color:#8aff8a;font-size:.7em">NEW</span></td><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)"><b>NEW v2.12.2:</b> \u0432\u0445\u043E\u0434\u0438\u0442 \u043D\u0430 \u043F\u043E\u043B\u0435 \u0441\u043E <b>\u0429\u0438\u0442\u043E\u043C (1 \u0437\u0430\u0440\u044F\u0434)</b> \u2014 \u043F\u043E\u0433\u043B\u043E\u0449\u0430\u0435\u0442 \u043F\u0435\u0440\u0432\u043E\u0435 \u043F\u043E\u0432\u0440\u0435\u0436\u0434\u0435\u043D\u0438\u0435. \u0422\u0435\u0440\u044F\u0435\u0442\u0441\u044F \u043F\u0440\u0438 \u043F\u0440\u043E\u0431\u0438\u0442\u0438\u0438, \u043D\u0435 \u0432\u043E\u0441\u0441\u0442\u0430\u043D\u0430\u0432\u043B\u0438\u0432\u0430\u0435\u0442\u0441\u044F. <em>18 \u043A\u0430\u0440\u0442</em></td></tr>
-<tr><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)"><b>\u042F\u0434\u043E\u0432\u0438\u0442\u044B\u0439</b> <span style="color:#7aff7a">\u2620</span> <span style="color:#8aff8a;font-size:.7em">NEW</span></td><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)"><b>NEW:</b> \u043F\u0440\u0438 \u0443\u0441\u043F\u0435\u0448\u043D\u043E\u043C \u0443\u0440\u043E\u043D\u0435 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0443 \u043D\u0430\u043A\u043B\u0430\u0434\u044B\u0432\u0430\u0435\u0442 <b>\u042F\u0434</b> \u2014 \u043B\u044E\u0431\u0430\u044F \u0441\u043B\u0435\u0434\u0443\u044E\u0449\u0430\u044F \u0440\u0430\u043D\u0430 \u0441\u043C\u0435\u0440\u0442\u0435\u043B\u044C\u043D\u0430. \u0421\u0440\u0430\u0431\u0430\u0442\u044B\u0432\u0430\u0435\u0442 \u0434\u0430\u0436\u0435 \u043F\u0440\u0438 1 \u0443\u0440\u043E\u043D\u0435. <em>15 \u043A\u0430\u0440\u0442</em></td></tr>
-<tr><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)"><b>\u041B\u0435\u0434\u044F\u043D\u043E\u0435 \u043A\u0430\u0441\u0430\u043D\u0438\u0435</b> <span style="color:#8ad0ff">\u2744</span> <span style="color:#8aff8a;font-size:.7em">NEW</span></td><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)"><b>NEW:</b> \u043F\u0440\u0438 \u0443\u0441\u043F\u0435\u0448\u043D\u043E\u043C \u0443\u0440\u043E\u043D\u0435 <b>\u0437\u0430\u043C\u043E\u0440\u0430\u0436\u0438\u0432\u0430\u0435\u0442 \u0446\u0435\u043B\u044C \u043D\u0430 1 \u0445\u043E\u0434</b> \u2014 \u043D\u0435 \u0430\u0442\u0430\u043A\u0443\u0435\u0442. \u041A\u043E\u043C\u0431\u043E \u0441 \u043A\u043E\u043D\u0442\u0440\u043E\u043B\u0435\u043C \u0434\u043E\u0441\u043A\u0438. <em>15 \u043A\u0430\u0440\u0442</em></td></tr>
-<tr><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)"><b>\u0411\u043E\u0435\u0432\u043E\u0439 \u043A\u043B\u0438\u0447</b> <span style="color:#ffd87a">! </span></td><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)">\u0421\u0440\u0430\u0431\u0430\u0442\u044B\u0432\u0430\u0435\u0442 \u043F\u0440\u0438 \u0432\u0445\u043E\u0434\u0435 \u043D\u0430 \u043F\u043E\u043B\u0435 (\u0438\u0437 \u0440\u0443\u043A\u0438). \u042D\u0444\u0444\u0435\u043A\u0442\u044B: \u0443\u0440\u043E\u043D, \u043B\u0435\u0447\u0435\u043D\u0438\u0435, \u043F\u0440\u0438\u0437\u044B\u0432 \u0442\u043E\u043A\u0435\u043D\u0430, \u043D\u0435\u043C\u043E\u0442\u0430 \u0438 \u0442.\u0434. <em>127 \u043A\u0430\u0440\u0442</em></td></tr>
-<tr><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)"><b>\u041F\u0440\u0435\u0434\u0441\u043C\u0435\u0440\u0442\u043D\u044B\u0439 \u0445\u0440\u0438\u043F</b> <span style="color:#c8b8ff">\u271D</span></td><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)">\u0421\u0440\u0430\u0431\u0430\u0442\u044B\u0432\u0430\u0435\u0442 \u043F\u0440\u0438 \u0441\u043C\u0435\u0440\u0442\u0438 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0430: \u043F\u0440\u0438\u0437\u044B\u0432, \u0443\u0440\u043E\u043D, \u0434\u043E\u0431\u043E\u0440 \u0438 \u0442.\u0434. \u041E\u0442\u043A\u043B\u044E\u0447\u0430\u0435\u0442\u0441\u044F \u041D\u0435\u043C\u043E\u0442\u043E\u0439. <em>16 \u043A\u0430\u0440\u0442</em></td></tr>
-<tr><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)"><b>\u0423\u0440\u043E\u043D \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0439 +1</b> <span style="color:#ff8aff">\u2726</span></td><td style="padding:.3rem .5rem;border:1px solid rgba(255,255,255,.08)">\u041F\u0430\u0441\u0441\u0438\u0432\u043D\u0430\u044F \u0430\u0443\u0440\u0430: \u0432\u0430\u0448\u0438 \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u044F \u043D\u0430\u043D\u043E\u0441\u044F\u0442 \u043D\u0430 +1 \u0431\u043E\u043B\u044C\u0448\u0435 (\u0441\u043A\u043B\u0430\u0434\u044B\u0432\u0430\u0435\u0442\u0441\u044F). \u042D\u043B\u0435\u043C\u0435\u043D\u0442\u0430\u043B\u044C\u043D\u044B\u0435 \u0431\u043E\u043D\u0443\u0441\u044B \u0443\u0447\u0438\u0442\u044B\u0432\u0430\u044E\u0442\u0441\u044F. <em>13 \u043A\u0430\u0440\u0442</em></td></tr>
-</table>
-<p style="color:var(--muted);font-size:.75rem;margin-top:.45rem">\u0411\u0430\u043B\u0430\u043D\u0441: \u043A\u0430\u0436\u0434\u0430\u044F \u043D\u043E\u0432\u0430\u044F \u043C\u0435\u0445\u0430\u043D\u0438\u043A\u0430 \u0441\u0442\u043E\u0438\u0442 <code>+1 \u043C\u0430\u043D\u044B \u2248 +1.5 \u0441\u0438\u043B\u044B</code> (power-\u043C\u043E\u0434\u0435\u043B\u044C). \u0411\u043E\u0436\u0435\u0441\u0442\u0432\u0435\u043D\u043D\u044B\u0439 \u0449\u0438\u0442 + \u042F\u0434\u043E\u0432\u0438\u0442\u044B\u0439/\u041B\u0435\u0434\u044F\u043D\u043E\u0435 \u043A\u0430\u0441\u0430\u043D\u0438\u0435 \u043F\u043E\u0434\u043D\u044F\u043B\u0438 \u0441\u0442\u043E\u0438\u043C\u043E\u0441\u0442\u044C 48 \u0441\u0443\u0449\u0435\u0441\u0442\u0432 \u043D\u0430 +1, \u043F\u0440\u043E\u0432\u0435\u0440\u0435\u043D\u043E 10k \u0441\u0438\u043C\u0443\u043B\u044F\u0446\u0438\u0439 \u2014 \u0432\u0438\u043D\u0440\u0435\u0439\u0442 47\u201352%.</p>
-
-<h3 style="color:var(--gold-hi);letter-spacing:.1em;margin:.9rem 0">\u0422\u0438\u043F\u044B \u043A\u0430\u0440\u0442 \u2014 \u043E\u043F\u0438\u0441\u0430\u043D\u0438\u0435 \u0438 \u0441\u043F\u043E\u0441\u043E\u0431\u043D\u043E\u0441\u0442\u0438</h3>
-<p><b>\u0421\u0443\u0449\u0435\u0441\u0442\u0432\u043E</b> \u2014 \u043E\u0441\u0442\u0430\u0451\u0442\u0441\u044F \u043D\u0430 \u0434\u043E\u0441\u043A\u0435, <b>\u0430\u0442\u0430\u043A\u0430 / \u0437\u0434\u043E\u0440\u043E\u0432\u044C\u0435</b>. \u0421\u043F\u043E\u0441\u043E\u0431\u043D\u043E\u0441\u0442\u0438 \u2014 \u043A\u043B\u044E\u0447\u0435\u0432\u044B\u0435 \u0441\u043B\u043E\u0432\u0430 + \u0442\u0440\u0438\u0433\u0433\u0435\u0440\u044B <code>onPlay / onTurnStart / onDeath / onSpellCast</code>. \u0422\u0435\u043A\u0441\u0442 \u0432 <code>ctext</code> \u0442\u043E\u0447\u043D\u043E \u043F\u043E\u0432\u0442\u043E\u0440\u044F\u0435\u0442 \u044D\u0444\u0444\u0435\u043A\u0442 \u0434\u0432\u0438\u0436\u043A\u0430.</p>
-<p><b>\u0417\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0435 \u2014 \u26A1 \u041C\u0433\u043D\u043E\u0432\u0435\u043D\u043D\u043E\u0435</b> (101 \u043A\u0430\u0440\u0442\u0430): \u0435\u0441\u043B\u0438 \u043D\u0430 \u043A\u0430\u0440\u0442\u0435 \u043D\u0430\u043F\u0438\u0441\u0430\u043D\u043E <b>\xAB\u26A1 \u041C\u0433\u043D\u043E\u0432\u0435\u043D\u043D\u043E\u0435\xBB</b> \u2014 \u044D\u0442\u043E <b>Instant Speed</b> (\u043A\u0430\u043A \u0432 MTG): \u043C\u0430\u043D\u0430 \u2192 \u044D\u0444\u0444\u0435\u043A\u0442 \u0441\u0440\u0430\u0437\u0443 \u2192 \u0432 \u0441\u0431\u0440\u043E\u0441 \u2192 \u0432 <b>\u0441\u0442\u0435\u043A LIFO</b> \u2192 \u043C\u043E\u0436\u043D\u043E \u0438\u0433\u0440\u0430\u0442\u044C <b>\u0432 \u0445\u043E\u0434 \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430</b> \u043F\u0440\u0438 \u043D\u0430\u043B\u0438\u0447\u0438\u0438 \u043C\u0430\u043D\u044B. \u041F\u0440\u0438\u043C\u0435\u0440: \xAB\u0422\u043B\u0435\u0442\u0432\u043E\u0440\u043D\u043E\u0435 \u043A\u0430\u0441\u0430\u043D\u0438\u0435\xBB <b>3\u2726</b> (\u0431\u044B\u043B\u043E 2\u2726, +1 \u0437\u0430 instant premium) \u2014 3 \u0443\u0440\u043E\u043D\u0430 + \u042F\u0434; \xAB\u0421\u0435\u0440\u0435\u0431\u0440\u044F\u043D\u0430\u044F \u043A\u043B\u0435\u0442\u043A\u0430\xBB 4\u2726 \u041D\u0435\u043C\u043E\u0442\u0430 + \u0432\u043E\u0437\u0432\u0440\u0430\u0442. \u0412 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u0438 \u043F\u043E\u0434\u0441\u0432\u0435\u0447\u0435\u043D\u043E \u0433\u043E\u043B\u0443\u0431\u044B\u043C \u043F\u0443\u043B\u044C\u0441\u043E\u043C <code>instantReady</code>.</p>
-<p><b>\u0417\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0435 \u2014 \u043E\u0431\u044B\u0447\u043D\u043E\u0435</b> (\u0435\u0441\u043B\u0438 \u043F\u0440\u043E\u0441\u0442\u043E \xAB\u0417\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0435\xBB \u0431\u0435\u0437 \u26A1) \u2014 \u044D\u0442\u043E <b>Sorcery Speed</b>: \u0438\u0433\u0440\u0430\u0435\u0442\u0441\u044F <b>\u0442\u043E\u043B\u044C\u043A\u043E \u0432 \u0432\u0430\u0448\u0443 \u043E\u0441\u043D\u043E\u0432\u043D\u0443\u044E \u0444\u0430\u0437\u0443</b>, \u043D\u0435 \u0438\u0434\u0451\u0442 \u0432 \u0441\u0442\u0435\u043A \u043C\u0433\u043D\u043E\u0432\u0435\u043D\u043D\u044B\u0445. \u0412 \u0431\u0430\u0437\u0435 \u044D\u0442\u043E <b>\u25F7 \u0420\u0438\u0442\u0443\u0430\u043B (31 \u043A\u0430\u0440\u0442\u0430)</b> \u2014 \u043F\u043E\u0434\u0442\u0438\u043F \u043E\u0431\u044B\u0447\u043D\u043E\u0433\u043E \u0441 \u0437\u0430\u0434\u0435\u0440\u0436\u043A\u043E\u0439 1 \u0445\u043E\u0434: \u043C\u0430\u043D\u0430 \u2192 \u043F\u043E\u0434\u0433\u043E\u0442\u043E\u0432\u043A\u0430 \u2192 \u0440\u0435\u0437\u043E\u043B\u0432 \u0432 \u043D\u0430\u0447\u0430\u043B\u0435 \u0432\u0430\u0448\u0435\u0433\u043E \u0441\u043B\u0435\u0434\u0443\u044E\u0449\u0435\u0433\u043E \u0445\u043E\u0434\u0430 (\u0446\u0435\u043B\u044C \u0444\u0438\u043A\u0441\u0438\u0440\u0443\u0435\u0442\u0441\u044F \u0441\u0440\u0430\u0437\u0443, \u044D\u0444\u0444\u0435\u043A\u0442 \u0441\u0438\u043B\u044C\u043D\u0435\u0435 \u0437\u0430 \u0442\u0443 \u0436\u0435 \u043C\u0430\u043D\u0443). \u041F\u0440\u0438\u043C\u0435\u0440: \xAB\u041F\u043E\u043B\u043D\u043E\u0447\u043D\u044B\u0439 \u0440\u0435\u043A\u0432\u0438\u0435\u043C\xBB 6\u2726 2 \u0443\u0440\u043E\u043D\u0430 \u0432\u0441\u0435\u043C + 2 \u043A\u0430\u0440\u0442\u044B. \u041E\u0431\u044B\u0447\u043D\u044B\u0435 \u0431\u0435\u0437 \u0437\u0430\u0434\u0435\u0440\u0436\u043A\u0438 (\u0435\u0441\u043B\u0438 \u0435\u0441\u0442\u044C) \u2014 \u0442\u043E\u0436\u0435 \u0442\u043E\u043B\u044C\u043A\u043E Main. \u041E\u0442\u043C\u0435\u0447\u0435\u043D\u044B \u043A\u0430\u043A <b>\u25F7 \u0420\u0438\u0442\u0443\u0430\u043B</b> \u0438\u043B\u0438 \u043F\u0440\u043E\u0441\u0442\u043E <b>\u0417\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0435</b>.</p>
-<p style="color:var(--muted);font-size:.78rem"><b>\u0411\u0430\u043B\u0430\u043D\u0441 \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0439 v2.12.2:</b> \u043C\u0433\u043D\u043E\u0432\u0435\u043D\u043D\u044B\u0435 \u0434\u043E\u0440\u043E\u0436\u0435 \u043D\u0430 <code>+1 \u043C\u0430\u043D\u044B</code> \u0437\u0430 instant premium (8 \u043F\u0435\u0440\u0435\u043E\u0446\u0435\u043D\u0451\u043D\u043D\u044B\u0445: aur_s11 1\u21922, pyr_s18 1\u21922 \u0438 \u0442.\u0434.). Ritual \u0434\u0435\u0448\u0435\u0432\u043B\u0435 \u0437\u0430 \u043C\u043E\u0449\u043D\u043E\u0441\u0442\u044C \u0438\u0437-\u0437\u0430 \u0437\u0430\u0434\u0435\u0440\u0436\u043A\u0438, \u043D\u043E \u0441\u0438\u043B\u044C\u043D\u0435\u0435. \u041F\u0440\u043E\u0432\u0435\u0440\u0435\u043D\u043E \u0441\u0438\u043C\u0443\u043B\u044F\u0446\u0438\u0435\u0439.</p>
-<p><b>\u0420\u0443\u043D\u0430</b> \u2014 \u043F\u043E\u0441\u0442\u043E\u044F\u043D\u043D\u0430\u044F \u0430\u0443\u0440\u0430 \u043D\u0430 3 \u0441\u043B\u043E\u0442\u0430 (\u0443\u043D\u0438\u043A\u0430\u043B\u044C\u043D\u0430). \u0414\u0430\u0451\u0442 <code>+\u0430\u0442\u0430\u043A\u0430/+\u0437\u0434\u043E\u0440\u043E\u0432\u044C\u0435, \u2013\u0443\u0440\u043E\u043D \u0433\u0435\u0440\u043E\u044E, +\u043C\u0430\u043D\u0430, +\u0434\u043E\u0431\u043E\u0440, \u0443\u0440\u043E\u043D \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0439</code> \u043B\u0438\u0431\u043E \u0442\u0438\u043A. \u041D\u0435 \u0443\u043D\u0438\u0447\u0442\u043E\u0436\u0430\u0435\u0442\u0441\u044F \u043E\u0431\u044B\u0447\u043D\u044B\u043C \u0443\u0440\u043E\u043D\u043E\u043C.</p>
-
-<h3 style="color:var(--gold-hi);letter-spacing:.1em;margin:.9rem 0">\u042D\u0445\u043E-\u043E\u0447\u043A\u0438</h3>
-<p>\u0415\u0441\u043B\u0438 \u0437\u0430 \u043E\u0441\u043D\u043E\u0432\u043D\u0443\u044E \u0444\u0430\u0437\u0443 \u0432\u044B <b>\u043D\u0435 \u0440\u0430\u0437\u044B\u0433\u0440\u0430\u043B\u0438 \u043D\u0438 \u043E\u0434\u043D\u043E\u0433\u043E \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u044F</b>, \u0432 \u043A\u043E\u043D\u0446\u0435 \u0445\u043E\u0434\u0430 \u043F\u043E\u043B\u0443\u0447\u0430\u0435\u0442\u0435 <b>1 \u042D\u0445\u043E-\u043E\u0447\u043A\u043E</b>. \u0422\u0440\u0430\u0442\u0438\u0442\u0435 \u0432 \u0441\u0432\u043E\u0439 Main \u0438 <b>\u0431\u0435\u0441\u043F\u043B\u0430\u0442\u043D\u043E</b> \u043F\u043E\u0432\u0442\u043E\u0440\u044F\u0435\u0442\u0435 \u043F\u043E\u0441\u043B\u0435\u0434\u043D\u0435\u0435 \u043C\u0433\u043D\u043E\u0432\u0435\u043D\u043D\u043E\u0435 (\u0442\u0443 \u0436\u0435 \u0446\u0435\u043B\u044C; \u0440\u0438\u0442\u0443\u0430\u043B\u044B \u043D\u0435 \u043F\u043E\u0432\u0442\u043E\u0440\u044F\u044E\u0442\u0441\u044F). \u041F\u043E \u0422\u0417 \u2014 <b>\u043E\u0434\u0438\u043D \u0440\u0430\u0437 \u0437\u0430 \u0438\u0433\u0440\u0443</b>.</p>
-
-<h3 style="color:var(--gold-hi);letter-spacing:.1em;margin:.9rem 0">\u0421\u0442\u0430\u0442\u0443\u0441\u044B</h3>
-<p><b>\u0429\u0438\u0442</b> \u2014 \u043F\u043E\u0433\u043B\u043E\u0449\u0430\u0435\u0442 \u0443\u0440\u043E\u043D (\u0437\u0430\u0440\u044F\u0434). <b>\u0413\u043E\u0440\u0435\u043D\u0438\u0435</b> \u2014 \u0443\u0440\u043E\u043D \u0432 \u043D\u0430\u0447\u0430\u043B\u0435 \u0445\u043E\u0434\u0430. <b>\u042F\u0434</b> \u2014 \u043B\u044E\u0431\u0430\u044F \u0440\u0430\u043D\u0430 \u0441\u043C\u0435\u0440\u0442\u0435\u043B\u044C\u043D\u0430. <b>\u0417\u0430\u043C\u043E\u0440\u043E\u0437\u043A\u0430</b> \u2014 \u043D\u0435 \u0430\u0442\u0430\u043A\u0443\u0435\u0442. <b>\u041D\u0435\u043C\u043E\u0442\u0430</b> \u2014 \u043E\u0442\u043A\u043B\u044E\u0447\u0430\u0435\u0442 \u043D\u0430\u0432\u0441\u0435\u0433\u0434\u0430. <b>\u0412\u044B\u0436\u0438\u0433\u0430\u043D\u0438\u0435</b> \u2014 \u0440\u0435\u0436\u0435\u0442 \u043B\u0435\u0447\u0435\u043D\u0438\u0435. <b>\u041F\u043E\u0440\u0447\u0430</b> \u2014 <code>debuffHealth</code> \u2013HP.</p>
-
-<h3 style="color:var(--gold-hi);letter-spacing:.1em;margin:.9rem 0">\u041F\u0430\u0441\u0441\u0438\u0432\u043A\u0438 \u0444\u0440\u0430\u043A\u0446\u0438\u0439 (\u0431\u0430\u043B\u0430\u043D\u0441 45\u201355%)</h3>
-${FACTION_IDS.map((f) => `<p style="margin:.45rem 0"><b style="color:${colorOf(f).primary}">${FACTION_SIGIL[f]} ${FACTION_RU[f]}</b> \u2014 ${PASSIVE_TEXT[f]}</p>`).join("")}
-<p style="color:var(--muted);font-size:.78rem;margin-top:.7rem">10 000 \u0441\u0438\u043C\u0443\u043B\u044F\u0446\u0438\u0439: 46\u201353% \u0432\u0438\u043D\u0440\u0435\u0439\u0442. \u041A\u043E\u044D\u0444\u0444\u0438\u0446\u0438\u0435\u043D\u0442\u044B: Aur 0.87 / Nec 1.14 / Ter 1.13 / Pyr 1.28 / Eth 0.85.</p>
-
-<h3 style="color:var(--gold-hi);letter-spacing:.1em;margin:.9rem 0">\u041A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u044F \u0438 \u0431\u0430\u043B\u0430\u043D\u0441</h3>
-<p>\u0412\u0441\u0435\u0433\u043E <b>500</b> \u043A\u0430\u0440\u0442 (313 \u0441\u0443\u0449\u0435\u0441\u0442\u0432 / 101 \u26A1 + 31 \u25F7 / 55 \u0440\u0443\u043D), \u043F\u043E 30/\u0444\u0440\u0430\u043A\u0446\u0438\u044E + 70 \u043D\u0435\u0439\u0442\u0440\u0430\u043B\u044C\u043D\u044B\u0445. 150 \u0431\u0430\u0437\u044B \u0441\u0440\u0430\u0437\u0443, \u043E\u0441\u0442\u0430\u043B\u044C\u043D\u043E\u0435 \u2014 \u0431\u0443\u0441\u0442\u0435\u0440\u044B (3C+1R+1\u042D\u043F\u0438\u043A 12.5%\u2192\u041B\u0435\u0433\u0430, 20% \u0444\u043E\u0439\u043B). \u041B\u0438\u043C\u0438\u0442 <b>4 \u043A\u043E\u043F\u0438\u0438</b>. \u041E\u043F\u0438\u0441\u0430\u043D\u0438\u044F c\u0433\u0435\u043D\u0435\u0440\u0438\u0440\u043E\u0432\u0430\u043D\u044B \u0438\u0437 \u044D\u0444\u0444\u0435\u043A\u0442\u043E\u0432, \u0441\u0442\u043E\u0438\u043C\u043E\u0441\u0442\u044C \u2014 <code>power = body+kw+effects</code>.</p>
-
-<h3 style="color:var(--gold-hi);letter-spacing:.1em;margin:.9rem 0">\u0423\u043F\u0440\u0430\u0432\u043B\u0435\u043D\u0438\u0435 \u0438 \u043F\u043E\u0434\u0441\u043A\u0430\u0437\u043A\u0438</h3>
-<p>\u041A\u0430\u0440\u0442\u0443 \u043C\u043E\u0436\u043D\u043E <b>\u043F\u0435\u0440\u0435\u0442\u0430\u0449\u0438\u0442\u044C</b> \u043D\u0430 \u043F\u043E\u043B\u0435/\u0446\u0435\u043B\u044C \u0438\u043B\u0438 <b>\u043A\u043B\u0438\u043A\u043D\u0443\u0442\u044C</b> \u2014 \u0446\u0435\u043B\u0438 \u043F\u043E\u0434\u0441\u0432\u0435\u0447\u0438\u0432\u0430\u044E\u0442\u0441\u044F \u0437\u043E\u043B\u043E\u0442\u043E\u043C. \u041C\u0433\u043D\u043E\u0432\u0435\u043D\u043D\u044B\u0435 \u2014 \u0434\u0430\u0436\u0435 \u0432 \u0445\u043E\u0434 \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430 (<code>instantReady</code> \u0433\u043E\u043B\u0443\u0431\u0430\u044F \u043F\u0443\u043B\u044C\u0441\u0430\u0446\u0438\u044F). <b>Esc / \u041F\u041A\u041C \u2014 \u043E\u0442\u043C\u0435\u043D\u0430</b>, <b>\u041F\u0440\u043E\u0431\u0435\u043B \u2014 \u0437\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u044C \u0445\u043E\u0434 / \u041F\u0430\u0441 \u0432 \u043E\u043A\u043D\u0435 \u043E\u0442\u043A\u043B\u0438\u043A\u0430</b>, <b>1\u20139 \u2014 \u043A\u0430\u0440\u0442\u0430 \u0438\u0437 \u0440\u0443\u043A\u0438</b> (\u043C\u0433\u043D\u043E\u0432\u0435\u043D\u043D\u044B\u0435 \u0440\u0430\u0431\u043E\u0442\u0430\u044E\u0442 \u0438 \u0432 \u0447\u0443\u0436\u043E\u0439 \u0445\u043E\u0434), <b>E \u2014 \u042D\u0445\u043E</b>.</p>
-<p>\u0414\u043E\u043A <b>\u0421\u0442\u0435\u043A</b> (\u043F\u0440\u0430\u0432\u044B\u0439 \u043D\u0438\u0437) \u043F\u043E\u043A\u0430\u0437\u044B\u0432\u0430\u0435\u0442 LIFO-\u043E\u0447\u0435\u0440\u0435\u0434\u044C, <b>\u041E\u043A\u043D\u043E \u043E\u0442\u043A\u043B\u0438\u043A\u0430</b> \u2014 20 \u0441 \u043A\u0440\u0443\u0433\u043E\u0432\u043E\u0439 \u0438\u043D\u0434\u0438\u043A\u0430\u0442\u043E\u0440 \u0438 \u043A\u043D\u043E\u043F\u043A\u0430 \xAB\u041F\u0430\u0441\xBB. \u0412 \u2699 \u2014 \u0410\u0432\u0442\u043E-\u043F\u0430\u0441, \u0412\u0435\u0440\u0435\u0432\u043A\u0430 75 \u0441, \u043F\u0440\u0435\u0434\u043F\u0440\u043E\u0441\u043C\u043E\u0442\u0440.</p>
-`;
-  btn("btnRules").addEventListener("click", () => {
-    $("rulesBody").innerHTML = RULES_HTML;
+  var KW_ICON = {
+    Taunt: "\u26E8",
+    Rush: "\u26A1",
+    Windfury: "\u{1F300}",
+    Trample: "\u27A4",
+    Lifesteal: "\u{1FA78}",
+    Unblockable: "\u{1F441}",
+    DivineShield: "\u{1F6E1}",
+    Poisonous: "\u2620",
+    Freezing: "\u2744",
+    SpellDamage: "\u2726",
+    Battlecry: "\u{1F4EF}",
+    Deathrattle: "\u271D"
+  };
+  var KW_DETAIL = {
+    Taunt: "\u0417\u0430\u0449\u0438\u0442\u043D\u0438\u043A. \u041F\u043E\u043A\u0430 \u0445\u043E\u0442\u044F \u0431\u044B \u043E\u0434\u043D\u043E \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u0441 \u041F\u0440\u043E\u0432\u043E\u043A\u0430\u0446\u0438\u0435\u0439 \u0443 \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430 \u0436\u0438\u0432\u043E, \u0432\u0430\u0448\u0438 \u0430\u0442\u0430\u043A\u0443\u044E\u0449\u0438\u0435 \u043C\u043E\u0433\u0443\u0442 \u0431\u0438\u0442\u044C <b>\u0442\u043E\u043B\u044C\u043A\u043E \u0435\u0433\u043E</b>: \u043D\u0438 \u0433\u0435\u0440\u043E\u044F, \u043D\u0438 \u0434\u0440\u0443\u0433\u0438\u0445 \u0441\u0443\u0449\u0435\u0441\u0442\u0432 \u0432\u044B\u0431\u0440\u0430\u0442\u044C \u043D\u0435\u043B\u044C\u0437\u044F. \u0415\u0441\u043B\u0438 \u043F\u0440\u043E\u0432\u043E\u043A\u0430\u0442\u043E\u0440\u043E\u0432 \u043D\u0435\u0441\u043A\u043E\u043B\u044C\u043A\u043E \u2014 \u0432\u044B\u0431\u0438\u0440\u0430\u0435\u0442\u0435 \u043B\u044E\u0431\u043E\u0433\u043E \u0438\u0437 \u043D\u0438\u0445. \u041D\u0435\u043C\u043E\u0442\u0430 \u0441\u043D\u0438\u043C\u0430\u0435\u0442 \u041F\u0440\u043E\u0432\u043E\u043A\u0430\u0446\u0438\u044E.",
+    Rush: "\u041E\u0431\u044B\u0447\u043D\u043E \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E, \u0432\u044B\u0448\u0435\u0434\u0448\u0435\u0435 \u043D\u0430 \u043F\u043E\u043B\u0435, \xAB\u043F\u0440\u0438\u0445\u043E\u0434\u0438\u0442 \u0432 \u0441\u0435\u0431\u044F\xBB \u0434\u043E \u0441\u043B\u0435\u0434\u0443\u044E\u0449\u0435\u0433\u043E \u0445\u043E\u0434\u0430 \u0438 \u043D\u0435 \u043C\u043E\u0436\u0435\u0442 \u0430\u0442\u0430\u043A\u043E\u0432\u0430\u0442\u044C (\u0431\u043E\u043B\u0435\u0437\u043D\u044C \u043F\u0440\u0438\u0437\u044B\u0432\u0430). \u0421\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u0441 \u0420\u044B\u0432\u043A\u043E\u043C \u0430\u0442\u0430\u043A\u0443\u0435\u0442 <b>\u0441\u0440\u0430\u0437\u0443</b>, \u0432 \u0442\u043E\u0442 \u0436\u0435 \u0445\u043E\u0434.",
+    Windfury: "\u041C\u043E\u0436\u0435\u0442 \u0441\u043E\u0432\u0435\u0440\u0448\u0438\u0442\u044C <b>\u0434\u0432\u0435 \u0430\u0442\u0430\u043A\u0438</b> \u0437\u0430 \u0445\u043E\u0434 \u2014 \u043F\u043E \u043E\u0434\u043D\u043E\u0439 \u0438 \u0442\u043E\u0439 \u0436\u0435 \u0438\u043B\u0438 \u0440\u0430\u0437\u043D\u044B\u043C \u0446\u0435\u043B\u044F\u043C. \u041F\u043E\u0441\u043B\u0435 \u043A\u0430\u0436\u0434\u043E\u0439 \u0430\u0442\u0430\u043A\u0438 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u043F\u043E\u043B\u0443\u0447\u0430\u0435\u0442 \u043E\u0442\u0432\u0435\u0442\u043D\u044B\u0439 \u0443\u0440\u043E\u043D \u043A\u0430\u043A \u043E\u0431\u044B\u0447\u043D\u043E.",
+    Trample: "\u041A\u043E\u0433\u0434\u0430 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u0441 \u041F\u0440\u043E\u0440\u044B\u0432\u043E\u043C \u0443\u0431\u0438\u0432\u0430\u0435\u0442 \u0437\u0430\u0449\u0438\u0442\u043D\u0438\u043A\u0430, <b>\u043B\u0438\u0448\u043D\u0438\u0439 \u0443\u0440\u043E\u043D</b> \u0443\u0445\u043E\u0434\u0438\u0442 \u0432 \u0433\u0435\u0440\u043E\u044F \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430. \u041F\u0440\u0438\u043C\u0435\u0440: 6 \u0430\u0442\u0430\u043A\u0438 \u043F\u0440\u043E\u0442\u0438\u0432 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0430 \u0441 2 \u0437\u0434\u043E\u0440\u043E\u0432\u044C\u044F \u2014 4 \u0443\u0440\u043E\u043D\u0430 \u043F\u043E\u043B\u0443\u0447\u0438\u0442 \u0433\u0435\u0440\u043E\u0439.",
+    Lifesteal: "\u0412\u0435\u0441\u044C \u0443\u0440\u043E\u043D, \u043A\u043E\u0442\u043E\u0440\u044B\u0439 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u043D\u0430\u043D\u043E\u0441\u0438\u0442 \u0432 \u0431\u043E\u044E (\u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0443 \u0438\u043B\u0438 \u0433\u0435\u0440\u043E\u044E, \u0432\u043A\u043B\u044E\u0447\u0430\u044F \u0443\u0440\u043E\u043D \u041F\u0440\u043E\u0440\u044B\u0432\u0430), <b>\u043B\u0435\u0447\u0438\u0442 \u0432\u0430\u0448\u0435\u0433\u043E \u0433\u0435\u0440\u043E\u044F</b> \u043D\u0430 \u0442\u0443 \u0436\u0435 \u0432\u0435\u043B\u0438\u0447\u0438\u043D\u0443. \u0417\u0434\u043E\u0440\u043E\u0432\u044C\u0435 \u043D\u0435 \u043F\u043E\u0434\u043D\u0438\u043C\u0430\u0435\u0442\u0441\u044F \u0432\u044B\u0448\u0435 30.",
+    Unblockable: "\u0421\u0443\u0449\u0435\u0441\u0442\u0432\u0430 \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430 <b>\u043D\u0435 \u043C\u043E\u0433\u0443\u0442 \u0432\u044B\u0431\u0440\u0430\u0442\u044C \u0435\u0433\u043E \u0446\u0435\u043B\u044C\u044E \u0430\u0442\u0430\u043A\u0438</b>. \u0423\u0431\u0440\u0430\u0442\u044C \u0435\u0433\u043E \u043C\u043E\u0436\u043D\u043E \u0442\u043E\u043B\u044C\u043A\u043E \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u044F\u043C\u0438 \u0438 \u0441\u043F\u043E\u0441\u043E\u0431\u043D\u043E\u0441\u0442\u044F\u043C\u0438. \u0421\u0430\u043C\u043E \u043E\u043D\u043E \u0430\u0442\u0430\u043A\u0443\u0435\u0442 \u043A\u0430\u043A \u043E\u0431\u044B\u0447\u043D\u043E.",
+    DivineShield: "\u0412\u044B\u0445\u043E\u0434\u0438\u0442 \u043D\u0430 \u043F\u043E\u043B\u0435 \u0441\u043E <b>\u0429\u0438\u0442\u043E\u043C</b>: \u043F\u0435\u0440\u0432\u043E\u0435 \u043F\u043E\u043B\u0443\u0447\u0435\u043D\u043D\u043E\u0435 \u043F\u043E\u0432\u0440\u0435\u0436\u0434\u0435\u043D\u0438\u0435 (\u043B\u044E\u0431\u043E\u0435 \u2014 \u043E\u0442 \u0430\u0442\u0430\u043A\u0438 \u0438\u043B\u0438 \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u044F) \u043F\u043E\u043B\u043D\u043E\u0441\u0442\u044C\u044E \u043F\u043E\u0433\u043B\u043E\u0449\u0430\u0435\u0442\u0441\u044F, \u043F\u043E\u0441\u043B\u0435 \u0447\u0435\u0433\u043E \u0429\u0438\u0442 \u0438\u0441\u0447\u0435\u0437\u0430\u0435\u0442. \u041D\u0435 \u0432\u043E\u0441\u0441\u0442\u0430\u043D\u0430\u0432\u043B\u0438\u0432\u0430\u0435\u0442\u0441\u044F.",
+    Poisonous: "\u0415\u0441\u043B\u0438 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u0441 \u044D\u0442\u0438\u043C \u0441\u0432\u043E\u0439\u0441\u0442\u0432\u043E\u043C \u043D\u0430\u043D\u0435\u0441\u043B\u043E \u0443\u0440\u043E\u043D \u0434\u0440\u0443\u0433\u043E\u043C\u0443 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0443 \u0438 \u043E\u043D\u043E \u0432\u044B\u0436\u0438\u043B\u043E, \u043D\u0430 \u0446\u0435\u043B\u044C \u0432\u0435\u0448\u0430\u0435\u0442\u0441\u044F <b>\u042F\u0434</b>: \u0441\u043B\u0435\u0434\u0443\u044E\u0449\u0435\u0435 \u043B\u044E\u0431\u043E\u0435 \u043F\u043E\u0432\u0440\u0435\u0436\u0434\u0435\u043D\u0438\u0435 \u0435\u0451 \u0443\u0431\u044C\u0451\u0442, \u0434\u0430\u0436\u0435 1 \u0443\u0440\u043E\u043D.",
+    Freezing: "\u0415\u0441\u043B\u0438 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u043D\u0430\u043D\u0435\u0441\u043B\u043E \u0443\u0440\u043E\u043D \u0434\u0440\u0443\u0433\u043E\u043C\u0443 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0443, \u0446\u0435\u043B\u044C <b>\u0437\u0430\u043C\u043E\u0440\u0430\u0436\u0438\u0432\u0430\u0435\u0442\u0441\u044F \u043D\u0430 1 \u0445\u043E\u0434</b> \u0438 \u043D\u0435 \u043C\u043E\u0436\u0435\u0442 \u0430\u0442\u0430\u043A\u043E\u0432\u0430\u0442\u044C.",
+    SpellDamage: "\u041F\u043E\u043A\u0430 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u043D\u0430 \u043F\u043E\u043B\u0435, <b>\u0432\u0441\u0435 \u0432\u0430\u0448\u0438 \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u044F</b>, \u043D\u0430\u043D\u043E\u0441\u044F\u0449\u0438\u0435 \u0443\u0440\u043E\u043D, \u043D\u0430\u043D\u043E\u0441\u044F\u0442 \u043D\u0430 1 \u0431\u043E\u043B\u044C\u0448\u0435. \u041D\u0435\u0441\u043A\u043E\u043B\u044C\u043A\u043E \u0442\u0430\u043A\u0438\u0445 \u0441\u0443\u0449\u0435\u0441\u0442\u0432 \u0441\u043A\u043B\u0430\u0434\u044B\u0432\u0430\u044E\u0442\u0441\u044F.",
+    Battlecry: "\u042D\u0444\u0444\u0435\u043A\u0442 \u0441\u0440\u0430\u0431\u0430\u0442\u044B\u0432\u0430\u0435\u0442 <b>\u043E\u0434\u0438\u043D \u0440\u0430\u0437</b> \u2014 \u043A\u043E\u0433\u0434\u0430 \u0432\u044B \u0440\u0430\u0437\u044B\u0433\u0440\u044B\u0432\u0430\u0435\u0442\u0435 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u0438\u0437 \u0440\u0443\u043A\u0438. \u0415\u0441\u043B\u0438 \u043D\u0443\u0436\u043D\u0430 \u0446\u0435\u043B\u044C (\u043D\u0430\u043F\u0440\u0438\u043C\u0435\u0440, \xAB\u0432\u044B\u0431\u0440\u0430\u043D\u043D\u043E\u0435 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430\xBB), \u0435\u0451 \u0432\u044B\u0431\u0438\u0440\u0430\u044E\u0442 \u043F\u0440\u0438 \u0440\u043E\u0437\u044B\u0433\u0440\u044B\u0448\u0435. \u041F\u0440\u0438\u0437\u0432\u0430\u043D\u043D\u044B\u0435 \u044D\u0444\u0444\u0435\u043A\u0442\u0430\u043C\u0438 \u043A\u043E\u043F\u0438\u0438 \u0438 \u0442\u043E\u043A\u0435\u043D\u044B \u0411\u043E\u0435\u0432\u043E\u0439 \u043A\u043B\u0438\u0447 \u043D\u0435 \u0437\u0430\u043F\u0443\u0441\u043A\u0430\u044E\u0442.",
+    Deathrattle: "\u042D\u0444\u0444\u0435\u043A\u0442 \u0441\u0440\u0430\u0431\u0430\u0442\u044B\u0432\u0430\u0435\u0442, \u043A\u043E\u0433\u0434\u0430 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E <b>\u043F\u043E\u0433\u0438\u0431\u0430\u0435\u0442</b> \u2014 \u0432 \u0431\u043E\u044E, \u043E\u0442 \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u044F \u0438\u043B\u0438 \u041F\u043E\u0440\u0447\u0438. \u0415\u0441\u043B\u0438 \u043D\u0430 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0435 \u041D\u0435\u043C\u043E\u0442\u0430, \u041F\u0440\u0435\u0434\u0441\u043C\u0435\u0440\u0442\u043D\u044B\u0439 \u0445\u0440\u0438\u043F \u043D\u0435 \u0441\u0440\u0430\u0431\u043E\u0442\u0430\u0435\u0442."
+  };
+  var RULES_SECTIONS = [
+    { id: "basics", ico: "\u{1F3AF}", title: "\u041E\u0441\u043D\u043E\u0432\u044B", html: () => `
+    <h2>\u0426\u0435\u043B\u044C \u0438\u0433\u0440\u044B</h2>
+    <p class="rpLead">\u0423 \u043A\u0430\u0436\u0434\u043E\u0433\u043E \u0433\u0435\u0440\u043E\u044F <b>30 \u0437\u0434\u043E\u0440\u043E\u0432\u044C\u044F</b>. \u041F\u043E\u0431\u0435\u0436\u0434\u0430\u0435\u0442 \u0442\u043E\u0442, \u043A\u0442\u043E \u043F\u0435\u0440\u0432\u044B\u043C \u0441\u043D\u0438\u0437\u0438\u0442 \u0437\u0434\u043E\u0440\u043E\u0432\u044C\u0435 \u0433\u0435\u0440\u043E\u044F \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430 \u0434\u043E <b>0</b>.</p>
+    <div class="rpGrid">
+      <div class="rpTile"><b>30</b><span>\u0437\u0434\u043E\u0440\u043E\u0432\u044C\u044F \u0443 \u0433\u0435\u0440\u043E\u044F</span></div>
+      <div class="rpTile"><b>5</b><span>\u043A\u0430\u0440\u0442 \u0432 \u0441\u0442\u0430\u0440\u0442\u043E\u0432\u043E\u0439 \u0440\u0443\u043A\u0435</span></div>
+      <div class="rpTile"><b>10</b><span>\u043C\u0430\u043A\u0441\u0438\u043C\u0443\u043C \u043C\u0430\u043D\u044B \u0438 \u043A\u0430\u0440\u0442 \u0432 \u0440\u0443\u043A\u0435</span></div>
+      <div class="rpTile"><b>7</b><span>\u0441\u0443\u0449\u0435\u0441\u0442\u0432 \u043D\u0430 \u0432\u0430\u0448\u0435\u0439 \u0441\u0442\u043E\u0440\u043E\u043D\u0435 \u043F\u043E\u043B\u044F</span></div>
+      <div class="rpTile"><b>3</b><span>\u0440\u0443\u043D\u044B \u043E\u0434\u043D\u043E\u0432\u0440\u0435\u043C\u0435\u043D\u043D\u043E</span></div>
+      <div class="rpTile"><b>30+</b><span>\u043A\u0430\u0440\u0442 \u0432 \u043A\u043E\u043B\u043E\u0434\u0435</span></div>
+    </div>
+    <h3>\u041C\u0430\u043D\u0430</h3>
+    <p>\u041A\u0430\u0436\u0434\u0430\u044F \u043A\u0430\u0440\u0442\u0430 \u0441\u0442\u043E\u0438\u0442 \u043C\u0430\u043D\u044B \u2014 \u0447\u0438\u0441\u043B\u043E \u0432 \u0441\u0438\u043D\u0435\u043C \u043A\u0440\u0438\u0441\u0442\u0430\u043B\u043B\u0435 \u0432 \u0443\u0433\u043B\u0443. \u0412 \u043D\u0430\u0447\u0430\u043B\u0435 \u043A\u0430\u0436\u0434\u043E\u0433\u043E \u0441\u0432\u043E\u0435\u0433\u043E \u0445\u043E\u0434\u0430 \u043C\u0430\u043A\u0441\u0438\u043C\u0443\u043C \u043C\u0430\u043D\u044B \u0440\u0430\u0441\u0442\u0451\u0442 \u043D\u0430 1 (\u0434\u043E 10), \u0438 \u043C\u0430\u043D\u0430 \u043F\u043E\u043B\u043D\u043E\u0441\u0442\u044C\u044E \u0432\u043E\u0441\u0441\u0442\u0430\u043D\u0430\u0432\u043B\u0438\u0432\u0430\u0435\u0442\u0441\u044F. \u041D\u0430 \u043F\u0435\u0440\u0432\u043E\u043C \u0445\u043E\u0434\u0443 \u0443 \u0432\u0430\u0441 1 \u043C\u0430\u043D\u0430, \u043D\u0430 \u0432\u0442\u043E\u0440\u043E\u043C \u2014 2, \u0438 \u0442\u0430\u043A \u0434\u0430\u043B\u0435\u0435.</p>
+    <p>\u041C\u0430\u043D\u0430, \u043A\u043E\u0442\u043E\u0440\u0443\u044E \u0432\u044B \u043D\u0435 \u043F\u043E\u0442\u0440\u0430\u0442\u0438\u043B\u0438, <b>\u043D\u0435 \u0441\u0433\u043E\u0440\u0430\u0435\u0442</b> \u0434\u043E \u0432\u0430\u0448\u0435\u0433\u043E \u0441\u043B\u0435\u0434\u0443\u044E\u0449\u0435\u0433\u043E \u0445\u043E\u0434\u0430: \u0435\u0451 \u043C\u043E\u0436\u043D\u043E \u043F\u0440\u0438\u0434\u0435\u0440\u0436\u0430\u0442\u044C, \u0447\u0442\u043E\u0431\u044B \u0432 \u0445\u043E\u0434 \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430 \u043E\u0442\u0432\u0435\u0442\u0438\u0442\u044C \u043C\u0433\u043D\u043E\u0432\u0435\u043D\u043D\u044B\u043C \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0435\u043C.</p>
+    <h3>\u041C\u0443\u043B\u043B\u0438\u0433\u0430\u043D</h3>
+    <p>\u0412 \u043D\u0430\u0447\u0430\u043B\u0435 \u0431\u043E\u044F \u0432\u044B \u0432\u0438\u0434\u0438\u0442\u0435 \u0441\u0442\u0430\u0440\u0442\u043E\u0432\u0443\u044E \u0440\u0443\u043A\u0443 \u0438\u0437 5 \u043A\u0430\u0440\u0442 \u0438 \u043C\u043E\u0436\u0435\u0442\u0435 <b>\u043E\u0434\u0438\u043D \u0440\u0430\u0437</b> \u0437\u0430\u043C\u0435\u043D\u0438\u0442\u044C \u043B\u044E\u0431\u044B\u0435 \u0438\u0437 \u043D\u0438\u0445: \u043E\u0442\u043C\u0435\u0447\u0435\u043D\u043D\u044B\u0435 \u043A\u0430\u0440\u0442\u044B \u0443\u0445\u043E\u0434\u044F\u0442 \u0432 \u043A\u043E\u043B\u043E\u0434\u0443, \u0432\u043C\u0435\u0441\u0442\u043E \u043D\u0438\u0445 \u0432\u044B \u0431\u0435\u0440\u0451\u0442\u0435 \u043D\u043E\u0432\u044B\u0435.</p>
+    <h3>\u0420\u0443\u043A\u0430 \u0438 \u043A\u043E\u043B\u043E\u0434\u0430</h3>
+    <p>\u041A\u0430\u0436\u0434\u044B\u0439 \u0445\u043E\u0434 \u0432\u044B \u0431\u0435\u0440\u0451\u0442\u0435 \u043A\u0430\u0440\u0442\u0443. \u0412 \u0440\u0443\u043A\u0435 \u043C\u043E\u0436\u0435\u0442 \u0431\u044B\u0442\u044C \u043D\u0435 \u0431\u043E\u043B\u044C\u0448\u0435 10 \u043A\u0430\u0440\u0442 \u2014 \u043B\u0438\u0448\u043D\u044F\u044F \u0441\u0433\u043E\u0440\u0430\u0435\u0442. \u041A\u043E\u0433\u0434\u0430 \u043A\u043E\u043B\u043E\u0434\u0430 \u0437\u0430\u043A\u043E\u043D\u0447\u0438\u043B\u0430\u0441\u044C, \u043A\u0430\u0436\u0434\u0430\u044F \u043F\u043E\u043F\u044B\u0442\u043A\u0430 \u0432\u0437\u044F\u0442\u044C \u043A\u0430\u0440\u0442\u0443 \u043D\u0430\u043D\u043E\u0441\u0438\u0442 \u0433\u0435\u0440\u043E\u044E <b>\u0443\u0440\u043E\u043D \u0443\u0441\u0442\u0430\u043B\u043E\u0441\u0442\u0438</b>: 1, \u043F\u043E\u0442\u043E\u043C 2, \u043F\u043E\u0442\u043E\u043C 3 \u0438 \u0442.\u0434.</p>` },
+    { id: "turn", ico: "\u23F3", title: "\u0425\u043E\u0434", html: () => `
+    <h2>\u041F\u044F\u0442\u044C \u0444\u0430\u0437 \u0445\u043E\u0434\u0430</h2>
+    <p class="rpLead">\u0425\u043E\u0434 \u0438\u0434\u0451\u0442 \u043F\u043E \u0444\u0430\u0437\u0430\u043C, \u0442\u0435\u043A\u0443\u0449\u0430\u044F \u043F\u043E\u0434\u0441\u0432\u0435\u0447\u0435\u043D\u0430 \u043D\u0430 \u043F\u043E\u043B\u043E\u0441\u0435 \u0432\u0432\u0435\u0440\u0445\u0443 \u043F\u043E\u043B\u044F.</p>
+    <ol class="rpSteps">
+      <li><b>\u041D\u0430\u0447\u0430\u043B\u043E.</b> \u0421\u0440\u0430\u0431\u0430\u0442\u044B\u0432\u0430\u044E\u0442 \u0440\u0443\u043D\u044B, \u043F\u0430\u0441\u0441\u0438\u0432\u043A\u0430 \u0444\u0440\u0430\u043A\u0446\u0438\u0438 \u0438 \u0441\u043F\u043E\u0441\u043E\u0431\u043D\u043E\u0441\u0442\u0438 \xAB\u0432 \u043D\u0430\u0447\u0430\u043B\u0435 \u0445\u043E\u0434\u0430\xBB, \u0442\u0438\u043A\u0430\u0435\u0442 \u0413\u043E\u0440\u0435\u043D\u0438\u0435, \u0440\u0430\u0437\u0440\u0435\u0448\u0430\u044E\u0442\u0441\u044F \u0432\u0430\u0448\u0438 \u0420\u0438\u0442\u0443\u0430\u043B\u044B.</li>
+      <li><b>\u0420\u0435\u0441\u0443\u0440\u0441\u044B.</b> \u041C\u0430\u043A\u0441\u0438\u043C\u0443\u043C \u043C\u0430\u043D\u044B +1, \u043C\u0430\u043D\u0430 \u0432\u043E\u0441\u0441\u0442\u0430\u043D\u0430\u0432\u043B\u0438\u0432\u0430\u0435\u0442\u0441\u044F, \u0432\u044B \u0431\u0435\u0440\u0451\u0442\u0435 \u043A\u0430\u0440\u0442\u0443.</li>
+      <li><b>\u041E\u0441\u043D\u043E\u0432\u043D\u0430\u044F \u0444\u0430\u0437\u0430.</b> \u0420\u0430\u0437\u044B\u0433\u0440\u044B\u0432\u0430\u0439\u0442\u0435 \u043B\u044E\u0431\u044B\u0435 \u043A\u0430\u0440\u0442\u044B: \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0430, \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u044F, \u0440\u0443\u043D\u044B \u2014 \u043F\u043E\u043A\u0430 \u0445\u0432\u0430\u0442\u0430\u0435\u0442 \u043C\u0430\u043D\u044B.</li>
+      <li><b>\u0411\u0438\u0442\u0432\u0430.</b> \u0412\u044B\u0431\u0438\u0440\u0430\u0439\u0442\u0435, \u043A\u0430\u043A\u0438\u0435 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0430 \u0430\u0442\u0430\u043A\u0443\u044E\u0442 \u0438 \u043A\u043E\u0433\u043E (\u0441\u043C. \xAB\u0411\u043E\u0439\xBB). \u041A\u043D\u043E\u043F\u043A\u0430 \xAB\u041F\u0440\u043E\u043F\u0443\u0441\u0442\u0438\u0442\u044C \u0431\u043E\u0439\xBB \u2014 \u0437\u0430\u043A\u043E\u043D\u0447\u0438\u0442\u044C \u0431\u0435\u0437 \u0430\u0442\u0430\u043A.</li>
+      <li><b>\u041A\u043E\u043D\u0435\u0446.</b> \u0418\u0441\u0442\u0435\u043A\u0430\u044E\u0442 \u0432\u0440\u0435\u043C\u0435\u043D\u043D\u044B\u0435 \u044D\u0444\u0444\u0435\u043A\u0442\u044B, \u043D\u0430\u0447\u0438\u0441\u043B\u044F\u0435\u0442\u0441\u044F \u042D\u0445\u043E-\u043E\u0447\u043A\u043E (\u0435\u0441\u043B\u0438 \u0437\u0430\u0440\u0430\u0431\u043E\u0442\u0430\u043D\u043E). \u0425\u043E\u0434 \u043F\u0435\u0440\u0435\u0445\u043E\u0434\u0438\u0442 \u043A \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0443.</li>
+    </ol>
+    <p>\u041A\u043D\u043E\u043F\u043A\u0430 <b>\xAB\u0417\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u044C \u0445\u043E\u0434\xBB</b> (\u0438\u043B\u0438 \u041F\u0440\u043E\u0431\u0435\u043B) \u043F\u0440\u043E\u043F\u0443\u0441\u043A\u0430\u0435\u0442 \u043E\u0441\u0442\u0430\u0432\u0448\u0438\u0435\u0441\u044F \u0444\u0430\u0437\u044B.</p>` },
+    { id: "combat", ico: "\u2694", title: "\u0411\u043E\u0439", html: () => `
+    <h2>\u041A\u0430\u043A \u0430\u0442\u0430\u043A\u043E\u0432\u0430\u0442\u044C</h2>
+    <p class="rpLead">\u0412 \u0444\u0430\u0437\u0435 \u0411\u0438\u0442\u0432\u044B \u0433\u043E\u0442\u043E\u0432\u044B\u0435 \u043A \u0430\u0442\u0430\u043A\u0435 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0430 \u043F\u043E\u0434\u0441\u0432\u0435\u0447\u0435\u043D\u044B \u0437\u043E\u043B\u043E\u0442\u043E\u043C. \u041D\u0430\u0436\u043C\u0438\u0442\u0435 \u043D\u0430 \u0441\u0432\u043E\u0451 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E, \u0437\u0430\u0442\u0435\u043C \u2014 \u043D\u0430 \u0446\u0435\u043B\u044C: \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430 \u0438\u043B\u0438 \u0435\u0433\u043E \u0433\u0435\u0440\u043E\u044F.</p>
+    <h3>\u041A\u043E\u0433\u043E \u043C\u043E\u0436\u043D\u043E \u0430\u0442\u0430\u043A\u043E\u0432\u0430\u0442\u044C</h3>
+    <ul class="rpList">
+      <li>\u0415\u0441\u043B\u0438 \u0443 \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430 \u0435\u0441\u0442\u044C \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u0441 <b>\u041F\u0440\u043E\u0432\u043E\u043A\u0430\u0446\u0438\u0435\u0439</b> \u2014 \u0430\u0442\u0430\u043A\u043E\u0432\u0430\u0442\u044C \u043C\u043E\u0436\u043D\u043E \u0442\u043E\u043B\u044C\u043A\u043E \u0435\u0433\u043E.</li>
+      <li>\u0415\u0441\u043B\u0438 \u043F\u0440\u043E\u0432\u043E\u043A\u0430\u0442\u043E\u0440\u043E\u0432 \u043D\u0435\u0442 \u2014 \u043B\u044E\u0431\u043E\u0435 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u0438\u043B\u0438 \u0441\u0440\u0430\u0437\u0443 \u0433\u0435\u0440\u043E\u044F.</li>
+      <li>\u0421\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u0441 <b>\u041D\u0435\u0443\u043B\u043E\u0432\u0438\u043C\u043E\u0441\u0442\u044C\u044E</b> \u0432\u044B\u0431\u0440\u0430\u0442\u044C \u0446\u0435\u043B\u044C\u044E \u043D\u0435\u043B\u044C\u0437\u044F.</li>
+    </ul>
+    <h3>\u041E\u0431\u043C\u0435\u043D \u0443\u0434\u0430\u0440\u0430\u043C\u0438</h3>
+    <p>\u041A\u043E\u0433\u0434\u0430 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u0430\u0442\u0430\u043A\u0443\u0435\u0442 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E, <b>\u043E\u0431\u0430 \u043D\u0430\u043D\u043E\u0441\u044F\u0442 \u0434\u0440\u0443\u0433 \u0434\u0440\u0443\u0433\u0443 \u0443\u0440\u043E\u043D</b>, \u0440\u0430\u0432\u043D\u044B\u0439 \u0441\u0432\u043E\u0435\u0439 \u0430\u0442\u0430\u043A\u0435. \u0421\u0443\u0449\u0435\u0441\u0442\u0432\u043E, \u0443 \u043A\u043E\u0442\u043E\u0440\u043E\u0433\u043E \u0437\u0434\u043E\u0440\u043E\u0432\u044C\u0435 \u0443\u043F\u0430\u043B\u043E \u0434\u043E 0, \u043F\u043E\u0433\u0438\u0431\u0430\u0435\u0442. \u0410\u0442\u0430\u043A\u0443\u044F \u0433\u0435\u0440\u043E\u044F, \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u0443\u0440\u043E\u043D\u0430 \u0432 \u043E\u0442\u0432\u0435\u0442 \u043D\u0435 \u043F\u043E\u043B\u0443\u0447\u0430\u0435\u0442.</p>
+    <div class="rpExample">\u041F\u0440\u0438\u043C\u0435\u0440: \u0432\u0430\u0448 3/2 \u0430\u0442\u0430\u043A\u0443\u0435\u0442 \u0438\u0445 2/4. \u0418\u0445 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u043F\u043E\u043B\u0443\u0447\u0430\u0435\u0442 3 \u0443\u0440\u043E\u043D\u0430 (\u043E\u0441\u0442\u0430\u0451\u0442\u0441\u044F 1 \u0437\u0434\u043E\u0440\u043E\u0432\u044C\u044F), \u0432\u0430\u0448\u0435 \u2014 2 \u0443\u0440\u043E\u043D\u0430 \u0438 \u043F\u043E\u0433\u0438\u0431\u0430\u0435\u0442.</div>
+    <h3>\u041A\u0442\u043E \u043D\u0435 \u043C\u043E\u0436\u0435\u0442 \u0430\u0442\u0430\u043A\u043E\u0432\u0430\u0442\u044C</h3>
+    <ul class="rpList">
+      <li>\u0421\u0443\u0449\u0435\u0441\u0442\u0432\u043E, \u0432\u044B\u0448\u0435\u0434\u0448\u0435\u0435 \u043D\u0430 \u043F\u043E\u043B\u0435 \u0432 \u044D\u0442\u043E\u0442 \u0445\u043E\u0434 (\u043A\u0440\u043E\u043C\u0435 <b>\u0420\u044B\u0432\u043A\u0430</b> \u0438 <b>\u042F\u0440\u043E\u0441\u0442\u0438</b>).</li>
+      <li>\u0421\u0443\u0449\u0435\u0441\u0442\u0432\u043E, \u043A\u043E\u0442\u043E\u0440\u043E\u0435 \u0443\u0436\u0435 \u0430\u0442\u0430\u043A\u043E\u0432\u0430\u043B\u043E \u0432 \u044D\u0442\u043E\u0442 \u0445\u043E\u0434 (\u0441 <b>\u0411\u0443\u0440\u0435\u0439</b> \u2014 \u0434\u0432\u0430\u0436\u0434\u044B).</li>
+      <li><b>\u0417\u0430\u043C\u043E\u0440\u043E\u0436\u0435\u043D\u043D\u043E\u0435</b> \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E.</li>
+      <li>\u0421\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u0441 \u0430\u0442\u0430\u043A\u043E\u0439 0.</li>
+    </ul>
+    <p>\u0423\u0440\u043E\u043D \u0441\u0443\u0449\u0435\u0441\u0442\u0432 \u0441\u043E\u0445\u0440\u0430\u043D\u044F\u0435\u0442\u0441\u044F \u043C\u0435\u0436\u0434\u0443 \u0445\u043E\u0434\u0430\u043C\u0438 \u2014 \u0440\u0430\u043D\u0435\u043D\u043E\u0435 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u043D\u0435 \u043B\u0435\u0447\u0438\u0442\u0441\u044F \u0441\u0430\u043C\u043E.</p>` },
+    { id: "creatures", ico: "\u{1F409}", title: "\u0421\u0443\u0449\u0435\u0441\u0442\u0432\u0430 \u0438 \u0441\u043F\u043E\u0441\u043E\u0431\u043D\u043E\u0441\u0442\u0438", html: () => {
+      const example = (k) => {
+        const c = [...db.values()].find((x) => x.type === "Creature" /* Creature */ && !x.isToken && (x.keywords ?? []).map(String).includes(k) && (x.keywords ?? []).length === 1) ?? [...db.values()].find((x) => x.type === "Creature" /* Creature */ && (x.keywords ?? []).map(String).includes(k));
+        return c ? `<button class="rpCardRef" data-card="${esc(c.id)}">${esc(cardName(c))} <i>${c.cost}\u2726 ${c.attack}/${c.health}</i></button>` : "";
+      };
+      const count = (k) => [...db.values()].filter((x) => x.type === "Creature" /* Creature */ && (x.keywords ?? []).map(String).includes(k)).length;
+      const order = ["Taunt", "Rush", "Windfury", "Trample", "Lifesteal", "Unblockable", "DivineShield", "Poisonous", "Freezing", "SpellDamage", "Battlecry", "Deathrattle"];
+      return `
+    <h2>\u0421\u0443\u0449\u0435\u0441\u0442\u0432\u0430</h2>
+    <p class="rpLead">\u0421\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u043E\u0441\u0442\u0430\u0451\u0442\u0441\u044F \u043D\u0430 \u043F\u043E\u043B\u0435, \u043F\u043E\u043A\u0430 \u043D\u0435 \u043F\u043E\u0433\u0438\u0431\u043D\u0435\u0442. \u0412\u043D\u0438\u0437\u0443 \u043A\u0430\u0440\u0442\u044B \u2014 <b>\u0430\u0442\u0430\u043A\u0430</b> (\u2694, \u0441\u043B\u0435\u0432\u0430) \u0438 <b>\u0437\u0434\u043E\u0440\u043E\u0432\u044C\u0435</b> (\u2764, \u0441\u043F\u0440\u0430\u0432\u0430).</p>
+    <p>\u0411\u044B\u0432\u0430\u044E\u0442 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0430 <b>\u0431\u0435\u0437 \u0441\u043F\u043E\u0441\u043E\u0431\u043D\u043E\u0441\u0442\u0435\u0439</b> \u2014 \u0443 \u043D\u0438\u0445 \u043F\u0440\u043E\u0441\u0442\u043E \u0445\u043E\u0440\u043E\u0448\u0438\u0435 \u0445\u0430\u0440\u0430\u043A\u0442\u0435\u0440\u0438\u0441\u0442\u0438\u043A\u0438 \u0437\u0430 \u0441\u0432\u043E\u044E \u0441\u0442\u043E\u0438\u043C\u043E\u0441\u0442\u044C. \u0423 \u043E\u0441\u0442\u0430\u043B\u044C\u043D\u044B\u0445 \u0432 \u0442\u0435\u043A\u0441\u0442\u0435 \u043A\u0430\u0440\u0442\u044B \u043F\u0435\u0440\u0435\u0447\u0438\u0441\u043B\u0435\u043D\u044B \u0441\u043F\u043E\u0441\u043E\u0431\u043D\u043E\u0441\u0442\u0438: \u043A\u0430\u0436\u0434\u043E\u0435 \u043A\u043B\u044E\u0447\u0435\u0432\u043E\u0435 \u0441\u043B\u043E\u0432\u043E \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u043E \u0436\u0438\u0440\u043D\u044B\u043C, \u0430 \u0432 \u0441\u043A\u043E\u0431\u043A\u0430\u0445 \u043D\u0430\u043F\u0438\u0441\u0430\u043D\u043E, \u0447\u0442\u043E \u043E\u043D\u043E \u0434\u0435\u043B\u0430\u0435\u0442. \u041D\u0430\u0432\u0435\u0434\u0438\u0442\u0435 \u043D\u0430 \u043A\u0430\u0440\u0442\u0443, \u0447\u0442\u043E\u0431\u044B \u0443\u0432\u0438\u0434\u0435\u0442\u044C \u043F\u043E\u043B\u043D\u044B\u0439 \u0442\u0435\u043A\u0441\u0442.</p>
+    <h2>\u0412\u0441\u0435 \u0441\u043F\u043E\u0441\u043E\u0431\u043D\u043E\u0441\u0442\u0438</h2>
+    <div class="rpKw">${order.map((k) => `
+      <div class="rpKwItem">
+        <div class="rpKwHead"><span class="rpKwIco">${KW_ICON[k] ?? "\u25C6"}</span><b>${esc(KW_RU[k] ?? k)}</b><span class="rpKwCnt">${count(k)} \u043A\u0430\u0440\u0442</span></div>
+        <p>${KW_DETAIL[k] ?? ""}</p>
+        <div class="rpKwEx">\u041D\u0430\u043F\u0440\u0438\u043C\u0435\u0440: ${example(k)}</div>
+      </div>`).join("")}
+    </div>`;
+    } },
+    { id: "spells", ico: "\u2728", title: "\u0417\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u044F \u0438 \u0440\u0443\u043D\u044B", html: () => `
+    <h2>\u0417\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u044F</h2>
+    <p class="rpLead">\u0417\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0435 \u0441\u0440\u0430\u0431\u0430\u0442\u044B\u0432\u0430\u0435\u0442 \u0438 \u0443\u0445\u043E\u0434\u0438\u0442 \u0432 \u0441\u0431\u0440\u043E\u0441. \u0415\u0441\u043B\u0438 \u043D\u0443\u0436\u043D\u0430 \u0446\u0435\u043B\u044C \u2014 \u043F\u043E\u0441\u043B\u0435 \u0432\u044B\u0431\u043E\u0440\u0430 \u043A\u0430\u0440\u0442\u044B \u043F\u043E\u0434\u0441\u0432\u0435\u0447\u0438\u0432\u0430\u044E\u0442\u0441\u044F \u0434\u043E\u043F\u0443\u0441\u0442\u0438\u043C\u044B\u0435 \u0446\u0435\u043B\u0438.</p>
+    <div class="rpTwo">
+      <div class="rpCard"><div class="rpCardT">\u26A1 \u041C\u0433\u043D\u043E\u0432\u0435\u043D\u043D\u043E\u0435</div>
+        <p>\u041C\u043E\u0436\u043D\u043E \u0440\u0430\u0437\u044B\u0433\u0440\u0430\u0442\u044C <b>\u0432 \u043B\u044E\u0431\u043E\u0439 \u043C\u043E\u043C\u0435\u043D\u0442</b>, \u043A\u043E\u0433\u0434\u0430 \u0443 \u0432\u0430\u0441 \u0435\u0441\u0442\u044C \u043F\u0440\u0438\u043E\u0440\u0438\u0442\u0435\u0442: \u0432 \u0441\u0432\u043E\u0439 \u0445\u043E\u0434 \u0432 \u043B\u044E\u0431\u043E\u0439 \u0444\u0430\u0437\u0435, \u0430 \u0442\u0430\u043A\u0436\u0435 <b>\u0432 \u0445\u043E\u0434 \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430</b> \u2014 \u043F\u0435\u0440\u0435\u0434 \u0435\u0433\u043E \u0430\u0442\u0430\u043A\u043E\u0439, \u0432 \u043E\u0442\u0432\u0435\u0442 \u043D\u0430 \u0435\u0433\u043E \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0435, \u0432 \u043A\u043E\u043D\u0446\u0435 \u0435\u0433\u043E \u0445\u043E\u0434\u0430. \u0422\u0430\u043A\u0438\u0435 \u043A\u0430\u0440\u0442\u044B \u043F\u043E\u0434\u0441\u0432\u0435\u0447\u0438\u0432\u0430\u044E\u0442\u0441\u044F \u0433\u043E\u043B\u0443\u0431\u044B\u043C.</p></div>
+      <div class="rpCard"><div class="rpCardT">\u25F7 \u0420\u0438\u0442\u0443\u0430\u043B</div>
+        <p>\u0418\u0433\u0440\u0430\u0435\u0442\u0441\u044F \u0442\u043E\u043B\u044C\u043A\u043E \u0432 \u0432\u0430\u0448\u0443 \u043E\u0441\u043D\u043E\u0432\u043D\u0443\u044E \u0444\u0430\u0437\u0443. \u0426\u0435\u043B\u044C \u0432\u044B\u0431\u0438\u0440\u0430\u0435\u0442\u0441\u044F \u0441\u0440\u0430\u0437\u0443, \u0430 \u044D\u0444\u0444\u0435\u043A\u0442 \u0441\u0440\u0430\u0431\u0430\u0442\u044B\u0432\u0430\u0435\u0442 <b>\u0432 \u043D\u0430\u0447\u0430\u043B\u0435 \u0432\u0430\u0448\u0435\u0433\u043E \u0441\u043B\u0435\u0434\u0443\u044E\u0449\u0435\u0433\u043E \u0445\u043E\u0434\u0430</b>. \u0420\u0438\u0442\u0443\u0430\u043B\u044B \u0441\u0438\u043B\u044C\u043D\u0435\u0435 \u0437\u0430 \u0442\u0443 \u0436\u0435 \u043C\u0430\u043D\u0443, \u043D\u043E \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A \u0443\u0441\u043F\u0435\u0432\u0430\u0435\u0442 \u043F\u043E\u0434\u0433\u043E\u0442\u043E\u0432\u0438\u0442\u044C\u0441\u044F.</p></div>
+    </div>
+    <h3>\u0421\u0442\u0435\u043A \u0438 \u043E\u0442\u0432\u0435\u0442\u044B</h3>
+    <p>\u041A\u043E\u0433\u0434\u0430 \u0440\u0430\u0437\u044B\u0433\u0440\u044B\u0432\u0430\u0435\u0442\u0441\u044F \u043C\u0433\u043D\u043E\u0432\u0435\u043D\u043D\u043E\u0435 \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0435, \u0443 \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430 \u0435\u0441\u0442\u044C \u043E\u043A\u043D\u043E (\u043A\u0440\u0443\u0433\u043E\u0432\u043E\u0439 \u0442\u0430\u0439\u043C\u0435\u0440), \u0447\u0442\u043E\u0431\u044B \u043E\u0442\u0432\u0435\u0442\u0438\u0442\u044C \u0441\u0432\u043E\u0438\u043C \u043C\u0433\u043D\u043E\u0432\u0435\u043D\u043D\u044B\u043C. \u041E\u0442\u0432\u0435\u0442\u044B \u0441\u043A\u043B\u0430\u0434\u044B\u0432\u0430\u044E\u0442\u0441\u044F \u0432 <b>\u0441\u0442\u0435\u043A</b> \u0438 \u0441\u0440\u0430\u0431\u0430\u0442\u044B\u0432\u0430\u044E\u0442 \u0432 \u043E\u0431\u0440\u0430\u0442\u043D\u043E\u043C \u043F\u043E\u0440\u044F\u0434\u043A\u0435: \u043F\u043E\u0441\u043B\u0435\u0434\u043D\u0435\u0435 \u0441\u044B\u0433\u0440\u0430\u043D\u043D\u043E\u0435 \u2014 \u043F\u0435\u0440\u0432\u044B\u043C. \u041A\u043D\u043E\u043F\u043A\u0430 \xAB\u041F\u0430\u0441\xBB \u2014 \u043E\u0442\u043A\u0430\u0437\u0430\u0442\u044C\u0441\u044F \u043E\u0442 \u043E\u0442\u0432\u0435\u0442\u0430.</p>
+    <p class="rpNote">\u0412 \u043E\u043D\u043B\u0430\u0439\u043D-\u0431\u043E\u044E \u0441 \u0436\u0438\u0432\u044B\u043C \u0441\u043E\u043F\u0435\u0440\u043D\u0438\u043A\u043E\u043C \u043E\u043A\u043D\u0430 \u043E\u0442\u0432\u0435\u0442\u043E\u0432 \u043F\u043E\u043A\u0430 \u043E\u0442\u043A\u043B\u044E\u0447\u0435\u043D\u044B: \u043C\u0433\u043D\u043E\u0432\u0435\u043D\u043D\u044B\u0435 \u0438\u0433\u0440\u0430\u044E\u0442\u0441\u044F \u0442\u043E\u043B\u044C\u043A\u043E \u0432 \u0441\u0432\u043E\u0439 \u0445\u043E\u0434.</p>
+    <h2>\u0420\u0443\u043D\u044B</h2>
+    <p>\u0420\u0443\u043D\u0430 \u2014 \u043F\u043E\u0441\u0442\u043E\u044F\u043D\u043D\u044B\u0439 \u044D\u0444\u0444\u0435\u043A\u0442, \u043A\u043E\u0442\u043E\u0440\u044B\u0439 \u043B\u0435\u0436\u0438\u0442 \u043D\u0430 \u043F\u043E\u043B\u0435 \u0438 \u0434\u0435\u0439\u0441\u0442\u0432\u0443\u0435\u0442 \u043A\u0430\u0436\u0434\u044B\u0439 \u0445\u043E\u0434: \u0443\u0441\u0438\u043B\u0438\u0432\u0430\u0435\u0442 \u0441\u0443\u0449\u0435\u0441\u0442\u0432, \u0437\u0430\u0449\u0438\u0449\u0430\u0435\u0442 \u0433\u0435\u0440\u043E\u044F, \u0434\u0430\u0451\u0442 \u043C\u0430\u043D\u0443, \u043A\u0430\u0440\u0442\u044B \u0438\u043B\u0438 \u0443\u0440\u043E\u043D \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0439. \u041E\u0434\u043D\u043E\u0432\u0440\u0435\u043C\u0435\u043D\u043D\u043E \u0443 \u0432\u0430\u0441 \u043C\u043E\u0436\u0435\u0442 \u0431\u044B\u0442\u044C <b>3 \u0440\u0443\u043D\u044B</b>, \u043E\u0434\u0438\u043D\u0430\u043A\u043E\u0432\u044B\u0435 \u0440\u0443\u043D\u044B \u043D\u0435 \u0441\u043A\u043B\u0430\u0434\u044B\u0432\u0430\u044E\u0442\u0441\u044F. \u041E\u0431\u044B\u0447\u043D\u044B\u0439 \u0443\u0440\u043E\u043D \u0440\u0443\u043D\u044B \u043D\u0435 \u0443\u043D\u0438\u0447\u0442\u043E\u0436\u0430\u0435\u0442.</p>` },
+    { id: "status", ico: "\u{1F300}", title: "\u0421\u0442\u0430\u0442\u0443\u0441\u044B", html: () => `
+    <h2>\u0421\u0442\u0430\u0442\u0443\u0441\u044B \u043D\u0430 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0430\u0445</h2>
+    <p class="rpLead">\u0421\u0442\u0430\u0442\u0443\u0441\u044B \u043F\u043E\u043A\u0430\u0437\u0430\u043D\u044B \u0437\u043D\u0430\u0447\u043A\u0430\u043C\u0438 \u043D\u0430 \u043A\u0430\u0440\u0442\u0435 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0430 \u043D\u0430 \u043F\u043E\u043B\u0435. \u041D\u0430\u0432\u0435\u0434\u0438\u0442\u0435 \u043D\u0430 \u0437\u043D\u0430\u0447\u043E\u043A \u2014 \u043F\u043E\u044F\u0432\u0438\u0442\u0441\u044F \u043F\u043E\u0434\u0441\u043A\u0430\u0437\u043A\u0430.</p>
+    <div class="rpKw">${[
+      ["\u{1F6E1}", "\u0429\u0438\u0442", "\u041F\u043E\u0433\u043B\u043E\u0449\u0430\u0435\u0442 \u043F\u0435\u0440\u0432\u043E\u0435 \u043F\u043E\u0432\u0440\u0435\u0436\u0434\u0435\u043D\u0438\u0435 \u043F\u043E\u043B\u043D\u043E\u0441\u0442\u044C\u044E. \u0427\u0438\u0441\u043B\u043E \u043D\u0430 \u0437\u043D\u0430\u0447\u043A\u0435 \u2014 \u0441\u043A\u043E\u043B\u044C\u043A\u043E \u043F\u043E\u0432\u0440\u0435\u0436\u0434\u0435\u043D\u0438\u0439 \u0435\u0449\u0451 \u0431\u0443\u0434\u0435\u0442 \u043F\u043E\u0433\u043B\u043E\u0449\u0435\u043D\u043E."],
+      ["\u{1F525}", "\u0413\u043E\u0440\u0435\u043D\u0438\u0435", "\u0412 \u043D\u0430\u0447\u0430\u043B\u0435 \u0445\u043E\u0434\u0430 \u0432\u043B\u0430\u0434\u0435\u043B\u044C\u0446\u0430 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u043F\u043E\u043B\u0443\u0447\u0430\u0435\u0442 \u0443\u043A\u0430\u0437\u0430\u043D\u043D\u044B\u0439 \u0443\u0440\u043E\u043D. \u0414\u043B\u0438\u0442\u0441\u044F \u043D\u0435\u0441\u043A\u043E\u043B\u044C\u043A\u043E \u0445\u043E\u0434\u043E\u0432."],
+      ["\u2623", "\u042F\u0434", "\u0421\u043B\u0435\u0434\u0443\u044E\u0449\u0435\u0435 \u043B\u044E\u0431\u043E\u0435 \u043F\u043E\u0432\u0440\u0435\u0436\u0434\u0435\u043D\u0438\u0435 \u0443\u0431\u0438\u0432\u0430\u0435\u0442 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E, \u0441\u043A\u043E\u043B\u044C\u043A\u043E \u0431\u044B \u0437\u0434\u043E\u0440\u043E\u0432\u044C\u044F \u0443 \u043D\u0435\u0433\u043E \u043D\u0438 \u0431\u044B\u043B\u043E."],
+      ["\u2744", "\u0417\u0430\u043C\u043E\u0440\u043E\u0437\u043A\u0430", "\u0421\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u043D\u0435 \u043C\u043E\u0436\u0435\u0442 \u0430\u0442\u0430\u043A\u043E\u0432\u0430\u0442\u044C. \u041F\u0440\u043E\u0445\u043E\u0434\u0438\u0442 \u0432 \u043A\u043E\u043D\u0446\u0435 \u0445\u043E\u0434\u0430."],
+      ["\u{1F4A2}", "\u042F\u0440\u043E\u0441\u0442\u044C", "\u0421\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u043C\u043E\u0436\u0435\u0442 \u0430\u0442\u0430\u043A\u043E\u0432\u0430\u0442\u044C \u0432 \u0442\u043E\u0442 \u0436\u0435 \u0445\u043E\u0434, \u043A\u043E\u0433\u0434\u0430 \u0432\u044B\u0448\u043B\u043E \u043D\u0430 \u043F\u043E\u043B\u0435."],
+      ["\u{1F910}", "\u041D\u0435\u043C\u043E\u0442\u0430", "\u0421\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u043D\u0430\u0432\u0441\u0435\u0433\u0434\u0430 \u0442\u0435\u0440\u044F\u0435\u0442 \u0432\u0441\u0435 \u0441\u043F\u043E\u0441\u043E\u0431\u043D\u043E\u0441\u0442\u0438 \u0438 \u043A\u043B\u044E\u0447\u0435\u0432\u044B\u0435 \u0441\u043B\u043E\u0432\u0430 (\u0432 \u0442\u043E\u043C \u0447\u0438\u0441\u043B\u0435 \u041F\u0440\u043E\u0432\u043E\u043A\u0430\u0446\u0438\u044E \u0438 \u041F\u0440\u0435\u0434\u0441\u043C\u0435\u0440\u0442\u043D\u044B\u0439 \u0445\u0440\u0438\u043F). \u0410\u0442\u0430\u043A\u0430 \u0438 \u0437\u0434\u043E\u0440\u043E\u0432\u044C\u0435 \u0441\u043E\u0445\u0440\u0430\u043D\u044F\u044E\u0442\u0441\u044F."],
+      ["\u{1FA78}", "\u041F\u043E\u0440\u0447\u0430", "\u041D\u0430\u0432\u0441\u0435\u0433\u0434\u0430 \u0443\u043C\u0435\u043D\u044C\u0448\u0430\u0435\u0442 \u0437\u0434\u043E\u0440\u043E\u0432\u044C\u0435 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0430. \u0415\u0441\u043B\u0438 \u043E\u043D\u043E \u0443\u043F\u0430\u043B\u043E \u0434\u043E 0 \u2014 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u043F\u043E\u0433\u0438\u0431\u0430\u0435\u0442."]
+    ].map(([i, t, d]) => `<div class="rpKwItem"><div class="rpKwHead"><span class="rpKwIco">${i}</span><b>${t}</b></div><p>${d}</p></div>`).join("")}</div>` },
+    { id: "echo", ico: "\u{1F501}", title: "\u042D\u0445\u043E-\u043E\u0447\u043A\u0438", html: () => `
+    <h2>\u042D\u0445\u043E-\u043E\u0447\u043A\u0438</h2>
+    <p class="rpLead">\u041E\u0441\u043E\u0431\u0430\u044F \u043C\u0435\u0445\u0430\u043D\u0438\u043A\u0430 \u042D\u0445\u043E-\u0426\u0438\u0442\u0430\u0434\u0435\u043B\u0438: \u0442\u0435\u0440\u043F\u0435\u043D\u0438\u0435 \u0432\u043E\u0437\u043D\u0430\u0433\u0440\u0430\u0436\u0434\u0430\u0435\u0442\u0441\u044F \u043F\u043E\u0432\u0442\u043E\u0440\u043E\u043C \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u044F.</p>
+    <ul class="rpList">
+      <li>\u0415\u0441\u043B\u0438 \u0437\u0430 \u0441\u0432\u043E\u044E \u043E\u0441\u043D\u043E\u0432\u043D\u0443\u044E \u0444\u0430\u0437\u0443 \u0432\u044B <b>\u043D\u0435 \u0440\u0430\u0437\u044B\u0433\u0440\u0430\u043B\u0438 \u043D\u0438 \u043E\u0434\u043D\u043E\u0433\u043E \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u044F</b>, \u0432 \u043A\u043E\u043D\u0446\u0435 \u0445\u043E\u0434\u0430 \u043F\u043E\u043B\u0443\u0447\u0430\u0435\u0442\u0435 <b>1 \u042D\u0445\u043E-\u043E\u0447\u043A\u043E</b>. \u041D\u0435\u043A\u043E\u0442\u043E\u0440\u044B\u0435 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0430 \u0434\u0430\u044E\u0442 \u042D\u0445\u043E-\u043E\u0447\u043A\u043E \u0411\u043E\u0435\u0432\u044B\u043C \u043A\u043B\u0438\u0447\u0435\u043C.</li>
+      <li>\u0412 \u0441\u0432\u043E\u044E \u043E\u0441\u043D\u043E\u0432\u043D\u0443\u044E \u0444\u0430\u0437\u0443 \u043F\u043E\u0442\u0440\u0430\u0442\u044C\u0442\u0435 \u043E\u0447\u043A\u043E \u043A\u043D\u043E\u043F\u043A\u043E\u0439 \xAB\u0418\u0441\u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u0442\u044C \u042D\u0445\u043E\xBB: <b>\u043F\u043E\u0441\u043B\u0435\u0434\u043D\u0435\u0435 \u0440\u0430\u0437\u044B\u0433\u0440\u0430\u043D\u043D\u043E\u0435 \u0432\u0430\u043C\u0438 \u043C\u0433\u043D\u043E\u0432\u0435\u043D\u043D\u043E\u0435 \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0435</b> \u0441\u0440\u0430\u0431\u043E\u0442\u0430\u0435\u0442 \u0435\u0449\u0451 \u0440\u0430\u0437 \u0431\u0435\u0441\u043F\u043B\u0430\u0442\u043D\u043E.</li>
+      <li>\u042D\u0445\u043E \u043C\u043E\u0436\u043D\u043E \u0438\u0441\u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u0442\u044C <b>\u043E\u0434\u0438\u043D \u0440\u0430\u0437 \u0437\u0430 \u0431\u043E\u0439</b>. \u0420\u0438\u0442\u0443\u0430\u043B\u044B \u042D\u0445\u043E\u043C \u043D\u0435 \u043F\u043E\u0432\u0442\u043E\u0440\u044F\u044E\u0442\u0441\u044F.</li>
+    </ul>` },
+    { id: "factions", ico: "\u{1F3F0}", title: "\u0424\u0440\u0430\u043A\u0446\u0438\u0438", html: () => `
+    <h2>\u041F\u044F\u0442\u044C \u0444\u0440\u0430\u043A\u0446\u0438\u0439</h2>
+    <p class="rpLead">\u0423 \u043A\u0430\u0436\u0434\u043E\u0439 \u0444\u0440\u0430\u043A\u0446\u0438\u0438 \u0435\u0441\u0442\u044C \u0441\u0432\u043E\u044F \u043F\u0430\u0441\u0441\u0438\u0432\u043D\u0430\u044F \u0441\u043F\u043E\u0441\u043E\u0431\u043D\u043E\u0441\u0442\u044C \u2014 \u043E\u043D\u0430 \u0434\u0435\u0439\u0441\u0442\u0432\u0443\u0435\u0442 \u0432\u0435\u0441\u044C \u0431\u043E\u0439, \u0435\u0441\u043B\u0438 \u0432\u044B \u0438\u0433\u0440\u0430\u0435\u0442\u0435 \u043A\u043E\u043B\u043E\u0434\u043E\u0439 \u044D\u0442\u043E\u0439 \u0444\u0440\u0430\u043A\u0446\u0438\u0438. \u041D\u0435\u0439\u0442\u0440\u0430\u043B\u044C\u043D\u044B\u0435 \u043A\u0430\u0440\u0442\u044B \u043C\u043E\u0436\u043D\u043E \u043A\u043B\u0430\u0441\u0442\u044C \u0432 \u043B\u044E\u0431\u0443\u044E \u043A\u043E\u043B\u043E\u0434\u0443.</p>
+    <div class="rpFac">${FACTION_IDS.map((f) => `<div class="rpFacItem" style="--fc:${colorOf(f).primary}"><div class="rpFacHead"><span>${FACTION_SIGIL[f]}</span><b>${FACTION_RU[f]}</b></div><p>${PASSIVE_TEXT[f]}</p></div>`).join("")}</div>` },
+    { id: "decks", ico: "\u{1F0CF}", title: "\u041A\u043E\u043B\u043E\u0434\u044B \u0438 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u044F", html: () => `
+    <h2>\u041A\u043E\u043B\u043E\u0434\u044B</h2>
+    <ul class="rpList">
+      <li>\u0412 \u043A\u043E\u043B\u043E\u0434\u0435 <b>\u043D\u0435 \u043C\u0435\u043D\u044C\u0448\u0435 30 \u043A\u0430\u0440\u0442</b>. \u0421\u0442\u0430\u043D\u0434\u0430\u0440\u0442\u043D\u044B\u0435 \u043A\u043E\u043B\u043E\u0434\u044B \u0444\u0440\u0430\u043A\u0446\u0438\u0439 \u2014 \u0440\u043E\u0432\u043D\u043E 30, \u0441\u0432\u043E\u0438 \u043C\u043E\u0436\u043D\u043E \u0441\u043E\u0431\u0438\u0440\u0430\u0442\u044C \u0431\u043E\u043B\u044C\u0448\u0435 (40, 60\u2026).</li>
+      <li>\u041D\u0435 \u0431\u043E\u043B\u044C\u0448\u0435 <b>4 \u043A\u043E\u043F\u0438\u0439</b> \u043E\u0434\u043D\u043E\u0439 \u043A\u0430\u0440\u0442\u044B, \u0432\u043A\u043B\u044E\u0447\u0430\u044F \u043B\u0435\u0433\u0435\u043D\u0434\u0430\u0440\u043D\u044B\u0435.</li>
+      <li>\u0414\u043B\u044F \u0438\u0433\u0440\u044B \u043D\u0443\u0436\u043D\u044B \u0432\u0441\u0435 \u043A\u0430\u0440\u0442\u044B \u043A\u043E\u043B\u043E\u0434\u044B \u0432 \u0432\u0430\u0448\u0435\u0439 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u0438.</li>
+    </ul>
+    <h2>\u041A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u044F</h2>
+    <p>\u041D\u043E\u0432\u044B\u0435 \u043A\u0430\u0440\u0442\u044B \u2014 \u0438\u0437 \u0431\u0443\u0441\u0442\u0435\u0440\u043E\u0432 (\u043C\u0430\u0433\u0430\u0437\u0438\u043D, \u043D\u0430\u0433\u0440\u0430\u0434\u044B \u0437\u0430\u0434\u0430\u043D\u0438\u0439, \u0431\u043E\u0435\u0432\u043E\u0439 \u043F\u0440\u043E\u043F\u0443\u0441\u043A, \u0441\u043E\u0431\u044B\u0442\u0438\u044F). \u041D\u0435\u0434\u043E\u0441\u0442\u0430\u044E\u0449\u0443\u044E \u043A\u0430\u0440\u0442\u0443 \u043C\u043E\u0436\u043D\u043E <b>\u0441\u043E\u0437\u0434\u0430\u0442\u044C</b> \u0437\u0430 \u043C\u043E\u043D\u0435\u0442\u044B \u{1FA99}, \u0430 \u043B\u0438\u0448\u043D\u0438\u0435 \u043A\u043E\u043F\u0438\u0438 \u2014 <b>\u0440\u0430\u0437\u043E\u0431\u0440\u0430\u0442\u044C</b> \u043D\u0430 \u043C\u043E\u043D\u0435\u0442\u044B (\u043A\u043B\u0438\u043A \u043F\u043E \u043A\u0430\u0440\u0442\u0435 \u0432 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u0438).</p>
+    <div class="rpTable"><div><b>\u0420\u0435\u0434\u043A\u043E\u0441\u0442\u044C</b><b>\u0421\u043E\u0437\u0434\u0430\u043D\u0438\u0435, \u{1FA99}</b><b>\u0420\u0430\u0437\u0431\u043E\u0440, \u{1FA99}</b></div>
+      ${["Common", "Uncommon", "Rare", "Epic", "Legendary"].map((r) => `<div><span>${RARITY_RU[r] ?? r}</span><span>${CRAFT_COST[r]}</span><span>${DISENCHANT_COINS[r]}</span></div>`).join("")}</div>` },
+    { id: "online", ico: "\u{1F310}", title: "\u0421\u0435\u0442\u0435\u0432\u0430\u044F \u0438\u0433\u0440\u0430", html: () => `
+    <h2>\u0411\u043E\u0439 \u0441 \u0436\u0438\u0432\u044B\u043C \u0441\u043E\u043F\u0435\u0440\u043D\u0438\u043A\u043E\u043C</h2>
+    <p class="rpLead">\u0420\u0430\u0437\u0434\u0435\u043B \xAB\u0421\u0435\u0442\u0435\u0432\u0430\u044F\xBB \u2192 \xAB\u0418\u0433\u0440\u0430\u0442\u044C\xBB: \u0432\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u043A\u043E\u043B\u043E\u0434\u0443, \u0440\u0435\u0436\u0438\u043C \u0438 \u043D\u0430\u0436\u043C\u0438\u0442\u0435 \xAB\u0418\u0433\u0440\u0430\u0442\u044C\xBB.</p>
+    <ul class="rpList">
+      <li><b>\u0420\u0435\u0439\u0442\u0438\u043D\u0433\u043E\u0432\u0430\u044F</b> \u2014 \u0441\u043E\u043F\u0435\u0440\u043D\u0438\u043A \u043F\u043E\u0434\u0431\u0438\u0440\u0430\u0435\u0442\u0441\u044F \u043F\u043E \u0440\u0435\u0439\u0442\u0438\u043D\u0433\u0443 (MMR), \u043F\u043E\u0431\u0435\u0434\u0430 \u0438 \u043F\u043E\u0440\u0430\u0436\u0435\u043D\u0438\u0435 \u043C\u0435\u043D\u044F\u044E\u0442 \u0435\u0433\u043E \u043F\u043E \u0441\u0438\u0441\u0442\u0435\u043C\u0435 Elo. \u0420\u0430\u043D\u0433\u0438: \u0411\u0440\u043E\u043D\u0437\u0430 \u2192 \u0421\u0435\u0440\u0435\u0431\u0440\u043E \u2192 \u0417\u043E\u043B\u043E\u0442\u043E \u2192 \u041F\u043B\u0430\u0442\u0438\u043D\u0430 \u2192 \u0410\u043B\u043C\u0430\u0437 \u2192 \u041C\u0438\u0444\u0438\u043A.</li>
+      <li><b>\u041E\u0431\u044B\u0447\u043D\u0430\u044F</b> \u2014 \u0431\u0435\u0437 \u0432\u043B\u0438\u044F\u043D\u0438\u044F \u043D\u0430 \u0440\u0435\u0439\u0442\u0438\u043D\u0433.</li>
+      <li><b>\u0414\u0440\u0443\u0436\u0435\u0441\u043A\u0438\u0439 \u0432\u044B\u0437\u043E\u0432</b> \u2014 \u0432\u043E \u0432\u043A\u043B\u0430\u0434\u043A\u0435 \xAB\u0414\u0440\u0443\u0437\u044C\u044F\xBB \u043D\u0430\u0436\u043C\u0438\u0442\u0435 \u2694 \u0440\u044F\u0434\u043E\u043C \u0441 \u0434\u0440\u0443\u0433\u043E\u043C \u0432 \u0441\u0435\u0442\u0438.</li>
+      <li>\u041F\u0440\u0438 \u043E\u0431\u0440\u044B\u0432\u0435 \u0441\u0432\u044F\u0437\u0438 \u0438\u0433\u0440\u0430 \u043F\u0435\u0440\u0435\u043F\u043E\u0434\u043A\u043B\u044E\u0447\u0438\u0442\u0441\u044F \u0441\u0430\u043C\u0430, \u043C\u0435\u0441\u0442\u043E \u0434\u0435\u0440\u0436\u0438\u0442\u0441\u044F <b>60 \u0441\u0435\u043A\u0443\u043D\u0434</b>. \u041D\u0435 \u0432\u0435\u0440\u043D\u0443\u043B\u0438\u0441\u044C \u2014 \u043F\u043E\u0440\u0430\u0436\u0435\u043D\u0438\u0435.</li>
+      <li>\u0412\u044B\u0445\u043E\u0434 \u0438\u0437 \u0431\u043E\u044F \u0432 \u043C\u0435\u043D\u044E \u0437\u0430\u0441\u0447\u0438\u0442\u044B\u0432\u0430\u0435\u0442\u0441\u044F \u043A\u0430\u043A <b>\u043F\u043E\u0440\u0430\u0436\u0435\u043D\u0438\u0435</b>.</li>
+    </ul>` },
+    { id: "controls", ico: "\u2328", title: "\u0423\u043F\u0440\u0430\u0432\u043B\u0435\u043D\u0438\u0435", html: () => `
+    <h2>\u0423\u043F\u0440\u0430\u0432\u043B\u0435\u043D\u0438\u0435</h2>
+    <div class="rpTable keys">
+      <div><kbd>\u041A\u043B\u0438\u043A</kbd><span>\u0432\u044B\u0431\u0440\u0430\u0442\u044C \u043A\u0430\u0440\u0442\u0443 \u0438\u043B\u0438 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E, \u0437\u0430\u0442\u0435\u043C \u0446\u0435\u043B\u044C</span></div>
+      <div><kbd>\u041F\u0435\u0440\u0435\u0442\u0430\u0441\u043A\u0438\u0432\u0430\u043D\u0438\u0435</kbd><span>\u0440\u0430\u0437\u044B\u0433\u0440\u0430\u0442\u044C \u043A\u0430\u0440\u0442\u0443 \u043D\u0430 \u043F\u043E\u043B\u0435 \u0438\u043B\u0438 \u0446\u0435\u043B\u044C</span></div>
+      <div><kbd>Esc</kbd> / <kbd>\u041F\u041A\u041C</kbd><span>\u043E\u0442\u043C\u0435\u043D\u0438\u0442\u044C \u0432\u044B\u0431\u043E\u0440, \u043D\u0430\u0437\u0430\u0434</span></div>
+      <div><kbd>\u041F\u0440\u043E\u0431\u0435\u043B</kbd><span>\u0437\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u044C \u0445\u043E\u0434 / \u043F\u0430\u0441 \u0432 \u043E\u043A\u043D\u0435 \u043E\u0442\u0432\u0435\u0442\u0430</span></div>
+      <div><kbd>1\u20139</kbd><span>\u0440\u0430\u0437\u044B\u0433\u0440\u0430\u0442\u044C \u043A\u0430\u0440\u0442\u0443 \u0438\u0437 \u0440\u0443\u043A\u0438 \u043F\u043E \u043D\u043E\u043C\u0435\u0440\u0443</span></div>
+      <div><kbd>E</kbd><span>\u0438\u0441\u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u0442\u044C \u042D\u0445\u043E</span></div>
+      <div><kbd>?</kbd><span>\u043E\u0442\u043A\u0440\u044B\u0442\u044C \u043F\u0440\u0430\u0432\u0438\u043B\u0430</span></div>
+    </div>` }
+  ];
+  var rulesSection = "basics";
+  function renderRules() {
+    const nav = document.getElementById("rulesNav");
+    const body = document.getElementById("rulesBody");
+    if (!nav || !body) return;
+    nav.innerHTML = RULES_SECTIONS.map((r) => `<button class="${r.id === rulesSection ? "sel" : ""}" data-rs="${r.id}"><span>${r.ico}</span>${r.title}</button>`).join("");
+    const sec = RULES_SECTIONS.find((r) => r.id === rulesSection) ?? RULES_SECTIONS[0];
+    body.innerHTML = sec.html();
+    body.parentElement.scrollTop = 0;
+  }
+  function openRules(section) {
+    if (section) rulesSection = section;
+    const inBattle = !$("battle").classList.contains("hidden");
+    if (!inBattle) {
+      setAppRoute("rules");
+      $("menu").classList.add("hidden");
+      for (const id of ["homeScreen", "decksScreen", "eventsScreen", "collection", "shopModal", "bpModal", "profileModal", "campaignModal", "boosterModal"])
+        document.getElementById(id)?.classList.add("hidden");
+      closeOnline();
+    }
+    $("rules").classList.toggle("inBattle", inBattle);
     $("rules").classList.remove("hidden");
+    renderRules();
+  }
+  function closeRules() {
+    const r = $("rules");
+    if (r.classList.contains("inBattle")) {
+      r.classList.add("hidden");
+      return;
+    }
+    navigateApp("back");
+    if (appRoute === "rules") navigateApp("home");
+  }
+  $("rules").addEventListener("click", (ev) => {
+    const t = ev.target;
+    const s = t.closest("[data-rs]");
+    if (s) {
+      Audio_.uiClick();
+      rulesSection = s.dataset.rs;
+      renderRules();
+      return;
+    }
+    const c = t.closest("[data-card]");
+    if (c) {
+      const card = db.get(c.dataset.card);
+      if (card) {
+        const r = c.getBoundingClientRect();
+        showTooltip(card, r.right, r.top);
+      }
+    }
   });
-  btn("btnRulesClose").addEventListener("click", () => $("rules").classList.add("hidden"));
+  $("rules").addEventListener("mouseout", (ev) => {
+    if (ev.target.closest?.("[data-card]")) tooltip.classList.remove("show");
+  });
+  btn("btnRules").addEventListener("click", () => openRules());
+  btn("btnRulesClose").addEventListener("click", () => closeRules());
   document.addEventListener("keydown", (ev) => {
     const t = ev.target;
     if (t && (t.tagName === "INPUT" || t.tagName === "SELECT" || t.tagName === "TEXTAREA")) return;
@@ -31461,7 +32996,7 @@ ${FACTION_IDS.map((f) => `<p style="margin:.45rem 0"><b style="color:${colorOf(f
         return;
       }
       if (!$("rules").classList.contains("hidden")) {
-        $("rules").classList.add("hidden");
+        closeRules();
         return;
       }
       if (!$("settingsPanel").classList.contains("hidden")) {
@@ -31488,8 +33023,7 @@ ${FACTION_IDS.map((f) => `<p style="margin:.45rem 0"><b style="color:${colorOf(f
     }
     if (ev.key === "?" || ev.key === "/" && ev.shiftKey) {
       ev.preventDefault();
-      $("rulesBody").innerHTML = RULES_HTML;
-      $("rules").classList.remove("hidden");
+      openRules();
       return;
     }
     if (ev.key.toLowerCase() === "h" || ev.key.toLowerCase() === "\u0440") {
@@ -31528,4 +33062,727 @@ ${FACTION_IDS.map((f) => `<p style="margin:.45rem 0"><b style="color:${colorOf(f
     window.setTimeout(() => attachVolumetric(document.body), 600);
   } catch {
   }
+  (function initManaArt() {
+    const probe = (id, ok) => {
+      const url = `/cosm/mana/${id}`;
+      const im = new Image();
+      im.onload = () => ok(url);
+      im.src = url;
+    };
+    probe("crystal", (url) => {
+      document.querySelectorAll(".stat.mana .ico").forEach((ico) => {
+        ico.classList.add("manaArt");
+        ico.innerHTML = `<img src="${url}" alt="\u2726">`;
+      });
+    });
+    probe("cost", (url) => {
+      document.documentElement.style.setProperty("--mana-cost-art", `url("${url}")`);
+      document.body.classList.add("hasManaCostArt");
+    });
+  })();
+  var onlineTab = "play";
+  var onlinePoll = 0;
+  var onlineSearch = null;
+  var onlineFound = null;
+  var onlineLastChallenges = /* @__PURE__ */ new Set();
+  var onlineResultsHtml = "";
+  var ONLINE_STATUS_RU = { online: "\u0432 \u0441\u0435\u0442\u0438", searching: "\u0438\u0449\u0435\u0442 \u043C\u0430\u0442\u0447", in_match: "\u0432 \u043C\u0430\u0442\u0447\u0435", offline: "\u043D\u0435 \u0432 \u0441\u0435\u0442\u0438" };
+  async function onApi(method, path, body) {
+    try {
+      const r = await authFetch(`${META_API()}${path}`, { method, headers: { "content-type": "application/json" }, body: body ? JSON.stringify(body) : void 0 });
+      const j = await r.json().catch(() => ({}));
+      return { ok: r.ok, status: r.status, j };
+    } catch {
+      return { ok: false, status: 0, j: { error: "\u0421\u0435\u0440\u0432\u0435\u0440 \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u0435\u043D (npm run server:meta, \u043F\u043E\u0440\u0442 8081)" } };
+    }
+  }
+  function onlineEnsureModal() {
+    let m = document.getElementById("onlineModal");
+    if (m) return m;
+    m = document.createElement("div");
+    m.id = "onlineModal";
+    m.className = "hidden";
+    m.setAttribute("role", "dialog");
+    m.setAttribute("aria-label", "\u0421\u0435\u0442\u0435\u0432\u0430\u044F \u0438\u0433\u0440\u0430");
+    m.innerHTML = `<div class="onPanel">
+    <div class="onHead"><div class="onTitle">\u0421\u0415\u0422\u0415\u0412\u0410\u042F \u0418\u0413\u0420\u0410</div><div id="onMe" class="onMe"></div>
+      <button class="onClose" id="onClose" title="\u0417\u0430\u043A\u0440\u044B\u0442\u044C">\u2715</button></div>
+    <div class="onTabs">
+      <button data-ot="play">\u0418\u0433\u0440\u0430\u0442\u044C</button><button data-ot="friends">\u0414\u0440\u0443\u0437\u044C\u044F <b id="onFrBadge"></b></button><button data-ot="top">\u041B\u0438\u0434\u0435\u0440\u044B</button>
+      <span style="flex:1"></span><button id="onEvents" class="onGhost">\u0421\u043E\u0431\u044B\u0442\u0438\u044F \u203A</button>
+    </div>
+    <div id="onChall"></div>
+    <div id="onBody" class="onBody"></div>
+  </div>`;
+    document.body.appendChild(m);
+    m.addEventListener("click", (ev) => {
+      const t = ev.target;
+      if (t === m || t.closest("#onClose")) {
+        closeOnline();
+        return;
+      }
+      if (t.closest("#onEvents")) {
+        closeOnline();
+        openEventsScreen();
+        return;
+      }
+      const tab = t.closest("[data-ot]");
+      if (tab) {
+        Audio_.uiClick();
+        onlineTab = tab.dataset.ot;
+        void renderOnline();
+        return;
+      }
+      const act = t.closest("[data-on]");
+      if (act) {
+        Audio_.uiClick();
+        void onlineAction(act.dataset.on, act.dataset.arg ?? "");
+      }
+    });
+    m.addEventListener("keydown", (ev) => {
+      const t = ev.target;
+      if (t.id === "onSearch" && ev.key === "Enter") void onlineAction("search", "");
+    });
+    return m;
+  }
+  function onlineDeckId() {
+    return menuSelectedDeckId || document.getElementById("deckPick")?.value || String(picked);
+  }
+  var onlineMode = "ranked";
+  function onlineDeckArts(deck) {
+    const f = deck.faction;
+    const av = deck.avatarCardId && deck.cards.includes(deck.avatarCardId) ? db.get(deck.avatarCardId) : void 0;
+    const c = av ?? suggestedDeckArt(deck.cards);
+    const urls = c ? [`/art/${encodeURIComponent(c.faction)}/${encodeURIComponent(c.id)}.png`] : [];
+    urls.push(`/heroes/${encodeURIComponent(f)}`, `img/menu_${f.toLowerCase()}.jpg`);
+    return urls.join("|");
+  }
+  function fmtClock(sec) {
+    return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
+  }
+  function onlineLobbyHtml(me) {
+    const decks = getAllDecksForGrid();
+    const selId = onlineDeckId();
+    const sel2 = decks.find((d) => d.id === selId) ?? decks[0];
+    const busy = !!(onlineSearch || onlineFound);
+    const problem = sel2 ? deckPlayProblem(sel2) : "\u041D\u0435\u0442 \u043A\u043E\u043B\u043E\u0434\u044B";
+    const tiles = decks.map((d) => `<button data-f="${esc(d.faction)}" class="alDeck${d.id === sel2?.id ? " sel" : ""}" data-on="deck" data-arg="${esc(d.id)}" ${busy ? "disabled" : ""} title="${esc(d.name)} \xB7 ${d.cards.length} \u043A\u0430\u0440\u0442">
+      <img data-arts="${esc(onlineDeckArts(d))}" alt="" loading="lazy">
+      <span class="alDeckName">${esc(d.name)}</span>
+      <span class="alDeckSub">${esc(FACTION_RU[d.faction] ?? d.faction)} \xB7 ${d.cards.length}</span>
+      ${d.isPrecon ? "" : '<span class="alDeckMine">\u041C\u041E\u042F</span>'}
+    </button>`).join("");
+    const mode = onlineSearch?.mode ?? onlineFound?.mode ?? onlineMode;
+    const modeInfo = {
+      ranked: `\u0421\u0435\u0437\u043E\u043D ${me.season} \xB7 Elo \xB7 \u0440\u0430\u043D\u0433\u0438 \u0411\u0440\u043E\u043D\u0437\u0430 \u2192 \u041C\u0438\u0444\u0438\u043A`,
+      casual: "\u0411\u0435\u0437 \u0432\u043B\u0438\u044F\u043D\u0438\u044F \u043D\u0430 \u0440\u0435\u0439\u0442\u0438\u043D\u0433 \xB7 \u0431\u044B\u0441\u0442\u0440\u044B\u0439 \u043F\u043E\u0434\u0431\u043E\u0440",
+      friendly: "\u0414\u0440\u0443\u0436\u0435\u0441\u043A\u0438\u0439 \u0432\u044B\u0437\u043E\u0432 \xB7 \u0431\u0435\u0437 \u0440\u0435\u0439\u0442\u0438\u043D\u0433\u0430"
+    };
+    let action;
+    if (onlineFound) {
+      const o = onlineFound.opponent;
+      action = `<div class="alVs"><span>${esc(String(meta.nick || "\u0412\u044B"))}</span><b>VS</b><span>${esc(o.nick)}</span></div>
+      <div class="alVsSub">${esc(String(o.rank ?? ""))} \xB7 \u043F\u043E\u0434\u043A\u043B\u044E\u0447\u0435\u043D\u0438\u0435 \u043A \u0431\u043E\u044E\u2026</div>
+      <button class="alPlay found" data-on="playNow">\u0412 \u0411\u041E\u0419</button>`;
+    } else if (onlineSearch) {
+      const sec = Math.round((Date.now() - onlineSearch.since) / 1e3);
+      action = `<div class="alSearchInfo" id="onMmInfo">\u041F\u043E\u0438\u0441\u043A \u0441\u043E\u043F\u0435\u0440\u043D\u0438\u043A\u0430\u2026</div>
+      <button class="alPlay searching" data-on="cancel" title="\u041E\u0442\u043C\u0435\u043D\u0438\u0442\u044C \u043F\u043E\u0438\u0441\u043A"><span class="alSpin"></span><span class="onTimer">${fmtClock(sec)}</span><i>\u041E\u0442\u043C\u0435\u043D\u0430</i></button>`;
+    } else {
+      action = `${problem ? `<div class="alWarn">\u26A0 ${esc(problem)}</div>` : ""}
+      <button class="alPlay" data-on="queue" data-arg="${mode}" ${problem ? "disabled" : ""}>\u0418\u0413\u0420\u0410\u0422\u042C</button>`;
+    }
+    return `<div class="alWrap">
+    <div class="alLeft"><div class="alHead">\u041C\u041E\u0418 \u041A\u041E\u041B\u041E\u0414\u042B <span>${decks.length}</span></div><div class="alGrid">${tiles}</div></div>
+    <div class="alRight">
+      <div class="alModes">
+        <button class="${mode === "ranked" ? "sel" : ""}" data-on="mode" data-arg="ranked" ${busy ? "disabled" : ""}>\u0420\u0435\u0439\u0442\u0438\u043D\u0433\u043E\u0432\u0430\u044F</button>
+        <button class="${mode === "casual" ? "sel" : ""}" data-on="mode" data-arg="casual" ${busy ? "disabled" : ""}>\u041E\u0431\u044B\u0447\u043D\u0430\u044F</button>
+      </div>
+      <div class="alModeInfo">${esc(modeInfo[mode] ?? "")}</div>
+      ${mode === "ranked" ? `<div class="alRank"><span class="onTier t-${esc(me.rank.tier)}">${esc(me.rank.label)}</span><b>${me.mmr}</b> MMR</div>` : ""}
+      ${sel2 ? `<div class="alSel" data-f="${esc(sel2.faction)}"><img data-arts="${esc(onlineDeckArts(sel2))}" alt=""><div class="alSelTxt"><b>${esc(sel2.name)}</b><span>${esc(FACTION_RU[sel2.faction] ?? sel2.faction)} \xB7 ${sel2.cards.length} \u043A\u0430\u0440\u0442</span></div></div>` : ""}
+      <div class="alAction">${action}</div>
+    </div>
+  </div>`;
+  }
+  function onlineUserRow(u, actions) {
+    return `<div class="onUser"><span class="onDot s-${esc(u.status)}" title="${esc(ONLINE_STATUS_RU[u.status] ?? u.status)}"></span>
+    <span class="onAva f-${esc(u.avatarFac)}">${esc((u.nick || u.login).slice(0, 1).toUpperCase())}</span>
+    <span class="onName"><b>${esc(u.nick || u.login)}</b><i>@${esc(u.login)} \xB7 ${esc(ONLINE_STATUS_RU[u.status] ?? "")}</i></span>
+    <span class="onRank">${esc(u.rank)}<i>${u.wins}\u2013${u.losses}</i></span>
+    <span class="onActs">${actions}</span></div>`;
+  }
+  async function renderOnline() {
+    const m = onlineEnsureModal();
+    m.querySelectorAll("[data-ot]").forEach((b) => b.classList.toggle("sel", b.dataset.ot === onlineTab));
+    const body = m.querySelector("#onBody");
+    const meBox = m.querySelector("#onMe");
+    if (!meta.signedIn || !authGet()) {
+      meBox.innerHTML = "";
+      body.innerHTML = `<div class="onEmpty"><div class="onBig">\u{1F512}</div><p>\u041E\u043D\u043B\u0430\u0439\u043D-\u0440\u0435\u0436\u0438\u043C\u044B \u0434\u043E\u0441\u0442\u0443\u043F\u043D\u044B \u043F\u043E\u0441\u043B\u0435 \u0432\u0445\u043E\u0434\u0430 \u0432 \u0430\u043A\u043A\u0430\u0443\u043D\u0442:<br>\u0440\u0435\u0439\u0442\u0438\u043D\u0433\u043E\u0432\u0430\u044F \u043B\u0435\u0441\u0442\u043D\u0438\u0446\u0430, \u0434\u0440\u0443\u0437\u044C\u044F \u0438 \u0434\u0440\u0443\u0436\u0435\u0441\u043A\u0438\u0435 \u0432\u044B\u0437\u043E\u0432\u044B.</p>
+      <div class="onRow"><button class="btn gold" data-on="login">\u0412\u043E\u0439\u0442\u0438</button><button class="btn" data-on="register">\u0420\u0435\u0433\u0438\u0441\u0442\u0440\u0430\u0446\u0438\u044F</button></div></div>`;
+      return;
+    }
+    const me = await onApi("GET", "/api/rating/me");
+    if (!me.ok) {
+      meBox.innerHTML = "";
+      body.innerHTML = `<div class="onEmpty"><div class="onBig">\u26A0</div><p>${esc(me.j.error ?? "\u041E\u0448\u0438\u0431\u043A\u0430 \u0441\u0435\u0440\u0432\u0435\u0440\u0430")}</p></div>`;
+      return;
+    }
+    meBox.innerHTML = `<span class="onTier t-${esc(me.j.rank.tier)}">${esc(me.j.rank.label)}</span><span>${me.j.mmr} MMR</span><span>${me.j.wins}\u2013${me.j.losses}</span>${me.j.place ? `<span>#${me.j.place}</span>` : ""}`;
+    const fr = await onApi("GET", "/api/friends");
+    const badge = m.querySelector("#onFrBadge");
+    if (badge) badge.textContent = fr.ok && fr.j.incoming.length ? String(fr.j.incoming.length) : "";
+    const ch = m.querySelector("#onChall");
+    ch.innerHTML = fr.ok ? fr.j.challenges.map((c) => `<div class="onChallenge">\u2694 <b>${esc(c.nick)}</b> \u0432\u044B\u0437\u044B\u0432\u0430\u0435\u0442 \u0432\u0430\u0441 \u043D\u0430 \u0434\u0440\u0443\u0436\u0435\u0441\u043A\u0438\u0439 \u043C\u0430\u0442\u0447
+    <button class="btn gold smBtn" data-on="chAccept" data-arg="${esc(c.id ?? "")}">\u041F\u0440\u0438\u043D\u044F\u0442\u044C</button><button class="btn smBtn" data-on="chDecline" data-arg="${esc(c.id ?? "")}">\u041E\u0442\u043A\u043B\u043E\u043D\u0438\u0442\u044C</button></div>`).join("") : "";
+    m.classList.toggle("arena", onlineTab === "play");
+    if (onlineTab === "play") {
+      body.innerHTML = onlineLobbyHtml(me.j);
+      body.querySelectorAll("img[data-arts]").forEach((img) => artChain(img, img.dataset.arts.split("|")));
+    } else if (onlineTab === "friends") {
+      if (!fr.ok) {
+        body.innerHTML = `<div class="onEmpty">${esc(fr.j.error ?? "")}</div>`;
+        return;
+      }
+      const q = document.getElementById("onSearch")?.value ?? "";
+      body.innerHTML = `<div class="onRow"><input id="onSearch" class="authInp" placeholder="\u041B\u043E\u0433\u0438\u043D \u0438\u043B\u0438 \u043D\u0438\u043A \u0438\u0433\u0440\u043E\u043A\u0430" value="${esc(q)}" maxlength="20"><button class="btn gold" data-on="search">\u041D\u0430\u0439\u0442\u0438</button></div>
+      <div id="onResults">${onlineResultsHtml}</div>
+      ${fr.j.incoming.length ? `<div class="onSec">\u0417\u0410\u042F\u0412\u041A\u0418 \u0412 \u0414\u0420\u0423\u0417\u042C\u042F</div>` + fr.j.incoming.map((u) => onlineUserRow(u, `<button class="btn gold smBtn" data-on="accept" data-arg="${esc(u.login)}">\u041F\u0440\u0438\u043D\u044F\u0442\u044C</button><button class="btn smBtn" data-on="decline" data-arg="${esc(u.login)}">\u2715</button>`)).join("") : ""}
+      <div class="onSec">\u0414\u0420\u0423\u0417\u042C\u042F \xB7 ${fr.j.friends.filter((f) => f.status !== "offline").length}/${fr.j.friends.length} \u0432 \u0441\u0435\u0442\u0438</div>
+      ${fr.j.friends.length ? fr.j.friends.map((u) => onlineUserRow(u, `<button class="btn smBtn" data-on="challenge" data-arg="${esc(u.login)}" ${u.status === "online" ? "" : "disabled"} title="\u0414\u0440\u0443\u0436\u0435\u0441\u043A\u0438\u0439 \u043C\u0430\u0442\u0447">\u2694</button><button class="btn smBtn" data-on="remove" data-arg="${esc(u.login)}" title="\u0423\u0434\u0430\u043B\u0438\u0442\u044C \u0438\u0437 \u0434\u0440\u0443\u0437\u0435\u0439">\u2715</button>`)).join("") : '<div class="onNote">\u041F\u043E\u043A\u0430 \u043D\u0438\u043A\u043E\u0433\u043E \u2014 \u043D\u0430\u0439\u0434\u0438\u0442\u0435 \u0438\u0433\u0440\u043E\u043A\u0430 \u043F\u043E \u043B\u043E\u0433\u0438\u043D\u0443 \u0432\u044B\u0448\u0435.</div>'}
+      ${fr.j.outgoing.length ? `<div class="onSec">\u041E\u0422\u041F\u0420\u0410\u0412\u041B\u0415\u041D\u041D\u042B\u0415</div>` + fr.j.outgoing.map((u) => onlineUserRow(u, `<button class="btn smBtn" data-on="cancelReq" data-arg="${esc(u.login)}">\u041E\u0442\u043C\u0435\u043D\u0438\u0442\u044C</button>`)).join("") : ""}`;
+    } else {
+      const lb = await onApi("GET", "/api/leaderboard");
+      const my = String(meta.nick);
+      body.innerHTML = lb.ok && lb.j.top.length ? `<div class="onSec">\u0421\u0415\u0417\u041E\u041D ${lb.j.season} \xB7 \u0422\u041E\u041F-100</div><div class="onTop">` + lb.j.top.map((u) => `<div class="onTopRow${u.nick === my ? " me" : ""}"><span class="p">${u.place}</span><span class="onDot s-${esc(u.status)}"></span><b>${esc(u.nick)}</b><span class="r">${esc(u.rank)}</span><span class="w">${u.wins}\u2013${u.losses}</span></div>`).join("") + "</div>" : '<div class="onEmpty">\u0420\u0435\u0439\u0442\u0438\u043D\u0433\u043E\u0432\u044B\u0445 \u043C\u0430\u0442\u0447\u0435\u0439 \u0432 \u044D\u0442\u043E\u043C \u0441\u0435\u0437\u043E\u043D\u0435 \u0435\u0449\u0451 \u043D\u0435\u0442.</div>';
+    }
+  }
+  async function onlineAction(a, arg) {
+    const fail = (r) => {
+      if (!r.ok) showToast(`\u26A0 ${r.j.error ?? "\u041E\u0448\u0438\u0431\u043A\u0430"}`);
+      return !r.ok;
+    };
+    if (a === "login" || a === "register") {
+      closeOnline();
+      openAuth(a);
+      return;
+    }
+    if (a === "queue") {
+      const r = await onApi("POST", "/api/mm/queue", { mode: arg, deckId: onlineDeckId() });
+      if (fail(r)) return;
+      onlineSearch = { mode: arg, since: Date.now() };
+    }
+    if (a === "cancel") {
+      await onApi("POST", "/api/mm/cancel");
+      onlineSearch = null;
+    }
+    if (a === "mode") {
+      onlineMode = arg === "casual" ? "casual" : "ranked";
+      await renderOnline();
+      return;
+    }
+    if (a === "deck") {
+      selectMainMenuDeck(arg);
+      await renderOnline();
+      return;
+    }
+    if (a === "foundOk") onlineFound = null;
+    if (a === "playNow" && onlineFound?.ticket) {
+      void startOnlineBattle(onlineFound.ticket, onlineFound.wsUrl);
+      return;
+    }
+    if (a === "search") {
+      const q = document.getElementById("onSearch")?.value.trim() ?? "";
+      const r = await onApi("GET", `/api/users/search?q=${encodeURIComponent(q)}`);
+      if (fail(r)) return;
+      const box = document.getElementById("onResults");
+      onlineResultsHtml = r.j.users.length ? r.j.users.map((u) => onlineUserRow(u, u.friend ? '<span class="onNote">\u0432 \u0434\u0440\u0443\u0437\u044C\u044F\u0445</span>' : u.pending ? '<span class="onNote">\u0437\u0430\u044F\u0432\u043A\u0430</span>' : `<button class="btn gold smBtn" data-on="add" data-arg="${esc(u.login)}">+ \u0412 \u0434\u0440\u0443\u0437\u044C\u044F</button>`)).join("") : `<div class="onNote">${q.length < 2 ? "\u0412\u0432\u0435\u0434\u0438\u0442\u0435 \u043C\u0438\u043D\u0438\u043C\u0443\u043C 2 \u0441\u0438\u043C\u0432\u043E\u043B\u0430" : "\u041D\u0438\u043A\u043E\u0433\u043E \u043D\u0435 \u043D\u0430\u0448\u043B\u0438"}</div>`;
+      if (box) box.innerHTML = onlineResultsHtml;
+      return;
+    }
+    if (a === "add") {
+      const r = await onApi("POST", "/api/friends/request", { to: arg });
+      if (fail(r)) return;
+      onlineResultsHtml = "";
+      showToast(r.j.friends ? "\u{1F91D} \u0422\u0435\u043F\u0435\u0440\u044C \u0432\u044B \u0434\u0440\u0443\u0437\u044C\u044F" : "\u{1F4E8} \u0417\u0430\u044F\u0432\u043A\u0430 \u043E\u0442\u043F\u0440\u0430\u0432\u043B\u0435\u043D\u0430");
+    }
+    if (a === "accept") {
+      if (fail(await onApi("POST", "/api/friends/accept", { from: arg }))) return;
+      showToast("\u{1F91D} \u0417\u0430\u044F\u0432\u043A\u0430 \u043F\u0440\u0438\u043D\u044F\u0442\u0430");
+    }
+    if (a === "decline") await onApi("POST", "/api/friends/decline", { from: arg });
+    if (a === "cancelReq") await onApi("POST", "/api/friends/cancel", { to: arg });
+    if (a === "remove") {
+      if (!window.confirm(`\u0423\u0434\u0430\u043B\u0438\u0442\u044C ${arg} \u0438\u0437 \u0434\u0440\u0443\u0437\u0435\u0439?`)) return;
+      await onApi("POST", "/api/friends/remove", { login: arg });
+    }
+    if (a === "challenge") {
+      if (fail(await onApi("POST", "/api/challenge", { to: arg, deckId: onlineDeckId() }))) return;
+      showToast(`\u2694 \u0412\u044B\u0437\u043E\u0432 \u043E\u0442\u043F\u0440\u0430\u0432\u043B\u0435\u043D: ${arg}`);
+      onlineTab = "play";
+      onlineSearch = { mode: "friendly", since: Date.now() };
+    }
+    if (a === "chAccept") {
+      if (fail(await onApi("POST", "/api/challenge/accept", { id: arg, deckId: onlineDeckId() }))) return;
+      onlineTab = "play";
+    }
+    if (a === "chDecline") await onApi("POST", "/api/challenge/decline", { id: arg });
+    await onlinePollTick(true);
+  }
+  async function onlinePollTick(forceRender = false) {
+    if (!meta.signedIn || !authGet()) return;
+    const st = await onApi("GET", "/api/mm/status");
+    if (st.ok && st.j.state === "found" && st.j.opponent) {
+      onlineSearch = null;
+      onlineFound = { match: st.j.match, seat: st.j.seat, mode: st.j.mode, opponent: st.j.opponent, ticket: st.j.ticket ?? "", wsUrl: st.j.wsUrl };
+      const tk = onlineFound.ticket;
+      const wu = onlineFound.wsUrl;
+      window.setTimeout(() => {
+        if (onlineFound?.ticket === tk) void startOnlineBattle(tk, wu);
+      }, 1800);
+      onlineTab = "play";
+      Audio_.uiClick();
+      showToast(`\u2694 \u0421\u043E\u043F\u0435\u0440\u043D\u0438\u043A \u043D\u0430\u0439\u0434\u0435\u043D: ${st.j.opponent.nick}`);
+      forceRender = true;
+    } else if (st.ok && st.j.state === "idle" && onlineSearch && onlineSearch.mode !== "friendly") {
+      onlineSearch = null;
+      forceRender = true;
+    }
+    const open = !document.getElementById("onlineModal")?.classList.contains("hidden") && !!document.getElementById("onlineModal");
+    const typing = document.activeElement?.id === "onSearch";
+    if (open && !typing && (forceRender || onlineTab !== "play")) await renderOnline();
+    else if (open && onlineSearch) {
+      const t = document.querySelector("#onlineModal .onTimer");
+      const sec = Math.round((Date.now() - onlineSearch.since) / 1e3);
+      if (t) t.textContent = `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
+      const inf = document.getElementById("onMmInfo");
+      if (inf && st.ok && st.j.state === "searching") inf.textContent = `\u041E\u043A\u043D\u043E \u043F\u043E\u0434\u0431\u043E\u0440\u0430 \xB1${st.j.window} MMR \xB7 \u0432 \u043E\u0447\u0435\u0440\u0435\u0434\u0438: ${st.j.inQueue}`;
+    }
+  }
+  function openOnline() {
+    closeAllScreens();
+    $("menu").classList.add("hidden");
+    setAppRoute("online");
+    const m = onlineEnsureModal();
+    m.classList.remove("hidden");
+    void renderOnline();
+    window.clearInterval(onlinePoll);
+    onlinePoll = window.setInterval(() => {
+      void onlinePollTick();
+    }, 2500);
+  }
+  function closeOnline() {
+    document.getElementById("onlineModal")?.classList.add("hidden");
+    window.clearInterval(onlinePoll);
+    onlinePoll = 0;
+  }
+  function renderHomeChallengeBanner() {
+    const b = document.getElementById("ecChBanner");
+    if (!b) return;
+    if (!homeChallengeList.length) {
+      b.classList.add("hidden");
+      b.innerHTML = "";
+      return;
+    }
+    const c = homeChallengeList[0];
+    b.classList.remove("hidden");
+    b.innerHTML = `<span class="ecChBTxt">\u2694 <b>${esc(c.nick)}</b> \u0432\u044B\u0437\u044B\u0432\u0430\u0435\u0442 \u0432\u0430\u0441 \u043D\u0430 \u0434\u0440\u0443\u0436\u0435\u0441\u043A\u0438\u0439 \u043C\u0430\u0442\u0447</span>
+    <span class="ecChBBtns"><button class="btn primary smBtn" data-chaccept="${esc(c.id)}">\u041F\u0440\u0438\u043D\u044F\u0442\u044C</button>
+    <button class="btn smBtn" data-chdecline="${esc(c.id)}">\u041E\u0442\u043A\u043B\u043E\u043D\u0438\u0442\u044C</button></span>`;
+  }
+  document.addEventListener("click", (ev) => {
+    const t = ev.target;
+    const acc = t?.closest?.("[data-chaccept]");
+    const dec = t?.closest?.("[data-chdecline]");
+    if (acc?.dataset.chaccept !== void 0 && acc) {
+      void onApi("POST", "/api/challenge/accept", { id: acc.dataset.chaccept, deckId: onlineDeckId() }).then((r) => {
+        if (r.ok) {
+          homeChallengeList = [];
+          renderHomeChallengeBanner();
+          updateChallengePanel();
+          openOnline();
+        } else showToast("\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u043F\u0440\u0438\u043D\u044F\u0442\u044C \u0432\u044B\u0437\u043E\u0432");
+      });
+    }
+    if (dec?.dataset.chdecline !== void 0 && dec) {
+      void onApi("POST", "/api/challenge/decline", { id: dec.dataset.chdecline });
+      homeChallengeList = [];
+      renderHomeChallengeBanner();
+      updateChallengePanel();
+      showToast("\u0412\u044B\u0437\u043E\u0432 \u043E\u0442\u043A\u043B\u043E\u043D\u0451\u043D");
+    }
+    if (t?.closest?.("#btnChOnline")) {
+      document.getElementById("btnNavMulti")?.click();
+    }
+    if (t?.closest?.("#btnChFriends")) {
+      document.getElementById("btnFriends")?.click();
+    }
+  });
+  window.setInterval(() => {
+    if (!meta.signedIn || !authGet() || typeof window.fetch !== "function") return;
+    void syncProfile();
+    void onApi("POST", "/api/presence", { status: "online" });
+    void onApi("GET", "/api/friends").then((r) => {
+      if (!r.ok) return;
+      const ids = new Set(r.j.challenges.map((c) => String(c.id)));
+      for (const c of r.j.challenges) if (!onlineLastChallenges.has(String(c.id))) showToast(`\u2694 ${c.nick} \u0432\u044B\u0437\u044B\u0432\u0430\u0435\u0442 \u0432\u0430\u0441`);
+      onlineLastChallenges = ids;
+      homeChallengeList = r.j.challenges.map((c) => ({ id: String(c.id ?? ""), nick: String(c.nick ?? "") }));
+      renderHomeChallengeBanner();
+      updateChallengePanel();
+    });
+    if (onlineSearch && !onlinePoll) void onlinePollTick();
+  }, 3e4);
+  window.openOnline = openOnline;
+  var NetLink = class {
+    constructor(urls, ticket, joinInfo) {
+      this.urls = urls;
+      this.ticket = ticket;
+      this.joinInfo = joinInfo;
+      this.seat = 0;
+      this.mode = "casual";
+      this.match = "";
+      this.overInfo = null;
+      this.onNeedSync = null;
+      this.ws = null;
+      this.queue = [];
+      this.waiters = [];
+      this.closed = false;
+      this.started = null;
+      this.retries = 0;
+      this.urlIdx = 0;
+    }
+    connect(timeoutMs = 2e4) {
+      return new Promise((resolve, reject) => {
+        const t = window.setTimeout(() => {
+          this.started = null;
+          reject(new Error("\u0421\u043E\u043F\u0435\u0440\u043D\u0438\u043A \u043D\u0435 \u043F\u043E\u0434\u043A\u043B\u044E\u0447\u0438\u043B\u0441\u044F \u0432\u043E\u0432\u0440\u0435\u043C\u044F"));
+        }, timeoutMs);
+        this.started = (ok, err) => {
+          window.clearTimeout(t);
+          this.started = null;
+          if (ok) resolve();
+          else reject(new Error(err || "\u041E\u0448\u0438\u0431\u043A\u0430 \u043F\u043E\u0434\u043A\u043B\u044E\u0447\u0435\u043D\u0438\u044F"));
+        };
+        this.open();
+      });
+    }
+    open() {
+      let ws;
+      try {
+        ws = new WebSocket(this.urls[this.urlIdx]);
+      } catch {
+        this.started?.(false, "\u041C\u0430\u0442\u0447-\u0441\u0435\u0440\u0432\u0435\u0440 \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u0435\u043D");
+        return;
+      }
+      this.ws = ws;
+      let opened = false;
+      ws.onopen = () => {
+        opened = true;
+        this.retries = 0;
+        ws.send(JSON.stringify({ t: "join", ticket: this.ticket, ...this.joinInfo }));
+      };
+      ws.onmessage = (ev) => {
+        let m;
+        try {
+          m = JSON.parse(String(ev.data));
+        } catch {
+          return;
+        }
+        if (m.t === "start") {
+          this.seat = m.seat === 1 ? 1 : 0;
+          this.mode = String(m.mode ?? "casual");
+          this.match = String(m.match ?? "");
+          this.you = m.you;
+          this.opp = m.opp;
+          if (m.resume) {
+            pushLog("\u{1F4E1} \u0421\u043E\u0435\u0434\u0438\u043D\u0435\u043D\u0438\u0435 \u0432\u043E\u0441\u0441\u0442\u0430\u043D\u043E\u0432\u043B\u0435\u043D\u043E", "phase");
+            return;
+          }
+          this.started?.(true);
+        } else if (m.t === "joined") {
+          if (m.waiting) setOnlineConnecting("\u0416\u0434\u0451\u043C \u0441\u043E\u043F\u0435\u0440\u043D\u0438\u043A\u0430\u2026");
+        } else if (m.t === "net") {
+          const nm = m.m;
+          if (nm?.k === "needSync") {
+            this.onNeedSync?.();
+            return;
+          }
+          this.push(nm);
+        } else if (m.t === "oppLeft") {
+          pushLog(`\u{1F4E1} \u0421\u043E\u043F\u0435\u0440\u043D\u0438\u043A \u043E\u0442\u043A\u043B\u044E\u0447\u0438\u043B\u0441\u044F \u2014 \u0436\u0434\u0451\u043C \u0434\u043E ${m.graceSec ?? 60} \u0441`, "big");
+          showToast("\u{1F4E1} \u0421\u043E\u043F\u0435\u0440\u043D\u0438\u043A \u043E\u0442\u043A\u043B\u044E\u0447\u0438\u043B\u0441\u044F");
+        } else if (m.t === "oppBack") {
+          pushLog("\u{1F4E1} \u0421\u043E\u043F\u0435\u0440\u043D\u0438\u043A \u0432\u0435\u0440\u043D\u0443\u043B\u0441\u044F", "phase");
+        } else if (m.t === "over") {
+          this.overInfo = { winnerSeat: m.winnerSeat ?? null, reason: String(m.reason ?? "") };
+          battle.netServerOver(this.overInfo.winnerSeat, this.overInfo.reason);
+          this.flush();
+        } else if (m.t === "err") {
+          showToast(`\u26A0 ${m.msg}`);
+          this.started?.(false, String(m.msg));
+        }
+      };
+      ws.onclose = () => {
+        this.ws = null;
+        if (this.closed || this.overInfo) return;
+        if (this.started && !opened && this.urlIdx < this.urls.length - 1) {
+          this.urlIdx++;
+          this.open();
+          return;
+        }
+        if (this.started) {
+          this.started(false, "\u0421\u0435\u0440\u0432\u0435\u0440 \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u0435\u043D \u2014 \u0437\u0430\u043F\u0443\u0441\u0442\u0438\u0442\u0435 npm run server:meta");
+          return;
+        }
+        if (this.retries++ < 20) {
+          pushLog("\u{1F4E1} \u0421\u0432\u044F\u0437\u044C \u043F\u043E\u0442\u0435\u0440\u044F\u043D\u0430 \u2014 \u043F\u0435\u0440\u0435\u043F\u043E\u0434\u043A\u043B\u044E\u0447\u0435\u043D\u0438\u0435\u2026", "big");
+          window.setTimeout(() => this.open(), 1500);
+        }
+      };
+    }
+    push(m) {
+      const i = this.waiters.findIndex((w) => !w.kind || w.kind === m.k);
+      if (i >= 0) {
+        const w = this.waiters.splice(i, 1)[0];
+        w.res(m);
+      } else this.queue.push(m);
+    }
+    flush() {
+      for (const w of this.waiters.splice(0)) w.res(null);
+    }
+    /** следующий ход соперника (null — матч завершён) */
+    next() {
+      if (this.queue.length) return Promise.resolve(this.queue.shift());
+      if (this.overInfo || this.closed) return Promise.resolve(null);
+      return new Promise((res) => this.waiters.push({ res }));
+    }
+    nextOf(kind) {
+      const i = this.queue.findIndex((m) => m.k === kind);
+      if (i >= 0) return Promise.resolve(this.queue.splice(i, 1)[0]);
+      if (this.overInfo || this.closed) return Promise.resolve(null);
+      return new Promise((res) => this.waiters.push({ kind, res }));
+    }
+    send(m) {
+      this.sendRaw({ t: "net", m });
+    }
+    sendRaw(m) {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(m));
+    }
+    concede() {
+      this.sendRaw({ t: "concede" });
+    }
+    close() {
+      this.closed = true;
+      this.flush();
+      try {
+        this.ws?.close();
+      } catch {
+      }
+    }
+  };
+  var MATCH_WS = () => [META_API().replace(/^http/, "ws") + "/match", `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.hostname}:8080`];
+  function setOnlineConnecting(text) {
+    let o = document.getElementById("onlineConnecting");
+    if (!text) {
+      o?.remove();
+      return;
+    }
+    if (!o) {
+      o = document.createElement("div");
+      o.id = "onlineConnecting";
+      o.innerHTML = '<div class="onSpinner"></div><div class="t"></div>';
+      document.body.appendChild(o);
+    }
+    o.querySelector(".t").textContent = text;
+  }
+  async function startOnlineBattle(ticket, wsUrl) {
+    const deckId = onlineDeckId();
+    const def = resolveDeck(deckId, deckList) ?? starterDeckForFaction(picked) ?? deckById.get(picked);
+    const urls = wsUrl ? [wsUrl, ...MATCH_WS()] : MATCH_WS();
+    const link = new NetLink(urls, ticket, { deck: def.cards.slice(), faction: String(def.faction), name: String(meta.nick || "\u0418\u0433\u0440\u043E\u043A") });
+    closeOnline();
+    setOnlineConnecting("\u041F\u043E\u0434\u043A\u043B\u044E\u0447\u0435\u043D\u0438\u0435 \u043A \u043C\u0430\u0442\u0447\u0443\u2026");
+    try {
+      await link.connect(25e3);
+    } catch (err) {
+      setOnlineConnecting(null);
+      link.close();
+      showToast(`\u26A0 ${err.message}`);
+      openOnline();
+      return;
+    }
+    setOnlineConnecting(null);
+    onlineFound = null;
+    audioUnlock();
+    musicStart();
+    battle.net = link;
+    battle.launchMode = "online";
+    battle.playerFaction = link.you.faction;
+    battle.enemyFaction = link.opp.faction;
+    battle.playerDeckId = deckId;
+    battle.practice = true;
+    battle.friendFoe = null;
+    battle.bossPower = null;
+    battle.bossHp = 0;
+    battle.tutLesson = 0;
+    battle.campNode = null;
+    battle.eventId = null;
+    battle.matchId = link.match;
+    applyBattleBg(battle.playerFaction);
+    battle.start().catch((err) => reportFatal("online-start", err));
+  }
+  async function onlineRefreshAfterMatch() {
+    const r = await onApi("GET", "/api/rating/me");
+    if (r.ok && r.j.history?.[0]?.delta) {
+      const d = r.j.history[0].delta;
+      showToast(`${d > 0 ? "\u{1F4C8}" : "\u{1F4C9}"} \u0420\u0435\u0439\u0442\u0438\u043D\u0433: ${d > 0 ? "+" : ""}${d} \u2192 ${r.j.mmr} (${r.j.rank.label})`);
+    }
+  }
+  var friendsTimer = 0;
+  function agoRu(ts) {
+    if (!ts) return "\u043D\u0435 \u0432 \u0441\u0435\u0442\u0438";
+    const m = Math.floor((Date.now() - ts) / 6e4);
+    if (m < 1) return "\u0431\u044B\u043B(\u0430) \u0442\u043E\u043B\u044C\u043A\u043E \u0447\u0442\u043E";
+    if (m < 60) return `\u0431\u044B\u043B(\u0430) ${m} \u043C\u0438\u043D \u043D\u0430\u0437\u0430\u0434`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `\u0431\u044B\u043B(\u0430) ${h} \u0447 \u043D\u0430\u0437\u0430\u0434`;
+    return `\u0431\u044B\u043B(\u0430) ${Math.floor(h / 24)} \u0434\u043D \u043D\u0430\u0437\u0430\u0434`;
+  }
+  function friendRow(u, acts) {
+    const st = u.status === "offline" ? agoRu(u.lastSeen) : ONLINE_STATUS_RU[u.status] ?? u.status;
+    return `<div class="fpUser s-${esc(u.status)}">
+    <span class="fpAva f-${esc(u.avatarFac)}">${esc((u.nick || u.login).slice(0, 1).toUpperCase())}<i class="fpDot"></i></span>
+    <span class="fpName"><b>${esc(u.nick || u.login)}</b><i>${esc(st)}</i></span>
+    <span class="fpActs">${acts}</span></div>`;
+  }
+  async function friendsRefresh() {
+    const badge = document.getElementById("friendsBadge");
+    const body = document.getElementById("fpBody");
+    const cnt = document.getElementById("fpCount");
+    if (!meta.signedIn || !authGet()) {
+      badge?.classList.add("hidden");
+      return;
+    }
+    const r = await onApi("GET", "/api/friends");
+    if (!r.ok) {
+      if (body) body.innerHTML = `<div class="fpEmpty">${esc(r.j.error ?? "\u0421\u0435\u0440\u0432\u0435\u0440 \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u0435\u043D")}</div>`;
+      return;
+    }
+    const on = r.j.friends.filter((f) => f.status !== "offline").sort((a, b) => a.nick.localeCompare(b.nick, "ru"));
+    const off = r.j.friends.filter((f) => f.status === "offline").sort((a, b) => (b.lastSeen ?? 0) - (a.lastSeen ?? 0));
+    const alerts = r.j.incoming.length + r.j.challenges.length;
+    if (badge) {
+      badge.textContent = alerts ? String(alerts) : String(on.length);
+      badge.classList.toggle("hidden", !alerts && !on.length);
+      badge.classList.toggle("alert", !!alerts);
+    }
+    if (cnt) cnt.textContent = `${on.length} \u0432 \u0441\u0435\u0442\u0438`;
+    if (!body || document.getElementById("friendsPanel")?.classList.contains("hidden")) return;
+    const sec = (t, n, html, cls = "") => `<div class="fpSec ${cls}"><div class="fpSecT">${t}<span>${n}</span></div>${html}</div>`;
+    let h = "";
+    if (r.j.challenges.length) h += sec("\u0412\u042B\u0417\u041E\u0412\u042B", r.j.challenges.length, r.j.challenges.map((u) => friendRow(
+      u,
+      `<button class="fpBtn gold" data-fp="chAccept" data-arg="${esc(u.id ?? "")}" title="\u041F\u0440\u0438\u043D\u044F\u0442\u044C \u0432\u044B\u0437\u043E\u0432">\u2694</button><button class="fpBtn" data-fp="chDecline" data-arg="${esc(u.id ?? "")}" title="\u041E\u0442\u043A\u043B\u043E\u043D\u0438\u0442\u044C">\u2715</button>`
+    )).join(""), "hl");
+    if (r.j.incoming.length) h += sec("\u0417\u0410\u042F\u0412\u041A\u0418", r.j.incoming.length, r.j.incoming.map((u) => friendRow(
+      u,
+      `<button class="fpBtn gold" data-fp="accept" data-arg="${esc(u.login)}" title="\u041F\u0440\u0438\u043D\u044F\u0442\u044C">\u2713</button><button class="fpBtn" data-fp="decline" data-arg="${esc(u.login)}" title="\u041E\u0442\u043A\u043B\u043E\u043D\u0438\u0442\u044C">\u2715</button>`
+    )).join(""), "hl");
+    h += sec("\u0412 \u0421\u0415\u0422\u0418", on.length, on.length ? on.map((u) => friendRow(
+      u,
+      `<button class="fpBtn" data-fp="challenge" data-arg="${esc(u.login)}" ${u.status === "online" ? "" : "disabled"} title="\u0412\u044B\u0437\u0432\u0430\u0442\u044C \u043D\u0430 \u0434\u0440\u0443\u0436\u0435\u0441\u043A\u0438\u0439 \u043C\u0430\u0442\u0447">\u2694</button><button class="fpBtn ghost" data-fp="remove" data-arg="${esc(u.login)}" title="\u0423\u0434\u0430\u043B\u0438\u0442\u044C \u0438\u0437 \u0434\u0440\u0443\u0437\u0435\u0439">\u22EF</button>`
+    )).join("") : '<div class="fpEmpty">\u041D\u0438\u043A\u043E\u0433\u043E \u0438\u0437 \u0434\u0440\u0443\u0437\u0435\u0439 \u043D\u0435\u0442 \u0432 \u0441\u0435\u0442\u0438</div>');
+    h += sec("\u041D\u0415 \u0412 \u0421\u0415\u0422\u0418", off.length, off.length ? off.map((u) => friendRow(
+      u,
+      `<button class="fpBtn ghost" data-fp="remove" data-arg="${esc(u.login)}" title="\u0423\u0434\u0430\u043B\u0438\u0442\u044C \u0438\u0437 \u0434\u0440\u0443\u0437\u0435\u0439">\u22EF</button>`
+    )).join("") : r.j.friends.length ? "" : '<div class="fpEmpty">\u041F\u043E\u043A\u0430 \u043D\u0435\u0442 \u0434\u0440\u0443\u0437\u0435\u0439 \u2014 \u0434\u043E\u0431\u0430\u0432\u044C\u0442\u0435 \u043F\u043E \u043B\u043E\u0433\u0438\u043D\u0443 \u0432\u044B\u0448\u0435</div>', "off");
+    if (r.j.outgoing.length) h += sec("\u041E\u0422\u041F\u0420\u0410\u0412\u041B\u0415\u041D\u041D\u042B\u0415", r.j.outgoing.length, r.j.outgoing.map((u) => friendRow(
+      u,
+      `<button class="fpBtn ghost" data-fp="cancelReq" data-arg="${esc(u.login)}" title="\u041E\u0442\u043C\u0435\u043D\u0438\u0442\u044C \u0437\u0430\u044F\u0432\u043A\u0443">\u2715</button>`
+    )).join(""), "off");
+    body.innerHTML = h;
+  }
+  function friendsOpen() {
+    const p = document.getElementById("friendsPanel");
+    if (!p) return;
+    p.classList.remove("hidden");
+    document.getElementById("btnFriends")?.classList.add("active");
+    void friendsRefresh();
+    window.clearInterval(friendsTimer);
+    friendsTimer = window.setInterval(() => {
+      void friendsRefresh();
+    }, 1e4);
+  }
+  function friendsClose() {
+    document.getElementById("friendsPanel")?.classList.add("hidden");
+    document.getElementById("btnFriends")?.classList.remove("active");
+    window.clearInterval(friendsTimer);
+    friendsTimer = 0;
+  }
+  document.getElementById("btnFriends")?.addEventListener("click", () => {
+    Audio_.uiClick();
+    if (document.getElementById("friendsPanel")?.classList.contains("hidden")) friendsOpen();
+    else friendsClose();
+  });
+  document.getElementById("fpClose")?.addEventListener("click", () => friendsClose());
+  async function friendsAdd() {
+    const inp = document.getElementById("fpInput");
+    const login = inp?.value.trim() ?? "";
+    if (login.length < 3) {
+      showToast("\u0412\u0432\u0435\u0434\u0438\u0442\u0435 \u043B\u043E\u0433\u0438\u043D \u0434\u0440\u0443\u0433\u0430 (\u043C\u0438\u043D\u0438\u043C\u0443\u043C 3 \u0441\u0438\u043C\u0432\u043E\u043B\u0430)");
+      return;
+    }
+    const r = await onApi("POST", "/api/friends/request", { to: login });
+    if (!r.ok) {
+      showToast(`\u26A0 ${r.j.error ?? "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C"}`);
+      return;
+    }
+    if (inp) inp.value = "";
+    showToast(r.j.friends ? "\u{1F91D} \u0422\u0435\u043F\u0435\u0440\u044C \u0432\u044B \u0434\u0440\u0443\u0437\u044C\u044F" : "\u{1F4E8} \u0417\u0430\u044F\u0432\u043A\u0430 \u043E\u0442\u043F\u0440\u0430\u0432\u043B\u0435\u043D\u0430");
+    void friendsRefresh();
+  }
+  document.getElementById("fpAddBtn")?.addEventListener("click", () => {
+    void friendsAdd();
+  });
+  document.getElementById("fpInput")?.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") void friendsAdd();
+  });
+  document.getElementById("fpBody")?.addEventListener("click", (ev) => {
+    const b = ev.target.closest("[data-fp]");
+    if (!b || b.disabled) return;
+    Audio_.uiClick();
+    const a = b.dataset.fp, arg = b.dataset.arg ?? "";
+    void (async () => {
+      if (a === "accept") await onApi("POST", "/api/friends/accept", { from: arg });
+      if (a === "decline") await onApi("POST", "/api/friends/decline", { from: arg });
+      if (a === "cancelReq") await onApi("POST", "/api/friends/cancel", { to: arg });
+      if (a === "remove") {
+        if (!window.confirm(`\u0423\u0434\u0430\u043B\u0438\u0442\u044C ${arg} \u0438\u0437 \u0434\u0440\u0443\u0437\u0435\u0439?`)) return;
+        await onApi("POST", "/api/friends/remove", { login: arg });
+      }
+      if (a === "challenge" || a === "chAccept") {
+        friendsClose();
+        openOnline();
+        await onlineAction(a, arg);
+        return;
+      }
+      if (a === "chDecline") await onApi("POST", "/api/challenge/decline", { id: arg });
+      void friendsRefresh();
+    })();
+  });
+  window.setInterval(() => {
+    void friendsRefresh();
+  }, 3e4);
+  void friendsRefresh();
+  window.addEventListener("pagehide", () => {
+    const tok = authGet();
+    if (!meta.signedIn || !tok) return;
+    try {
+      void window.fetch(`${META_API()}/api/presence`, { method: "POST", keepalive: true, headers: { "content-type": "application/json", authorization: `Bearer ${tok.accessToken}` }, body: JSON.stringify({ status: "offline" }) });
+    } catch {
+    }
+  });
 })();

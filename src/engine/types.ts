@@ -121,7 +121,7 @@ export enum Side { Player = 0, Opponent = 1 }
 /* ------------------------------ КОНФИГУРАЦИЯ -------------------------- */
 
 export interface GameConfig {
-  deckSize: number;          // минимум 60, без верхнего лимита
+  deckSize: number;          // минимум 30 (30, 60, 90… — без верхнего лимита)
   startingHand: number;      // 5
   maxHand: number;           // 10 (излишек сгорает)
   heroHealth: number;        // 30
@@ -145,7 +145,7 @@ export interface GameConfig {
 }
 
 export const DEFAULT_CONFIG: GameConfig = {
-  deckSize: 60,
+  deckSize: 30,
   startingHand: 5,
   maxHand: 10,
   heroHealth: 30,
@@ -460,6 +460,9 @@ export class Rng {
     this.s1 = (this.s0 * 1812433253 + 12345) | 0;
     if (this.s1 === 0) this.s1 = 0x6d2b79f5;
   }
+  /** v3.4 (онлайн): снимок/восстановление состояния генератора для синхронизации клиентов. */
+  getState(): [number, number] { return [this.s0, this.s1]; }
+  setState(st: [number, number]): void { this.s0 = st[0] | 0; this.s1 = st[1] | 0; }
   /** [0,1) */
   next(): number {
     let s1 = this.s0;

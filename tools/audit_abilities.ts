@@ -404,8 +404,8 @@ console.log('\n[2в] Снятие жизней: летальность, овер
   const e = freshEngine();
   e.p(Side.Player).health = 3;
   const dealt = e.damageHero(Side.Player, 10, { source: 'оверкилл героя' });
-  check('оверкилл героя: жизни не опускаются ниже 0, бой завершён',
-    e.p(Side.Player).health === 0 && dealt === 10 && e.result === GameResult.OpponentWin,
+  check('оверкилл героя: отрицательный перехлёст виден (3 − 10 = −7), бой завершён',
+    e.p(Side.Player).health === -7 && dealt === 10 && e.result === GameResult.OpponentWin,
     `health ${e.p(Side.Player).health}, dealt ${dealt}, результат ${e.result}`);
 }
 {
@@ -681,7 +681,10 @@ console.log('\n[4] Инварианты случайных партий (40 ма
       const res = r.run({});
       for (const sd of [Side.Player, Side.Opponent]) {
         const pl = r.engine.p(sd);
-        if (pl.health < 0 || pl.health > 30) bad++;
+        const over = r.engine.result !== GameResult.Ongoing;
+        const isLoser = over && pl.health <= 0;   // v3.14: оверкил виден, игра окончена
+        if (pl.health > 30) bad++;
+        if (!isLoser && pl.health < 1) bad++;
         if (pl.creatures.length > 7) bad++;
         if (pl.hand.length > 12) bad++;
       }
@@ -689,7 +692,7 @@ console.log('\n[4] Инварианты случайных партий (40 ма
     } catch { crashes++; }
   }
   check('40 матчей без падений движка', crashes === 0, `падений: ${crashes}`);
-  check('инварианты (HP 0..30, ≤7 существ, ≤12 карт в руке)', bad === 0, `нарушений: ${bad}`);
+  check('инварианты (HP 1..30 в игре, проигравший ≤0 после, ≤7 существ, ≤12 карт)', bad === 0, `нарушений: ${bad}`);
 }
 
 console.log(`\n=== ИТОГ АУДИТА: ${pass} PASS / ${fail} FAIL ===`);

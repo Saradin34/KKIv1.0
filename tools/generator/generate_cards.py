@@ -1432,21 +1432,21 @@ def build_decks(pool: List[Dict[str, Any]], rng: random.Random) -> Dict[str, Lis
         runes     = [c for c in fac_cards if c["type"] == "Rune"]
         deck: List[str] = []
 
-        # MTG Constructed: строим прекон на 60 карт (27 существ, 21 заклинание,
-        # 6 рун и 6 нейтральных), без верхнего лимита размера колоды.
-        curve_creature = [1,1,1,1,2,2,2,2,2,3,3,3,3,3,3,3,4,4,4,4,5,5,5,5,6,6,7]
+        # MTG Constructed: строим стандартную колоду на 30 карт (14 существ, 10 заклинаний,
+        # 3 руны и 3 нейтральных), без верхнего лимита размера колоды.
+        curve_creature = [1,1,2,2,2,3,3,3,4,4,5,5,6,7]
         for want in curve_creature:
             cands = [c for c in creatures if c["cost"] == want] or \
                     sorted(creatures, key=lambda c: abs(c["cost"] - want))
             deck.append(rng.choice(cands)["id"])
-        curve_spell = [1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,6,6,7]
+        curve_spell = [1,1,2,2,3,3,4,4,5,6]
         for want in curve_spell:
             cands = [c for c in spells if c["cost"] == want] or \
                     sorted(spells, key=lambda c: abs(c["cost"] - want))
             deck.append(rng.choice(cands)["id"])
-        for _ in range(6):
+        for _ in range(3):
             deck.append(rng.choice(runes)["id"])
-        for _ in range(6):
+        for _ in range(3):
             deck.append(rng.choice(neutral)["id"])
 
         # Единый playset: максимум 4 копии любой карты, включая легендарные.
@@ -1456,10 +1456,10 @@ def build_decks(pool: List[Dict[str, Any]], rng: random.Random) -> Dict[str, Lis
     # Стартовая колода новичка: микс с упором на Ауритов (по ТЗ — «упор на одну основную»)
     starter: List[str] = []
     aur = [c for c in main if c["faction"] == "Aurites"]
-    for _ in range(33): starter.append(rng.choice(aur)["id"])
+    for _ in range(16): starter.append(rng.choice(aur)["id"])
     others = [c for c in main if c["faction"] != "Aurites"]
-    for _ in range(21): starter.append(rng.choice(others)["id"])
-    for _ in range(6):  starter.append(rng.choice(neutral)["id"])
+    for _ in range(11): starter.append(rng.choice(others)["id"])
+    for _ in range(3):  starter.append(rng.choice(neutral)["id"])
     starter = apply_copy_limit(starter, pool, rng)
     decks["Starter"] = starter
     return decks
@@ -1478,15 +1478,15 @@ def apply_copy_limit(deck: List[str], pool: List[Dict[str, Any]], rng: random.Ra
         if counts[cid] >= 4:
             choices = eligible()
             if not choices:
-                raise ValueError("Не хватает карт для колоды на 60 карт с лимитом 4 копии")
+                raise ValueError("Не хватает карт для колоды на 30 карт с лимитом 4 копии")
             cid = rng.choice(choices)
         counts[cid] += 1
         out.append(cid)
-    # Добираем до минимального constructed-размера (60), потолка нет.
-    while len(out) < 60:
+    # Добираем до минимального constructed-размера (30), потолка нет.
+    while len(out) < 30:
         choices = eligible()
         if not choices:
-            raise ValueError("Не хватает карт для колоды на 60 карт с лимитом 4 копии")
+            raise ValueError("Не хватает карт для колоды на 30 карт с лимитом 4 копии")
         cid = rng.choice(choices)
         counts[cid] += 1
         out.append(cid)
@@ -1708,7 +1708,7 @@ def main() -> int:
     # колоды
     decks = build_decks(pool, random.Random(args.seed + 7))
     deck_out = {
-        "meta": {"deckSize": 60, "copyLimit": 4, "legendaryCopyLimit": 4},
+        "meta": {"deckSize": 30, "copyLimit": 4, "legendaryCopyLimit": 4},
         "decks": [{"id": k, "name": deck_name(k), "faction": k, "cards": v} for k, v in decks.items()],
     }
     deck_path = os.path.join(OUT_DIR, "unity", "EchoCitadel", "Assets", "StreamingAssets", "Decks.json")

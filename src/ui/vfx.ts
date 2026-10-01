@@ -732,22 +732,19 @@ function parallaxFrame(): void {
 /** Плёночное зерно + виньетка (пост-слои). Вызывается один раз при старте боя. */
 export function mountPostLayers(host: HTMLElement): void {
   if (host.querySelector('#postVignette')) return;
+  /* v3.16.1: виньетка значительно мягче (чёткая видимость поля по краям),
+     плёночное зерно (jitter-мерцание noise поверх всего экрана, z-index 111)
+     убрано — пользователь видел его как «прыгающий фон». */
   const vig = document.createElement('div');
   vig.id = 'postVignette';
   vig.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:110;' +
-    'background:radial-gradient(ellipse at 50% 46%, transparent 40%, rgba(5,6,10,.62) 100%);mix-blend-mode:multiply';
-  const grain = document.createElement('div');
-  grain.id = 'postGrain';
-  grain.style.cssText = 'position:fixed;inset:-50%;pointer-events:none;z-index:111;opacity:.055;' +
-    'filter:url(#vfxGrain);background:#fff;mix-blend-mode:overlay;animation:grainShift 1.1s steps(3,end) infinite';
+    'background:radial-gradient(ellipse at 50% 46%, transparent 58%, rgba(5,6,10,.22) 100%);mix-blend-mode:multiply';
   const grade = document.createElement('div');
   grade.id = 'postGrade';
   grade.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:109;' +
     'background:linear-gradient(180deg, rgba(42,36,56,.30) 0%, rgba(0,0,0,0) 38%, rgba(216,180,90,.07) 100%);' +
     'mix-blend-mode:soft-light';
-  const st = document.createElement('style');
-  st.textContent = '@keyframes grainShift{0%{transform:translate(0,0)}33%{transform:translate(-2%,1.5%)}66%{transform:translate(1.5%,-1%)}}';
-  host.appendChild(st); host.appendChild(grade); host.appendChild(vig); host.appendChild(grain);
+  host.appendChild(grade); host.appendChild(vig);
 }
 
 /** Случайный «блик» свечей: короткая вспышка ambient-света. */
