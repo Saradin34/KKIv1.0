@@ -563,6 +563,7 @@ namespace EchoCitadel.Core
                 Keywords = new List<Keyword>(card.Keywords),
                 SummonedOnTurn = TurnsTaken[(int)side],
                 AttacksThisTurn = 0,
+                Tapped = false,
                 CanAttackThisTurn = false,
                 Silenced = false,
                 Frozen = false,

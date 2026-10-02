@@ -170,7 +170,7 @@ namespace EchoCitadel.Core
         [JsonPropertyName("abilityText")] public string AbilityText { get; set; } = "";
         [JsonPropertyName("flavor")] public string Flavor { get; set; } = "";
 
-        /// <summary>Путь к арту: Resources/Cards/&lt;id&gt;.png (ТЗ п.9).</summary>
+        /// <summary>Путь относительно Resources, может содержать подпапку семейства: Cards/&lt;Faction&gt;/[Subfamily]/&lt;id&gt;.</summary>
         [JsonPropertyName("art")] public string? Art { get; set; }
         [JsonPropertyName("artworkPath")] public string? ArtworkPath { get; set; }
         [JsonPropertyName("artPrompt")] public string? ArtPrompt { get; set; }
@@ -283,6 +283,7 @@ namespace EchoCitadel.Core
         public List<StatusInstance> Statuses = new();
         public int SummonedOnTurn;
         public int AttacksThisTurn;
+        public bool Tapped; // remains through the opponent's turn; clears at the owner's Untap
         public bool CanAttackThisTurn;
         public bool Silenced;
         public bool Frozen;

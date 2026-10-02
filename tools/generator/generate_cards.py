@@ -1632,8 +1632,8 @@ def main() -> int:
         if not c.get("flavor"):
             src = FLAVOR.get(c["faction"], neutral_flavor)
             c["flavor"] = rng.choice(src)
-        # арты лежат ПО ФРАКЦИЯМ: Assets/Resources/Cards/<Faction>/<id>.png
-        # (папки и манифесты создаёт tools/generator/make_art_folders.py)
+        # Карты ядра лежат в корне фракции; подфракционные генераторы задают подпапки.
+        # Папки и манифесты создаёт tools/generator/make_art_folders.py.
         c["art"] = f"Resources/Cards/{c['faction']}/{c['id']}.png"
         c["artworkPath"] = c["art"]
         c["artPrompt"] = art_prompt(c)

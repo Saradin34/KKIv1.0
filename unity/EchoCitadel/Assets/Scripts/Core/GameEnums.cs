@@ -89,6 +89,7 @@ namespace EchoCitadel.Core
         DivineShield, // Божественный щит: входит со Щитом (1 заряд)
         Poisonous,    // Ядовитый: при уроне накладывает Яд
         Freezing,     // Ледяное касание: замораживает цель на 1 ход
+        Vigilance,    // Бдительность: не поворачивается при атаке
     }
 
     /* ------------------------------- ЦЕЛИ -------------------------------- */
@@ -262,6 +263,7 @@ namespace EchoCitadel.Core
             Keyword.Unblockable => "Неуловимость",
             Keyword.Trample => "Прорыв",
             Keyword.SpellDamage => "Урон заклинаний +1",
+            Keyword.Vigilance => "Бдительность",
             _ => k.ToString(),
         };
 

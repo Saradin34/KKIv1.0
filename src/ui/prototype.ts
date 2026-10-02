@@ -7,7 +7,7 @@
      2) зафиксировать UX-решения до переноса в Unity UI;
      3) показать заказчику игру без установки Unity.
    Арты — процедурная SVG-заглушка в палитре фракции; в Cards.json у каждой
-   карты уже прописан путь будущего PNG (Resources/Cards/<id>.png).
+   карты уже прописан путь PNG: Resources/Cards/<Фракция>[/<Семейство>]/<id>.png.
    ===================================================================== */
 
 import {
@@ -16,6 +16,7 @@ import {
   RARITY_COLORS, Rarity, Side, SpellSubtype, StatusType, TargetKind, DEFAULT_CONFIG, PlayerState, CardEffect,
 } from '../engine/types';
 import { GameEngine, EngineNetState } from '../engine/engine';
+import type { MatchStats } from '../engine/engine';
 import { AIController, AI_PROFILES } from '../engine/ai';
 import { buildDatabase, CardsFile, DeckFile } from '../engine/db';
 import cardsRaw from '../../unity/EchoCitadel/Assets/StreamingAssets/Cards.json';
@@ -24,11 +25,15 @@ import decksRaw from '../../unity/EchoCitadel/Assets/StreamingAssets/Decks.json'
 import * as Vfx from './vfx';
 import { Audio_ as Sfx, audioUnlock, audioSetEnabled, audioSetVolume, musicSetVolume, musicStart } from './audio';
 import { vfxSetReducedMotion } from './vfx';
-import {tableBackdrop, tableSurface, paletteOf} from './art';
+import {tableBackdrop, tableSurface, paletteOf, artUrlFor} from './art';
 import {
   CustomDeck, DeckLike, MIN_DECK_SIZE, MAX_COPIES, MAX_LEGENDARY_COPIES,
   loadCustomDecks, saveCustomDecks, upsertCustomDeck, deleteCustomDeck, validateDeck, validateDeckSize, resolveDeck, deckSummary,
 } from './deckstore';
+import {
+  DECK_HERO_BY_ID, DECK_HERO_CATALOG, DECK_HERO_COIN_PRICE, deckHeroesForFaction,
+  DeckHeroDefinition,
+} from './deckheroes';
 
 const cardsJson = cardsRaw as unknown as CardsFile;
 const decksJson = decksRaw as unknown as DeckFile;
@@ -55,8 +60,98 @@ type AppRoute = 'home' | 'collection' | 'decks' | 'store' | 'profile' | 'events'
 let appRoute: AppRoute = 'home';
 const routeHistory: AppRoute[] = [];
 let suppressRouteHistory = false;
+const APP_ROUTE_SURFACES: Record<AppRoute, string> = {
+  home: 'menu', collection: 'collection', decks: 'decksScreen', store: 'shopModal', profile: 'profileModal',
+  events: 'eventsScreen', packs: 'boosterModal', mastery: 'bpModal', battle: 'battle', rules: 'rules',
+  campaign: 'campaignModal', online: 'onlineModal',
+};
+const APP_ROUTE_NAMES: Record<AppRoute, string> = {
+  home: 'Главная', collection: 'Коллекция карт', decks: 'Колоды', store: 'Магазин', profile: 'Профиль',
+  events: 'События', packs: 'Бустеры', mastery: 'Боевой пропуск', battle: 'Матч', rules: 'Правила',
+  campaign: 'Кампания', online: 'Сетевая игра',
+};
+const uiMotionCleanup = new WeakMap<HTMLElement, () => void>();
+let routeFxTimer: number | null = null;
+function prefersReducedUiMotion(): boolean {
+  return document.body.classList.contains('fxLite') || !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+}
+function animateUiSurface(surface: HTMLElement | null, className: 'ecRouteEnter' | 'ecSubpanelEnter', baseDuration = 380): void {
+  if (!surface) return;
+  uiMotionCleanup.get(surface)?.();
+  if (prefersReducedUiMotion()) return;
+  const speed = Math.max(.55, Math.min(1.5, Number.isFinite(animSpd) ? animSpd : 1));
+  const duration = Math.round(baseDuration * speed);
+  const animationName = className === 'ecRouteEnter' ? 'ecRouteArrival' : 'ecSubpanelArrival';
+  surface.style.setProperty('--ec-ui-motion-duration', `${duration}ms`);
+  surface.classList.remove(className);
+  void surface.offsetWidth;
+  surface.classList.add(className);
+  let timer = 0;
+  let done = false;
+  const finish = (): void => {
+    if (done) return;
+    done = true;
+    window.clearTimeout(timer);
+    surface.removeEventListener('animationend', onEnd);
+    surface.classList.remove(className);
+    surface.style.removeProperty('--ec-ui-motion-duration');
+    if (uiMotionCleanup.get(surface) === finish) uiMotionCleanup.delete(surface);
+  };
+  const onEnd = (event: Event): void => {
+    const animation = event as AnimationEvent;
+    if (animation.target === surface && animation.animationName === animationName) finish();
+  };
+  surface.addEventListener('animationend', onEnd);
+  timer = window.setTimeout(finish, duration + 100);
+  uiMotionCleanup.set(surface, finish);
+}
+function playRouteTransitionFx(): void {
+  const fx = document.getElementById('ecRouteTransitionFx');
+  if (!fx || prefersReducedUiMotion()) return;
+  if (routeFxTimer !== null) window.clearTimeout(routeFxTimer);
+  fx.classList.remove('playing');
+  void fx.offsetWidth;
+  fx.classList.add('playing');
+  const speed = Math.max(.55, Math.min(1.5, Number.isFinite(animSpd) ? animSpd : 1));
+  routeFxTimer = window.setTimeout(() => {
+    fx.classList.remove('playing');
+    routeFxTimer = null;
+  }, Math.round(440 * speed));
+}
+function syncQuickNav(next: AppRoute): void {
+  const dock = document.getElementById('ecQuickNav');
+  if (!dock) return;
+  const show = next !== 'home' && next !== 'battle';
+  dock.classList.toggle('hidden', !show);
+  dock.setAttribute('aria-hidden', show ? 'false' : 'true');
+  let activeItem: HTMLElement | null = null;
+  dock.querySelectorAll<HTMLElement>('[data-route]').forEach(item => {
+    const active = item.dataset.route === next;
+    item.classList.toggle('active', active);
+    if (active) { item.setAttribute('aria-current', 'page'); activeItem = item; }
+    else item.removeAttribute('aria-current');
+  });
+  const back = dock.querySelector<HTMLButtonElement>('[data-route="back"]');
+  const canGoBack = routeHistory.length > 0 && next !== 'home' && next !== 'battle';
+  if (back) {
+    back.disabled = !canGoBack;
+    back.setAttribute('aria-disabled', String(!canGoBack));
+    const previous = routeHistory[routeHistory.length - 1];
+    back.title = canGoBack && previous ? `Назад: ${APP_ROUTE_NAMES[previous]}` : 'Вы на первом экране';
+  }
+  const compact = window.matchMedia?.('(max-width: 760px)').matches ?? window.innerWidth <= 760;
+  if (show && compact && activeItem) window.requestAnimationFrame(() => {
+    if (!activeItem || dock.classList.contains('hidden') || dock.clientWidth === 0) return;
+    const itemRect = activeItem.getBoundingClientRect();
+    const dockRect = dock.getBoundingClientRect();
+    const target = dock.scrollLeft + itemRect.left - dockRect.left - (dockRect.width - itemRect.width) / 2;
+    try { dock.scrollTo({ left: Math.max(0, target), behavior: prefersReducedUiMotion() ? 'auto' : 'smooth' }); }
+    catch { dock.scrollLeft = Math.max(0, target); }
+  });
+}
 function setAppRoute(next: AppRoute): void {
-  if (next !== appRoute) {
+  const changed = next !== appRoute;
+  if (changed) {
     if (next === 'home' && !suppressRouteHistory) routeHistory.length = 0;
     else if (!suppressRouteHistory) routeHistory.push(appRoute);
     if (routeHistory.length > 24) routeHistory.shift();
@@ -65,17 +160,16 @@ function setAppRoute(next: AppRoute): void {
   document.body.dataset.appRoute = next;
   if (next !== 'rules') document.getElementById('rules')?.classList.add('hidden');
   if (typeof closeOnline === 'function' && document.getElementById('onlineModal') && !document.getElementById('onlineModal')!.classList.contains('hidden')) closeOnline();
-  const dock = document.getElementById('ecQuickNav');
-  const show = next !== 'home' && next !== 'battle';
-  dock?.classList.toggle('hidden', !show);
-  dock?.setAttribute('aria-hidden', show ? 'false' : 'true');
-  dock?.querySelectorAll<HTMLElement>('[data-route]').forEach(item => {
-    const active = item.dataset.route === next;
-    item.classList.toggle('active', active);
-    if (active) item.setAttribute('aria-current', 'page'); else item.removeAttribute('aria-current');
-  });
+  syncQuickNav(next);
+  if (changed) {
+    animateUiSurface(document.getElementById(APP_ROUTE_SURFACES[next]), 'ecRouteEnter', 400);
+    playRouteTransitionFx();
+    const live = document.getElementById('ecRouteLive');
+    if (live) live.textContent = `Раздел открыт: ${APP_ROUTE_NAMES[next]}`;
+  }
 }
 function navigateApp(next: AppRoute | 'back'): void {
+  if (!meta.starterDecksUnlocked && next !== 'home') { openIntroFlow(); return; }
   if (next === 'back') {
     const previous = routeHistory.pop() ?? 'home';
     if (previous === appRoute) return;
@@ -200,6 +294,13 @@ const HUB_FOE: Record<string, { name: string; rank: string; lvl: number }> = {
 const HUB_ART: Record<string, string> = {
   Aurites: 'aur_14', Necrus: 'nec_15', Terramorph: 'ter_14', Pyromancer: 'pyr_14', Ethereal: 'eth_15',
 };
+
+/** URL строится из artworkPath, включая подпапку семейства; flat fallback оставлен для старых данных. */
+function cardArtworkUrl(card: CardData): string {
+  return artUrlFor(card)
+    ?? `/art/${encodeURIComponent(String(card.faction))}/${encodeURIComponent(card.id)}.png`;
+}
+
 const fmtNum = (n: number): string => n.toLocaleString('ru-RU');
 
 /** Цепочка арта с фолбэками: drop-in героя → флагман → сцена фракции → градиент. */
@@ -218,13 +319,23 @@ function artChain(img: HTMLImageElement | null, urls: string[]): void {
 }
 
 function hubArtUrls(f: string): string[] {
-  return [`/heroes/${f}`, `/art/${f}/${HUB_ART[f]}.png`, `img/menu_${f.toLowerCase()}.jpg`];
+  const card = HUB_ART[f] ? db.get(HUB_ART[f]) : undefined;
+  return [`/heroes/${f}`, card ? cardArtworkUrl(card) : `/art/${encodeURIComponent(f)}/${HUB_ART[f]}.png`, `img/menu_${f.toLowerCase()}.jpg`];
+}
+
+/** Арт выбранного героя заменяет портрет фракции целиком; при пустой папке сохраняется прежний флагман. */
+function deckHeroArtUrls(heroId: string, faction: string): string[] {
+  const hero = DECK_HERO_BY_ID.get(heroId);
+  const fallback = hubArtUrls(faction);
+  return hero && hero.faction === faction
+    ? [`/deck-heroes/${encodeURIComponent(hero.id)}`, ...fallback]
+    : fallback;
 }
 
 /** Панель «Активный вызов»: соперник, режим, прогресс сундучка, подпись PLAY. */
 const TYPE_RU: Record<string, string> = { Creature: 'Существо', Spell: 'Заклинание', Rune: 'Руна' };
 const PHASE_HINT: Record<string, string> = {
-  Start: 'Стадия начала: добора карты и срабатывания «в начале хода»',
+  Start: 'Стадия начала: разворот ваших существ, добор карты и срабатывания «в начале хода»',
   Resource: 'Стадия ресурса: +1 к максимуму маны, кристаллы пополняются',
   Main: 'Главная стадия: розыгрыш карт и Эхо; далее — объявление атак',
   Combat: 'Стадия боя: ваши атаки объявляются стрелкой, остальные доигрывает авто-бой',
@@ -236,9 +347,11 @@ const KW_RU: Record<string, string> = {
   Taunt: 'Провокация', Lifesteal: 'Вампиризм', Deathrattle: 'Предсмертный хрип', Battlecry: 'Боевой клич',
   Rush: 'Рывок', Windfury: 'Буря', Unblockable: 'Неуловимость', Trample: 'Прорыв', SpellDamage: 'Урон заклинаний +1',
   DivineShield: 'Божественный щит', Poisonous: 'Ядовитый', Freezing: 'Ледяное касание',
+  Vigilance: 'Бдительность',
 };
 const KW_BADGE: Record<string, { ico: string; title: string }> = {
   Taunt: { ico: '⛨', title: 'Провокация: авто-атака противника обязана бить это существо' },
+  Vigilance: { ico: '◉', title: 'Бдительность: после атаки существо остаётся развёрнутым' },
   Lifesteal: { ico: '🩸', title: 'Вампиризм: нанесённый урон лечит вашего героя' },
   Windfury: { ico: '🌀', title: 'Буря: две атаки за ход' },
   Trample: { ico: '➤', title: 'Прорыв: избыточный урон уходит в героя' },
@@ -249,6 +362,20 @@ const KW_BADGE: Record<string, { ico: string; title: string }> = {
   DivineShield: { ico: '🛡', title: 'Божественный щит: входит со Щитом, поглощает первый урон' },
   Poisonous: { ico: '☠', title: 'Ядовитый: наносит Яд при уроне существу (любая рана смертельна)' },
   Freezing: { ico: '❄', title: 'Ледяное касание: замораживает цель на 1 ход при уроне' },
+};
+const KW_BADGE_EN: Record<string, string> = {
+  Taunt: 'Taunt: enemies must attack this creature when able',
+  Vigilance: 'Vigilance: this creature does not tap when it attacks',
+  Lifesteal: 'Lifesteal: damage dealt heals your hero',
+  Windfury: 'Windfury: can attack twice each turn',
+  Trample: 'Trample: excess combat damage hits the enemy hero',
+  Rush: 'Rush: may attack on the turn it enters play',
+  Unblockable: 'Unblockable: cannot be chosen as an attack target',
+  SpellDamage: 'Spell Damage +1',
+  Deathrattle: 'Deathrattle: effect triggers when this creature dies',
+  DivineShield: 'Divine Shield: absorbs the first damage',
+  Poisonous: 'Poisonous: damage to a creature is lethal',
+  Freezing: 'Freezing Touch: freezes its target for one turn',
 };
 const STATUS_BADGE: Record<string, { ico: string; cls: string; title: string }> = {
   Shield: { ico: '🛡', cls: 'shield', title: 'Щит: поглощает первое повреждение' },
@@ -272,15 +399,15 @@ const MOTIFS: Record<string, string> = {
   Rune: 'M50 10 L82 32 L70 78 L30 78 L18 32 Z',
 };
 
-/** Арт карты — ТОЛЬКО из папок художника: /art/<Фракция>/<id>.png
- *  (serve.js: art_raw/<id>.png → Resources/Cards/<Фракция>/<id>.png).
- *  Пока файл не дропнут — чистый фракционный фон с сигилом, без изображений-затычек. */
+/** Арт карты — из artworkPath: /art/<Фракция>/<Семейство>/<id>.png, если у карты есть подфракция.
+ *  Drop-in остаётся плоским art_raw/<id>.png; сервер сопоставляет его с вложенным путём Unity.
+ *  Пока файл не добавлен — чистый фракционный фон с сигилом, без изображений-затычек. */
 function artSvg(card: CardData, w: number, h: number): string {
   void w; void h;
   const p = paletteOf(card.faction as Faction);
   const sig = FACTION_SIGIL[card.faction as Faction] ?? '✦';
   return `<div class="artBox" style="--fa:${p.primary};--fb:${p.secondary}" data-sigil="${sig}">`
-    + `<img src="/art/${encodeURIComponent(card.faction as string)}/${encodeURIComponent(card.id)}.png" alt="" loading="lazy" onerror="this.classList.add('miss')">`
+    + `<img src="${cardArtworkUrl(card)}" alt="" loading="lazy" onerror="this.classList.add('miss')">`
     + `</div>`;
 }
 
@@ -402,10 +529,10 @@ function hideTooltip(): void { tooltip.classList.remove('show'); }
 /*  Настройки интерфейса (сохраняются в localStorage)                      */
 /* ---------------------------------------------------------------------- */
 
-interface UISettings { preview: boolean; fxLite: boolean; sound: boolean; hints: boolean; animSpeed: number; autoPass: boolean; rope: boolean; cbMode: boolean; fontScale: number; subs: boolean; lang: string; volMusic: number; volSfx: number; quality: string }
+interface UISettings { preview: boolean; fxLite: boolean; sound: boolean; hints: boolean; animSpeed: number; autoPass: boolean; fullControl: boolean; rope: boolean; cbMode: boolean; fontScale: number; subs: boolean; lang: string; volMusic: number; volSfx: number; quality: string }
 
 const SETTINGS_KEY = 'echo-citadel.settings.v1';
-const SETTINGS_DEFAULT: UISettings = { preview: true, fxLite: false, sound: true, hints: true, animSpeed: 1, autoPass: false, rope: true, cbMode: false, fontScale: 1, subs: true, lang: 'ru', volMusic: 60, volSfx: 80, quality: 'high' };
+const SETTINGS_DEFAULT: UISettings = { preview: true, fxLite: false, sound: true, hints: true, animSpeed: 1, autoPass: false, fullControl: false, rope: true, cbMode: false, fontScale: 1, subs: true, lang: 'ru', volMusic: 60, volSfx: 80, quality: 'high' };
 
 function loadSettings(): UISettings {
   try {
@@ -464,6 +591,8 @@ function applySettings(): void {
   if (sp) sp.value = String(settings.animSpeed ?? 1);
   const ap = document.getElementById('setAutoPass') as HTMLInputElement | null;
   if (ap) ap.checked = !!settings.autoPass;
+  const fc = document.getElementById('setFullControl') as HTMLInputElement | null;
+  if (fc) fc.checked = !!settings.fullControl;
   const rp = document.getElementById('setRope') as HTMLInputElement | null;
   if (rp) rp.checked = !!settings.rope;
   document.body.dataset.cb = settings.cbMode ? '1' : '0';
@@ -653,6 +782,7 @@ function pushLog(text: string, cls = ''): void {
   while (logBuffer.length > 240) logBuffer.shift();
 }
 const KW_GLOSS: Record<string, string> = {
+  'Бдительность': 'Бдительность: существо не поворачивается после атаки и остаётся готовым к следующему ходу.',
   'Провокация': 'Провокация: авто-атаки противника обязаны выбирать это существо первой целью.',
   'Рывок': 'Рывок: может атаковать в ход призыва (игнорирует болезнь призыва).',
   'Прорыв': 'Прорыв: избыточный урон от атаки проходит в героя защищающегося.',
@@ -719,6 +849,7 @@ const KW_EN: Record<string, string> = {
   Taunt: 'Taunt', Lifesteal: 'Lifesteal', Deathrattle: 'Deathrattle', Battlecry: 'Battlecry',
   Rush: 'Rush', Windfury: 'Windfury', Unblockable: 'Unblockable', Trample: 'Trample',
   SpellDamage: 'Spell Damage +1', DivineShield: 'Divine Shield', Poisonous: 'Poisonous', Freezing: 'Freezing',
+  Vigilance: 'Vigilance',
 };
 const TYPE_EN: Record<string, string> = { Creature: 'Minion', Spell: 'Spell', Rune: 'Rune' };
 const RARITY_EN: Record<string, string> = { Common: 'Common', Rare: 'Rare', Epic: 'Epic', Legendary: 'Legendary' };
@@ -754,6 +885,7 @@ function cardText(c: CardData): string {
    Ключевое слово → жирное название + пояснение (как reminder text в MTG Arena).
    ===================================================================== */
 const KW_REMINDER: Record<string, string> = {
+  Vigilance: 'После атаки существо не поворачивается.',
   Taunt: 'Пока это существо на поле, противник обязан атаковать его — бить героя или других существ нельзя.',
   Rush: 'Может атаковать в тот же ход, когда вышло на поле.',
   Windfury: 'Может атаковать дважды за ход.',
@@ -968,6 +1100,8 @@ function openJournal(): void {
 /*  Контроллер боя                                                         */
 /* ---------------------------------------------------------------------- */
 
+type InstantWindowResult = 'passed' | 'acted' | 'cancelled' | 'unavailable';
+
 class Battle {
   engine: GameEngine | null = null;
   ai: AIController | null = null;
@@ -975,6 +1109,7 @@ class Battle {
   net: NetLink | null = null;
   playerFaction: Faction = Faction.Aurites;
   playerDeckId: string = 'Aurites';
+  playerHeroId: string = Faction.Aurites;
   enemyFaction: Faction = Faction.Necrus;
   difficulty = 0.8;
 
@@ -997,6 +1132,7 @@ class Battle {
   private massTotal = 0;
   private combatWindowDone: (() => void) | null = null;
   private turnDone: (() => void) | null = null;
+  private sessionId = 0;
   /** Существа, призванные с прошлого рендера: им показываем анимацию выхода. */
   private summonedUids = new Set<number>();
   /** VFX призыва ждут рендера: событие приходит раньше DOM-узла существа. */
@@ -1025,6 +1161,11 @@ class Battle {
   /* ------------------------------ запуск ------------------------------ */
 
   async start(): Promise<void> {
+    const sessionId = ++this.sessionId;
+    this.finishInstantWindow('cancelled', false);
+    this.stackGeneration++;
+    this.stackTask = null;
+    this.stackBusy = false;
     this.running = true; this.busy = false; this.overShown = false;
     this.combatBusy = false; this.combatSnap = null;
     this.unitNodes.clear(); this.dyingUnits.clear(); this.pendingSummonFx.clear(); this.pendingStatusFx = []; logBuffer.length = 0;
@@ -1037,6 +1178,7 @@ class Battle {
     const pDef = resolveDeck(this.playerDeckId, deckList as unknown as DeckLike[])
       ?? starterDeckForFaction(this.playerFaction)
       ?? deckById.get(this.playerFaction)!;
+    this.playerHeroId = deckHeroIdForDeck(pDef.id, pDef.faction) ?? this.playerFaction;
     const pDeck = this.net ? this.net.you.deck.slice() : pDef.cards.slice();
     if (!this.net && !isStarterDeckId(pDef.id)) {
       const unowned = pDeck.filter(id => ownedCount(id) === 0);
@@ -1108,7 +1250,7 @@ class Battle {
     $('enemyFac').textContent = FACTION_RU[this.enemyFaction];
     $('enemyFac').innerHTML = FACTION_RU[this.enemyFaction];
     $('enemyFac').title = eFull.replace(/<[^>]+>/g, '');
-    this.setPortrait('playerPortrait', this.playerFaction);
+    this.setPortrait('playerPortrait', this.playerFaction, this.playerHeroId);
     this.setPortrait('enemyPortrait', this.enemyFaction);
 
     if (this.net) { await this.netSetup(); return; }
@@ -1116,10 +1258,11 @@ class Battle {
     pushLog(`⚔ ${FACTION_RU[this.playerFaction]} против ${FACTION_RU[this.enemyFaction]}`, 'big');
     this.renderAll();
     await this.showMulligan();
+    if (sessionId !== this.sessionId || !this.running) return;
 
     this.engine.activeSide = Side.Player;
     this.engine.turn = 0;
-    await this.loop();
+    await this.loop(sessionId);
   }
 
   /**
@@ -1144,42 +1287,62 @@ class Battle {
     Vfx.stopAmbient();
   }
 
-  stop(): void { this.running = false; this.turnDone?.(); this.clearThinkWatch(); }
+  stop(): void {
+    this.sessionId++;
+    this.running = false;
+    this.stackGeneration++;
+    this.stackTask = null;
+    this.stackBusy = false;
+    this.finishInstantWindow('cancelled', false);
+    const doneTurn = this.turnDone; this.turnDone = null; doneTurn?.();
+    this.ropeStop();
+    this.clearThinkWatch();
+  }
 
   /* --------------------------- главный цикл --------------------------- */
 
-  private async loop(): Promise<void> {
+  private async loop(sessionId = this.sessionId): Promise<void> {
     const e = this.engine!;
     try {
-    while (this.running && e.result === GameResult.Ongoing) {
-      if (e.activeSide === Side.Player) await this.humanTurn();
-      else if (this.net) await this.netTurn();
-      else await this.aiTurn();
-      if (e.result === GameResult.Ongoing && e.turn > e.config.maxTurns) e.result = GameResult.Draw;
+      while (sessionId === this.sessionId && this.running && e.result === GameResult.Ongoing) {
+        if (e.activeSide === Side.Player) await this.humanTurn(sessionId, e);
+        else if (this.net) await this.netTurn();
+        else await this.aiTurn();
+        if (sessionId !== this.sessionId) return;
+        if (e.result === GameResult.Ongoing && e.turn > e.config.maxTurns) e.result = GameResult.Draw;
+        this.renderAll();
+      }
+      if (sessionId !== this.sessionId) return;
       this.renderAll();
+      await sleep(340);
+      if (sessionId !== this.sessionId || !this.running) return;
+      this.showGameOver();
+    } catch (err) {
+      if (sessionId !== this.sessionId) return;
+      reportFatal('loop', err); this.running = false; this.setBusy(false);
     }
-    this.renderAll();
-    await sleep(340);
-    this.showGameOver();
-    } catch (err) { reportFatal('loop', err); this.running = false; this.setBusy(false); }
   }
 
   /** Ход игрока: Start/Resource исполняет движок, Main ждёт «Завершить ход». */
-  private async humanTurn(): Promise<void> {
-    const e = this.engine!;
+  private async humanTurn(sessionId: number, e: GameEngine): Promise<void> {
+    if (sessionId !== this.sessionId || !this.running) return;
     this.setBusy(false);
     this.setWho('Ваш ход');
     e.runTurn();                                   // → фаза Main
     this.netAct('turnStart');
     this.ropeStart();
-    await this.playPhaseBanners([Phase.Start, Phase.Resource]);
+    await this.playPhaseBanners([Phase.Start, Phase.Resource], sessionId);
+    if (sessionId !== this.sessionId || !this.running) return;
     this.renderAll();
 
     await new Promise<void>(res => { this.turnDone = res; });
+    if (sessionId !== this.sessionId) return;
     this.turnDone = null;
     if (!this.running || e.result !== GameResult.Ongoing) return;
 
     this.aiInstantResponse('перед вашей атакой');
+    await this.waitForStack();
+    if (sessionId !== this.sessionId || !this.running) return;
     // v3.14: если летал случился ещё до боя (ответ ИИ), окно атак не открывается —
     // иначе игрок застревал на стадии объявления атак после конца игры.
     if (e.result !== GameResult.Ongoing || !this.running) { this.renderAll(); return; }
@@ -1188,37 +1351,49 @@ class Battle {
       e.enterCombatPhase();
       this.netAct('combat');
       await this.combatWindow();
-      if (!this.running || e.result !== GameResult.Ongoing) { this.renderAll(); return; }
+      if (sessionId !== this.sessionId || !this.running) return;
+      if (e.result !== GameResult.Ongoing) { this.renderAll(); return; }
     }
     const skipCombat = e.manualCombatSkip;
     await e.finishMainPhase();                     // бой полностью проигрывается до конца хода
+    if (sessionId !== this.sessionId || !this.running) return;
     this.netAct('endTurn', { skip: skipCombat });
     this.aiInstantResponse('в конец вашего хода');
+    await this.waitForStack();
+    if (sessionId !== this.sessionId || !this.running) return;
     this.renderAll();
   }
 
   /** Ход ИИ: пауза 1–2 с (ТЗ п.5.1), «неидеальность» через blunderRate. */
   /** Окно отклика для игрока во время хода ИИ (MTG: приоритет оппонента). */
-  private instantPassResolve: (() => void) | null = null;
+  private instantPassResolve: ((result: InstantWindowResult) => void) | null = null;
   private instantTimer = 0;
-  private async responseWindow(label: string, force = false): Promise<void> {
-    if (this.net) return;
-    const e = this.engine!;
-    if (e.result !== GameResult.Ongoing || !this.running) return;
+  private async responseWindow(label: string, force = false): Promise<InstantWindowResult> {
+    if (this.net) return 'unavailable';
+    const e = this.engine;
+    if (!e || e.result !== GameResult.Ongoing || !this.running) return 'cancelled';
     const hand = e.p(Side.Player).hand.map(id => e.db.get(id)).filter(Boolean) as CardData[];
     const mana = e.p(Side.Player).mana;
-    void force;
-    if (!hand.some(c => c.type === CardType.Spell && c.subtype === SpellSubtype.Instant && c.cost <= mana)) return;
+    const fullControl = settings.fullControl && !this.net && this.launchMode !== 'tut';
+    void force; // retained as the call-site marker for response windows raised by the stack pump.
+    const hasAffordableInstant = hand.some(c => c.type === CardType.Spell && c.subtype === SpellSubtype.Instant && c.cost <= mana);
+    if (!hasAffordableInstant && !fullControl) return 'unavailable';
     e.openInstantWindow(Side.Player);
-    // v3.8 (как MTG Arena): останавливаемся, только если мгновенное реально можно сыграть — хватает маны И есть цель
-    const legal = e.p(Side.Player).hand.filter((_, i) => { const r = e.canPlay(Side.Player, i); return r.ok && r.card?.subtype === SpellSubtype.Instant; }).length;
-    if (!legal) { e.closeInstantWindow(); return; }
+    // Обычный auto-pass — только для реального ответа; Full Control также останавливает
+    // фазы без доступных заклинаний, чтобы игрок мог дождаться нужного момента.
+    const legal = e.p(Side.Player).hand.filter((_, i) => {
+      const r = e.canPlay(Side.Player, i);
+      return r.ok && r.card?.subtype === SpellSubtype.Instant;
+    }).length;
+    if (!legal && !fullControl) { e.closeInstantWindow(); return 'unavailable'; }
     document.body.classList.add('ecPriority');
+    const resumeBusy = this.busy;
+    if (resumeBusy) this.setBusy(false); // ход ИИ приостанавливается, но окно мгновенного остаётся интерактивным
     Sfx.uiClick();
     this.instantLabel = label;
     this.renderAll();
-    if ((window as unknown as { ecAutoPass?: boolean }).ecAutoPass || settings.autoPass) {
-      window.setTimeout(() => this.passInstant(), 0);   // headless-режим смоука / авто-приоритет
+    if (!fullControl && ((window as unknown as { ecAutoPass?: boolean }).ecAutoPass || settings.autoPass)) {
+      window.setTimeout(() => this.passInstant(), 0);   // Headless/autopass; Full Control deliberately overrides it.
     }
     this.cdLeft = 20;
     if (this.cdTimer) window.clearInterval(this.cdTimer);
@@ -1230,11 +1405,32 @@ class Battle {
         (cd.parentElement as HTMLElement | null)?.style.setProperty('--cd', `${Math.max(0, this.cdLeft / 20) * 100}%`);
       }
     }, 200);
-    await new Promise<void>(res => {
-      this.instantPassResolve = res;
+    const result = await new Promise<InstantWindowResult>(resolve => {
+      this.instantPassResolve = resolve;
       this.instantTimer = window.setTimeout(() => this.passInstant(), 20000);
     });
     document.body.classList.remove('ecPriority');
+    if (resumeBusy && this.running && e.result === GameResult.Ongoing) this.setBusy(true);
+    return result;
+  }
+
+  /** Закрыть окно приоритета, не разрешая заклинание напрямую: ход стека продолжит pump. */
+  private finishInstantWindow(result: InstantWindowResult, redraw = true): void {
+    const resolve = this.instantPassResolve;
+    if (!resolve) return;
+    this.instantPassResolve = null;
+    if (this.cdTimer) { window.clearInterval(this.cdTimer); this.cdTimer = 0; }
+    if (this.instantTimer) { window.clearTimeout(this.instantTimer); this.instantTimer = 0; }
+    document.body.classList.remove('ecPriority');
+    if (result !== 'acted' && this.pendingTarget) {
+      const cancelTarget = this.pendingTarget;
+      this.pendingTarget = null;
+      cancelTarget(null, null);
+      this.clearHighlights();
+    }
+    this.engine?.closeInstantWindow();
+    if (redraw) { this.renderStack(); this.renderAll(); }
+    resolve(result);
   }
   private prevMana = -1;
   private ropeTimer = 0;
@@ -1245,8 +1441,8 @@ class Battle {
     $('ropeBar')?.classList.remove('hidden');
     this.ropeLeft = 75;
     this.ropeTimer = window.setInterval(() => {
-      if (this.busy || this.combatBusy || this.engine?.instantWindow !== null ||
-          this.engine?.result !== GameResult.Ongoing) return;
+      if (this.busy || this.combatBusy || this.net && !this.net.isReady() || this.stackBusy
+          || this.engine?.instantWindow !== null || this.engine?.result !== GameResult.Ongoing) return;
       this.ropeLeft -= 0.25;
       const f = $('ropeFill');
       if (f) {
@@ -1345,10 +1541,18 @@ class Battle {
     });
     while (meta.telem.length > 40) meta.telem.pop();
     apiSend('/api/telemetry', { e: meta.telem[0] });   // LAUNCH_PLAN: телеметрия на сервер (best-effort)
-    meta.replays = meta.replays ?? [];
+    meta.replays = Array.isArray(meta.replays) ? meta.replays : [];
     meta.replays.unshift({
-      ts: tsNow, win, fac, turns: e.turn, foe: foeName,
-      lines: e.log.filter(v => !!v.text).slice(-140).map(v => [v.turn ?? 0, v.text ?? ''] as [number, string]),
+      ts: tsNow, win, fac, turns: e.turn, foe: foeName, result: e.result,
+      opponentFaction: this.enemyFaction as string,
+      stats: {
+        durationSecs: Math.max(0, Math.round((tsNow - (this.matchStart || tsNow)) / 1000)),
+        player: { ...e.stats[Side.Player] }, opponent: { ...e.stats[Side.Opponent] },
+      },
+      lines: e.log.slice(-400).map(v => ({
+        turn: v.turn ?? 0, text: replayEventText(v), type: v.type, side: v.side,
+        cardName: v.cardName, value: v.value, absorbed: v.absorbed,
+      })).filter(v => !!v.text).slice(-140),
     });
     while (meta.replays.length > 3) meta.replays.pop();
     while (meta.history.length > 20) meta.history.pop();
@@ -1368,24 +1572,82 @@ class Battle {
   }
 
   private stackBusy = false;
+  private stackGeneration = 0;
+  private stackTask: Promise<void> | null = null;
 
-  /** Насос стека: поочерёдные окна ответа до опустошения LIFO-стека. */
-  private async stackPump(): Promise<void> {
-    const e = this.engine!;
+  /** Один насос на матч: действия/пасы чередуют приоритет, два последовательных паса разрешают вершину. */
+  private startStackPump(): void {
+    const e = this.engine;
+    if (!e?.interactiveStack || this.net || this.stackTask) return;
+    const generation = this.stackGeneration;
+    this.stackBusy = true;
+    this.clearThinkWatch();
+    const task = this.stackPump(generation, e).catch(err => { reportFatal('stack-pump', err); });
+    this.stackTask = task;
+    void task.finally(() => {
+      if (generation !== this.stackGeneration || this.stackTask !== task) return;
+      this.stackTask = null;
+      this.stackBusy = false;
+      this.renderAll();
+    });
+  }
+
+  private async waitForStack(): Promise<void> {
+    const task = this.stackTask;
+    if (task) await task;
+  }
+
+  private async stackPump(generation: number, e: GameEngine): Promise<void> {
+    const live = (): boolean => generation === this.stackGeneration && this.engine === e
+      && this.running && e.result === GameResult.Ongoing;
+    const other = (side: Side): Side => side === Side.Player ? Side.Opponent : Side.Player;
+    let priority: Side | null = null;
+    let consecutivePasses = 0;
     let guard = 0;
-    while (e.stack.length > 0 && this.running && guard++ < 24) {
+    while (e.stack.length > 0 && live() && guard++ < 48) {
       const top = e.stack[e.stack.length - 1];
-      const responder = top.side === Side.Player ? Side.Opponent : Side.Player;
-      if (responder === Side.Opponent) {
-        await sleep(260);
-        const before = e.stack.length;
-        this.aiInstantResponse('ответ в стеке');
-        if (e.stack.length === before) e.passStack(Side.Opponent);
-        this.renderStack();
+      if (priority === null) priority = other(top.side);
+      if (priority === Side.Player) {
+        const answer = await this.responseWindow(`стек: ответ на «${top.card.name}»`, true);
+        if (!live() || answer === 'cancelled') return;
+        if (answer === 'acted') {
+          const newTop = e.stack[e.stack.length - 1];
+          if (newTop) { priority = other(newTop.side); consecutivePasses = 0; }
+          continue;
+        }
       } else {
-        await this.responseWindow(`стек: ответ на «${top.card.name}»`, true);
-        if (!this.running) return;
+        await sleep(220);
+        if (!live()) return;
+        const acted = this.aiInstantResponse('ответ в стеке');
+        if (acted) {
+          const newTop = e.stack[e.stack.length - 1];
+          if (newTop) { priority = other(newTop.side); consecutivePasses = 0; }
+          this.renderStack();
+          continue;
+        }
       }
+
+      // Карта могла резолвиться/исчезнуть из-за другого синхронного эффекта.
+      if (e.stack[e.stack.length - 1] !== top) {
+        priority = e.stack.length ? e.activeSide : null;
+        consecutivePasses = 0;
+        continue;
+      }
+      consecutivePasses++;
+      if (consecutivePasses >= 2) {
+        e.passStack(priority);
+        consecutivePasses = 0;
+        priority = e.stack.length ? e.activeSide : null;
+      } else {
+        priority = other(priority);
+      }
+      this.renderStack();
+    }
+    if (e.stack.length > 0 && live()) {
+      // Защита от бесконечной цепочки ответов: не оставляем стек и блокировку хода зависшими.
+      pushLog('Стек достиг предела цепочки ответов — оставшиеся эффекты разрешены автоматически', 'phase');
+      let safety = 0;
+      while (e.stack.length > 0 && e.result === GameResult.Ongoing && safety++ < 64) e.resolveStackTop();
     }
     this.renderStack();
   }
@@ -1405,24 +1667,14 @@ class Battle {
   private instantLabel = '';
   private cdTimer = 0;
   private cdLeft = 20;
-  passInstant(): void {
-    document.body.classList.remove('ecPriority');
-    if (this.cdTimer) { window.clearInterval(this.cdTimer); this.cdTimer = 0; }
-    if (this.instantTimer) { window.clearTimeout(this.instantTimer); this.instantTimer = 0; }
-    this.engine?.passStack(Side.Player);
-    this.renderStack();
-    const res = this.instantPassResolve;
-    this.instantPassResolve = null;
-    this.engine?.closeInstantWindow();
-    this.renderAll();
-    if (res) res();
-  }
-  /** ИИ отвечает мгновенными заклинаниями в ваш ход (эвристика). */
-  private aiInstantResponse(label: string): void {
-    if (this.net || !this.ai) return;
-    const e = this.engine!;
-    if (e.result !== GameResult.Ongoing) return;
+  passInstant(): void { this.finishInstantWindow('passed'); }
+  /** ИИ отвечает мгновенными заклинаниями в ваш ход (эвристика); true = добавил карту в стек. */
+  private aiInstantResponse(label: string): boolean {
+    if (this.net || !this.ai) return false;
+    const e = this.engine;
+    if (!e || e.result !== GameResult.Ongoing) return false;
     const pl = e.p(Side.Opponent);
+    let acted = false;
     e.openInstantWindow(Side.Opponent);
     for (let i = pl.hand.length - 1; i >= 0; i--) {
       const c = e.db.get(pl.hand[i]);
@@ -1436,12 +1688,14 @@ class Battle {
         (ops.includes('damage')) && myBoard.some(u => u.health <= ((c.effects ?? [])[0]?.value ?? 0));
       if (!want) continue;
       const tgt = ops.includes('damage') ? myBoard.find(u => u.health <= ((c.effects ?? [])[0]?.value ?? 0)) : undefined;
-      e.playCard(Side.Opponent, i, tgt?.uid, tgt ? Side.Player : undefined);
+      if (!e.playCard(Side.Opponent, i, tgt?.uid, tgt ? Side.Player : undefined)) continue;
       this.setWho(`⚡ Ответ противника: ${label}`);
       this.renderAll();
+      acted = true;
       break;
     }
     e.closeInstantWindow();
+    return acted;
   }
 
   private async aiTurn(): Promise<void> {
@@ -1452,6 +1706,7 @@ class Battle {
     await this.playPhaseBanners([Phase.Start, Phase.Resource]);
     this.renderAll();
     await this.responseWindow('основная фаза противника');
+    await this.waitForStack();
     await sleep(500 + Math.random() * 700);
 
     let guard = 0;
@@ -1465,27 +1720,32 @@ class Battle {
       if (act.action.type === 'endTurn') break;
       const ok = e.playAIFallback(act.action, Side.Opponent);
       this.renderAll();
+      await this.waitForStack();
       await sleep(420 + Math.random() * 220);
-      if (!ok) break;
+      if (!ok || e.result !== GameResult.Ongoing) break;
     }
 
     await this.responseWindow('перед атакой противника');
+    await this.waitForStack();
     if (!this.running) return;
     await e.finishMainPhase();
     await this.responseWindow('конец хода противника');
+    await this.waitForStack();
     this.setBusy(false);
     this.renderAll();
   }
 
   /* ------------------------- фазы / баннеры ------------------------- */
 
-  private async playPhaseBanners(phases: Phase[]): Promise<void> {
+  private async playPhaseBanners(phases: Phase[], sessionId = this.sessionId): Promise<void> {
     for (const p of phases) {
+      if (sessionId !== this.sessionId || !this.running) return;
       this.renderPhaseTrack(p);
       await this.banner(PHASE_RU[p]);
+      if (sessionId !== this.sessionId || !this.running) return;
       await sleep(140);
     }
-    this.renderPhaseTrack(Phase.Main);
+    if (sessionId === this.sessionId && this.running) this.renderPhaseTrack(Phase.Main);
   }
 
   private async banner(text: string): Promise<void> {
@@ -1516,6 +1776,27 @@ class Battle {
     this.busy = v;
     $('busy').classList.toggle('show', v);
     this.updateButtons();
+  }
+  setFullControl(value: boolean): void {
+    const blocked = !!this.net || this.launchMode === 'tut';
+    if (value && blocked) {
+      const checkbox = document.getElementById('setFullControl') as HTMLInputElement | null;
+      if (checkbox) checkbox.checked = !!settings.fullControl;
+      this.flashHint(bi('Полный контроль доступен в локальных матчах, но пока не в сети и обучении.',
+        'Full Control is available in local matches, but not yet in online matches or tutorials.'));
+      this.updateButtons();
+      return;
+    }
+    settings.fullControl = !!value;
+    saveSettings();
+    const checkbox = document.getElementById('setFullControl') as HTMLInputElement | null;
+    if (checkbox) checkbox.checked = settings.fullControl;
+    this.updateButtons();
+    this.renderInstantDock();
+    this.flashHint(settings.fullControl
+      ? bi('Полный контроль включён: авто-приоритет не пропустит окна отклика.',
+        'Full Control on: Auto-Pass will not skip priority windows.')
+      : bi('Полный контроль выключен.', 'Full Control off.'));
   }
   private setWho(t: string): void {
     $('whoTurn').textContent = t;
@@ -1646,6 +1927,8 @@ class Battle {
         if (attacker) Vfx.streak(Vfx.centerOf(attacker), Vfx.centerOf(heroPanel, 0.42), '#ffd08a', 280);
         this.popEl(heroPanel.querySelector('.hbHp') as HTMLElement | null);
         this.floatHero(rec.attackerSide === Side.Player ? Side.Opponent : Side.Player, `-${rec.heroDamage}`, false);
+        Vfx.heroDamageFx(rec.attackerSide === Side.Player ? 'enemy' : 'player', rec.heroDamage);
+        Sfx.heroHit(rec.heroDamage);
         await Vfx.meleeImpact(Vfx.centerOf(heroPanel), rec.attackerSide === Side.Player ? -90 : 90,
           Math.min(2.4, 0.9 + rec.heroDamage * 0.2));
         Sfx.melee(Math.min(2, 0.8 + rec.heroDamage * 0.18));
@@ -1653,24 +1936,36 @@ class Battle {
         Vfx.vignettePulse(rec.attackerSide === Side.Player ? '#7a3a12' : '#d64545', Math.min(0.8, 0.28 + rec.heroDamage * 0.05));
         pushLog(`⚔ «${rec.attackerName}» наносит ${rec.heroDamage} урона герою`, 'dmg');
       }
-      // снапшот шагает вместе с анимацией: HP меняются ровно в момент удара
-      if (this.combatSnap) {
-        if (rec.defenderUid !== undefined && rec.defenderAfter) {
-          this.combatSnap.units.set(rec.defenderUid, rec.defenderAfter.hp);
+      // HP-события атаки включают урон/лечение от deathrattle и других
+      // немедленных триггеров. Обычный удар уже получил float выше, остальные
+      // события показываем здесь, не дожидаясь конца фазы/хода.
+      for (const hpEvent of rec.hpEvents ?? []) {
+        if (this.combatSnap) {
+          const before = this.combatSnap.hp[hpEvent.side];
+          this.combatSnap.hp[hpEvent.side] = hpEvent.kind === 'damage'
+            ? before - hpEvent.amount : before + hpEvent.amount;
         }
-        if (rec.attackerAfter) this.combatSnap.units.set(rec.attackerUid, rec.attackerAfter.hp);
-        if (rec.hitHero) {
-          const target = rec.attackerSide === Side.Player ? Side.Opponent : Side.Player;
-          this.combatSnap.hp[target] = this.combatSnap.hp[target] - rec.heroDamage;   // v3.14: оверкил виден (−3)
-        }
-        // вампиризм: нанесённый урон лечит героя атакующего в тот же момент
-        const healed = rec.lifestealAmount ?? 0;
-        if (rec.lifesteal && healed > 0) {
-          const cap0 = this.engine!.p(rec.attackerSide).maxHealth;
-          this.combatSnap.hp[rec.attackerSide] = Math.min(cap0, this.combatSnap.hp[rec.attackerSide] + healed);
-          this.floatHero(rec.attackerSide, `+${healed}`, true);
-          Vfx.healFx(Vfx.centerOf(rec.attackerSide === Side.Player ? $('playerHero') : $('enemyHero'), 0.4));
+        if (hpEvent.kind === 'damage') {
+          if (hpEvent.cue === 'attack') continue; // уже показано в heroPanel-блоке
+          this.floatHero(hpEvent.side, `-${hpEvent.amount}`, false);
+          Vfx.heroDamageFx(hpEvent.side === Side.Player ? 'player' : 'enemy', hpEvent.amount);
+          Sfx.heroHit(hpEvent.amount);
+        } else {
+          this.floatHero(hpEvent.side, `+${hpEvent.amount}`, true);
+          Vfx.healFx(Vfx.centerOf(hpEvent.side === Side.Player ? $('playerHero') : $('enemyHero'), 0.4));
           Sfx.heal();
+        }
+      }
+      if (this.combatSnap) {
+        // Снимок всего поля включает изменения от триггеров и призванных существ.
+        if (rec.unitsAfter) {
+          this.combatSnap.units.clear();
+          for (const unit of rec.unitsAfter) this.combatSnap.units.set(unit.uid, unit.hp);
+        }
+        // Авторитетный итоговый HP защищает от рассинхрона при оверкилле/лечении.
+        if (rec.heroHpAfter) {
+          this.combatSnap.hp[Side.Player] = rec.heroHpAfter[Side.Player];
+          this.combatSnap.hp[Side.Opponent] = rec.heroHpAfter[Side.Opponent];
         }
       }
       if (rec.attackerDamage > 0 && attacker) this.floatUnit(rec.attackerUid, `-${rec.attackerDamage}`, false);
@@ -1729,11 +2024,14 @@ class Battle {
   private scheduleWindowAutoClose(): void {
     if (!this.anyReadyAttacker()) setTimeout(() => this.closeCombatWindow(), 1100);
   }
-  closeCombatWindow(): void { this.setCombatStep(2); this.clearMassAttack(true); this.combatWindowDone?.(); }   // MTG: declare blockers
+  closeCombatWindow(): void {
+    if (!this.inCombatWindow || this.busy || this.stackBusy || this.net && !this.net.isReady()) return;
+    this.setCombatStep(2); this.clearMassAttack(true); this.combatWindowDone?.();
+  }   // MTG: declare blockers
   /** Пропустить бой без атак — как «не бить» в MTG, остаётся на усмотрение игрока. */
   skipCombat(): void {
     const e = this.engine;
-    if (!e || !this.inCombatWindow) return;
+    if (!e || !this.inCombatWindow || this.busy || this.stackBusy || this.net && !this.net.isReady()) return;
     e.manualCombatSkip = true;
     this.cancelAttack();
     this.flashHint('Бой пропущен — ход завершается без атак');
@@ -1762,7 +2060,71 @@ class Battle {
     const pool = (taunts.length ? taunts : en.creatures).filter(c => !c.unblockableThisTurn && !(!c.silenced && (c.keywords ?? []).includes(Keyword.Unblockable)));
     return { uids: pool.map(c => c.uid), hero: heroAllowed };
   }
+  private showCombatForecast(attacker: EntityCreature, targetUids: number[], heroTarget: boolean): void {
+    const e = this.engine;
+    if (!e) return;
+    this.clearCombatForecast();
+    const hasStatus = (c: EntityCreature, type: StatusType): boolean => !c.silenced
+      && c.statuses.some(s => s.type === type && (type !== StatusType.Shield || s.value > 0));
+    const hasKeyword = (c: EntityCreature, kw: Keyword): boolean => !c.silenced && c.keywords.includes(kw);
+
+    for (const uid of targetUids) {
+      const defender = e.findCreature(uid);
+      const node = this.unitNodes.get(uid);
+      if (!defender || !node) continue;
+      const shielded = hasStatus(defender, StatusType.Shield);
+      const poisoned = hasStatus(defender, StatusType.Poison);
+      const attackerShielded = hasStatus(attacker, StatusType.Shield);
+      const attackerPoisoned = hasStatus(attacker, StatusType.Poison);
+      const dealt = shielded ? 0 : poisoned ? Math.max(0, defender.health) : attacker.attack;
+      const targetDies = dealt > 0 && (poisoned || dealt >= defender.health);
+      const counter = defender.attack <= 0 || attackerShielded ? 0
+        : attackerPoisoned ? Math.max(defender.attack, attacker.health) : defender.attack;
+      const attackerDies = counter > 0 && counter >= attacker.health;
+      const trample = targetDies && !shielded && hasKeyword(attacker, Keyword.Trample)
+        ? Math.max(0, attacker.attack - Math.max(0, defender.health)) : 0;
+      const lifesteal = hasKeyword(attacker, Keyword.Lifesteal) && !shielded
+        ? Math.min(Math.max(0, dealt), Math.max(0, defender.health)) + trample : 0;
+      const outcome = targetDies && attackerDies ? 'trade' : targetDies ? 'lethal' : attackerDies ? 'danger' : 'neutral';
+      const mainText = shielded ? bi('⛨ Щит поглотит удар', '⛨ Shield absorbs the hit')
+        : targetDies ? (poisoned ? bi('☠ УБЬЁТ · яд', '☠ LETHAL · poison') : bi('⚔ УБЬЁТ', '⚔ LETHAL'))
+          : bi(`−${Math.max(0, dealt)} HP · останется ${Math.max(0, defender.health - dealt)}`,
+            `−${Math.max(0, dealt)} HP · ${Math.max(0, defender.health - dealt)} remaining`);
+      const details = [
+        counter > 0 ? bi(`Ответ −${counter}${attackerDies ? ' · опасно' : ''}`, `Retaliation −${counter}${attackerDies ? ' · lethal' : ''}`)
+          : attackerShielded ? bi('Ответ поглощён щитом', 'Retaliation absorbed by Shield') : bi('Ответного урона нет', 'No retaliation'),
+        trample > 0 ? bi(`Прорыв −${trample} герою`, `Trample −${trample} to hero`) : '',
+        lifesteal > 0 ? bi(`Вампиризм +${lifesteal}`, `Lifesteal +${lifesteal}`) : '',
+      ].filter(Boolean).join(' · ');
+      const tag = document.createElement('span');
+      tag.className = `combatForecast ${outcome}`;
+      tag.setAttribute('role', 'status');
+      tag.setAttribute('aria-label', `${defender.name}: ${mainText}. ${details}`);
+      tag.title = `${defender.name}: ${mainText}. ${details}`;
+      tag.innerHTML = `<b class="cfMain">${esc(mainText)}</b><small class="cfSub">${esc(details)}</small>`;
+      node.appendChild(tag);
+    }
+
+    if (heroTarget) {
+      const hero = $('enemyHero');
+      const tag = document.createElement('span');
+      const life = hasKeyword(attacker, Keyword.Lifesteal)
+        ? ` · ${bi('Вампиризм', 'Lifesteal')} +${attacker.attack} HP` : '';
+      tag.className = 'heroCombatForecast';
+      tag.setAttribute('role', 'status');
+      tag.setAttribute('aria-label', `${bi('Герой противника', 'Opponent hero')}: −${attacker.attack} ${bi('здоровья', 'health')}${life}`);
+      tag.title = bi('Прямой урон до эффектов защиты героя', 'Face damage before hero protection');
+      tag.textContent = `−${attacker.attack} HP${life}`;
+      hero.appendChild(tag);
+    }
+  }
+
+  private clearCombatForecast(): void {
+    document.querySelectorAll('.combatForecast,.heroCombatForecast').forEach(x => x.remove());
+  }
+
   private beginAttack(uid: number): void {
+    if (!this.inCombatWindow || this.busy || this.stackBusy || this.net && !this.net.isReady()) return;
     const e = this.engine!;
     const c = e.findCreature(uid);
     if (!c || c.owner !== Side.Player || !e.canAttack(c)) {
@@ -1773,6 +2135,7 @@ class Battle {
     const t = this.attackTargetsFor(uid);
     for (const tu of t.uids) this.unitNodes.get(tu)?.classList.add('targetable');
     if (t.hero) $('enemyHero').classList.add('droppable');
+    this.showCombatForecast(c, t.uids, t.hero);
     const node = this.unitNodes.get(uid);
     node?.classList.add('attacking');
     this.aimStart(Vfx.centerOf(node ?? $('playerHero'), 0.5));
@@ -1786,6 +2149,7 @@ class Battle {
     }
   }
   async resolveManualAttack(targetUid?: number, targetHero?: boolean): Promise<void> {
+    if (this.busy || this.stackBusy || this.net && !this.net.isReady()) return;
     const e = this.engine!;
     const uid = this.pendingAttack;
     if (uid === null) return;
@@ -1813,7 +2177,7 @@ class Battle {
   /** v3.17: «Атака всеми» — по очереди берём каждое готовое существо,
    *  цель выбирает игрок вручную (клик по существу/герою). */
   startMassAttack(): void {
-    if (!this.inCombatWindow || this.busy) return;
+    if (!this.inCombatWindow || this.busy || this.stackBusy || this.net && !this.net.isReady()) return;
     const ready = this.readyAttackerUids();
     if (ready.length === 0) { this.flashHint('Готовых к атаке существ нет'); return; }
     this.massAttack = true;
@@ -1881,24 +2245,30 @@ class Battle {
         break;
       case GameEventType.PlayerDamage: {
         const amount = e.value ?? 0;
-        if (!this.inCombat()) {
+        // Если урон случился внутри удара, HP-cue уже записан в очередь атаки.
+        // Иначе это быстрый эффект/мгновенное заклинание прямо в combat window:
+        // применяем его сразу к снимку, а не прячем до закрытия окна.
+        const queuedWithAttack = this.combatBusy && !!this.engine?.isResolvingAttack;
+        if (!queuedWithAttack) {
+          if (!this.combatBusy && !this.inCombat() && e.text) pushLog(e.text, e.side === Side.Player ? 'you' : 'foe');
+          if (this.combatSnap && e.side !== undefined) this.combatSnap.hp[e.side] = this.engine?.p(e.side).health ?? this.combatSnap.hp[e.side];
           this.floatHero(e.side!, `-${amount}`, false);
-          if (e.text) pushLog(e.text, e.side === Side.Player ? 'you' : 'foe');
+          Vfx.heroDamageFx(e.side === Side.Player ? 'player' : 'enemy', amount);
+          if (e.fromSpell) Vfx.spellImpact(Vfx.centerOf(e.side === Side.Player ? $('playerHero') : $('enemyHero'), 0.4), e.sourceElement as string ?? 'None', Math.min(2, 0.7 + amount * 0.14));
+          Sfx.heroHit(amount);
         }
-        // урон герою — самая тяжёлая обратная связь (VISUAL_STACK, раздел 6, №26)
-        Vfx.heroDamageFx(e.side === Side.Player ? 'player' : 'enemy', amount);
-        if (e.fromSpell) Vfx.spellImpact(Vfx.centerOf(e.side === Side.Player ? $('playerHero') : $('enemyHero'), 0.4), e.sourceElement as string ?? 'None', Math.min(2, 0.7 + amount * 0.14));
-        Sfx.heroHit(amount);
         break;
       }
-      case GameEventType.PlayerHeal:
-        // во время боя числа лечения рисует animateCombat в момент вампиризма
-        if (!this.inCombat()) {
+      case GameEventType.PlayerHeal: {
+        const queuedWithAttack = this.combatBusy && !!this.engine?.isResolvingAttack;
+        if (!queuedWithAttack) {
+          if (this.combatSnap && e.side !== undefined) this.combatSnap.hp[e.side] = this.engine?.p(e.side).health ?? this.combatSnap.hp[e.side];
           this.floatHero(e.side!, `+${e.value ?? 0}`, true);
           Vfx.healFx(Vfx.centerOf(e.side === Side.Player ? $('playerHero') : $('enemyHero'), 0.4));
           Sfx.heal();
         }
         break;
+      }
       case GameEventType.CreatureDamaged: {
         const node = this.unitNodes.get(e.uid!);
         if (e.absorbed) {
@@ -1960,10 +2330,7 @@ class Battle {
       }
       case GameEventType.StackPushed:
         this.renderStack();
-        if (!this.stackBusy) {
-          this.stackBusy = true;
-          void this.stackPump().finally(() => { this.stackBusy = false; });
-        }
+        this.startStackPump();
         break;
       case GameEventType.StackResolved:
         this.renderStack();
@@ -2031,11 +2398,8 @@ class Battle {
       case GameEventType.GameOver: {
         // v3.14: игра окончена на любой стадии — освободить ВСЕ точки ожидания
         // (ход, окно атак, окно приоритета), иначе бой «зависал» на стадии.
-        if (this.instantTimer) { window.clearTimeout(this.instantTimer); this.instantTimer = 0; }
-        if (this.cdTimer) { window.clearInterval(this.cdTimer); this.cdTimer = 0; }
+        this.finishInstantWindow('cancelled', false);
         document.body.classList.remove('ecPriority');
-        const ri = this.instantPassResolve; this.instantPassResolve = null;
-        ri?.();
         this.turnDone?.();
         this.combatWindowDone?.();
         break;
@@ -2043,7 +2407,8 @@ class Battle {
       default:
         break;
     }
-    if (!this.combatBusy) this.renderStats();
+    if (!this.combatBusy || ((e.type === GameEventType.PlayerDamage || e.type === GameEventType.PlayerHeal)
+      && !this.engine?.isResolvingAttack)) this.renderStats();
   }
 
   /** Во время «Битвы» числа урона рисует animateCombat — не дублируем. */
@@ -2253,8 +2618,20 @@ class Battle {
     const open = e.instantWindow === Side.Player;
     dock.classList.toggle('hidden', !open);
     if (open) {
-      const lbl = dock.querySelector('#instantLabel');
-      if (lbl) lbl.textContent = this.instantLabel || 'ход противника';
+      const step = this.instantLabel || bi('ход противника', "opponent's turn");
+      const fullControl = settings.fullControl && !this.net && this.launchMode !== 'tut';
+      const canReply = e.p(Side.Player).hand.some((_, i) => {
+        const result = e.canPlay(Side.Player, i);
+        return result.ok && result.card?.subtype === SpellSubtype.Instant;
+      });
+      const sub = dock.querySelector('#instantSub');
+      if (sub) {
+        sub.textContent = fullControl && !canReply
+          ? `${bi('Полный контроль остановил игру:', 'Full Control stopped the game:')} ${step}. ${bi('Нажмите «Передать приоритет», чтобы продолжить.', 'Press Pass Priority to continue.')}`
+          : fullControl
+            ? `${step}. ${bi('Сыграйте мгновенное заклинание или передайте приоритет. Авто-приоритет приостановлен.', 'Play an instant or pass priority. Auto-Pass is suspended.')}`
+            : `${step}: ${bi('мгновенные заклинания из руки играются сейчас.', 'instants in hand can be played now.')}`;
+      }
     }
   }
 
@@ -2343,17 +2720,18 @@ class Battle {
     const node = el('div', 'unit f-' + c.faction);
     node.dataset.uid = String(c.uid);
     node.dataset.cardId = c.cardId; // FIX v2.7: полевая карта участвует в глобальном zoom-ховере справа (как рука/библиотека)
-    {
-      const PIPS: Record<string, string> = { Taunt: '⛨', Lifesteal: '♥', Trample: '⇉', Windfury: '≋', Unblockable: '◌' };
-      const card = this.engine?.db.get(c.cardId);
-      const pips = (card?.keywords ?? []).map(k => PIPS[k] ? `<span class="pip" title="${kwName(k)}">${PIPS[k]}</span>` : '').join('');
-      if (pips) node.insertAdjacentHTML('beforeend', `<div class="pips">${pips}</div>`);
-      const FICO: Record<string, string> = { Aurites: '✦', Necrus: '☠', Terramorph: '⛰', Pyromancer: '♨', Ethereal: '☾', Neutral: '◈' };
-      node.insertAdjacentHTML('afterbegin', `<span class="facIco" title="${factionName(c.faction as string)}">${FICO[c.faction as string] ?? '◈'}</span>`);
-    }
+    const PIPS: Record<string, string> = { Taunt: '⛨', Vigilance: '◉', Lifesteal: '♥', Trample: '⇉', Windfury: '≋', Unblockable: '◌' };
+    const FICO: Record<string, string> = { Aurites: '✦', Necrus: '☠', Terramorph: '⛰', Pyromancer: '♨', Ethereal: '☾', Neutral: '◈' };
+    const pips = (c.silenced ? [] : c.keywords).map(k => PIPS[k]
+      ? `<span class="pip" title="${esc(kwName(k))}">${PIPS[k]}</span>` : '').join('');
+    const factionIcon = `<span class="facIco" title="${esc(factionName(c.faction as string))}">${FICO[c.faction as string] ?? '◈'}</span>`;
     node.dataset.side = String(c.owner);
     const mine = c.owner === Side.Player;
-    const canAtk = mine && this.engine!.canAttack(c);
+    const vigilance = !c.silenced && c.keywords.includes(Keyword.Vigilance);
+    const tapped = typeof c.tapped === 'boolean' ? c.tapped : c.attacksThisTurn > 0;
+    // Готовность отображаем только активному игроку; на чужом ходу нет ложной подсветки атаки.
+    const ownerTurn = this.engine!.activeSide === c.owner;
+    const canAtk = mine && ownerTurn && this.engine!.canAttack(c);
     const maxAttacks = c.keywords.includes(Keyword.Windfury) ? 2 : 1;
     const attacksRemaining = Math.max(0, maxAttacks - c.attacksThisTurn);
     const attackMarkTitle = c.attacksThisTurn > 0
@@ -2365,9 +2743,15 @@ class Battle {
       }</span>`
       : '';
     if (canAtk) node.classList.add('ready');
-    if (mine && !canAtk) node.classList.add('exhausted');
-    if (c.attacksThisTurn > 0) node.classList.add('tapped');   // как в MTG: атаковало — тапнуто
-    const nowTap = c.attacksThisTurn > 0;
+    if (mine && ownerTurn && !canAtk) node.classList.add('exhausted');
+    if (tapped) node.classList.add('tapped');
+    if (vigilance) node.classList.add('vigilant');
+    node.dataset.tapped = String(tapped);
+    node.dataset.tapState = tapped ? 'tapped' : vigilance ? 'vigilant' : 'ready';
+    if (tapped || vigilance) node.setAttribute('aria-label', `${cardName(card)} · ${tapped
+      ? bi('повёрнуто до начала следующего вашего хода', 'tapped until the start of your next turn')
+      : bi('Бдительность: не поворачивается после атаки', 'Vigilance: stays untapped after attacking')}`);
+    const nowTap = tapped;
     const wasTap = this.prevTapped.get(c.uid);
     if (wasTap === true && !nowTap) {
       // волна антапа в шаг Untap: задержка по индексу, как разворот земель в MTG
@@ -2382,8 +2766,11 @@ class Battle {
     }
     this.prevTapped.set(c.uid, nowTap);
     if (c.frozen) node.classList.add('frozenUnit');
-    if (c.unblockableThisTurn) node.classList.add('unblockable');
-    if (c.statuses.some(st => st.type === StatusType.Shield)) node.classList.add('shielded');
+    const unblockable = c.unblockableThisTurn || (!c.silenced && c.keywords.includes(Keyword.Unblockable));
+    if (unblockable) node.classList.add('unblockable');
+    const shieldCharges = c.silenced ? 0 : c.statuses
+      .filter(st => st.type === StatusType.Shield).reduce((n, st) => n + Math.max(0, st.value), 0);
+    if (shieldCharges > 0) node.classList.add('shielded');
     if ((card.keywords ?? []).includes(Keyword.Taunt)) node.classList.add('taunt');
 
     const badges: string[] = [];
@@ -2393,18 +2780,24 @@ class Battle {
       const duration = s.turnsLeft < 0 ? 'постоянно' : `${s.turnsLeft} ход.`;
       badges.push(`<span class="badge ${b.cls}" title="${b.title} · ${duration}">${b.ico}${s.value > 1 ? s.value : ''}</span>`);
     }
-    for (const kw of c.keywords ?? []) {
+    for (const kw of (c.silenced ? [] : c.keywords ?? [])) {
       const b = KW_BADGE[kw as Keyword];
-      if (b) badges.push(`<span class="badge kw" title="${b.title}">${b.ico}</span>`);
+      if (b) badges.push(`<span class="badge kw" title="${esc(isEN() ? (KW_BADGE_EN[kw] ?? b.title) : b.title)}">${b.ico}</span>`);
     }
+    const tapBadge = tapped
+      ? `<span class="tapStateBadge" role="img" aria-label="${esc(bi('Повернуто до вашего следующего хода', 'Tapped until your next turn'))}" title="${esc(bi('Атаковало · развернётся в начале вашего следующего хода', 'Attacked · untaps at the start of your next turn'))}">↻</span>`
+      : '';
 
     node.innerHTML = `
       <div class="badges">${badges.join('')}</div>
       <div class="ubody">
         <div class="uart">${artSvg(card, 104, 134)}</div>
+        ${factionIcon}${pips ? `<div class="pips">${pips}</div>` : ''}
+        ${unblockable ? '<span class="stealthVeil" role="img" aria-label="Неуловимость" title="Неуловимость — нельзя выбрать целью атаки"><i class="veilSigil">◌</i></span>' : ''}
+        ${shieldCharges > 0 ? `<span class="shieldBubble" role="img" aria-label="Божественный щит · зарядов: ${shieldCharges}" title="Божественный щит · зарядов: ${shieldCharges}"><i aria-hidden="true">⛨</i><b>${shieldCharges}</b></span>` : ''}
         <div class="uname">${cardName(card)}</div>
         <div class="stats"><span class="atk">${c.attack}</span><span class="hp${c.health <= 0 ? ' lethal' : ''}">${Math.max(0, this.displayHpOf(c.uid, c.health))}</span></div>
-      </div>${attackMark}`;
+      </div>${attackMark}${tapBadge}`;
     const ft = this.dmgFlash.get(c.uid);
     if (ft && Date.now() - ft < 500) {
       const hpEl = node.querySelector('.hp');
@@ -2423,17 +2816,35 @@ class Battle {
   private renderRunes(side: Side, host: HTMLElement): void {
     host.innerHTML = '';
     const pl = this.engine!.p(side);
+    const paintRune = (chip: HTMLElement, faction: Faction): void => {
+      const colors = paletteOf(faction);
+      chip.style.setProperty('--rune-primary', colors.primary);
+      chip.style.setProperty('--rune-secondary', colors.secondary);
+      chip.style.setProperty('--rune-accent', colors.accent);
+    };
     for (const r of pl.runes) {
       const chip = el('div', 'runeChip');
-      chip.innerHTML = `<span class="sig">${FACTION_SIGIL[r.faction]}</span><span>${r.name}</span>` +
-        (r.turnsLeft > 0 ? `<span style="color:var(--muted)">· ${r.turnsLeft}⌛</span>` : '<span style="color:var(--gold-dim)">· ∞</span>');
+      paintRune(chip, r.faction);
+      chip.dataset.cardId = r.cardId;
+      const permanent = r.turnsLeft < 0;
+      const duration = permanent ? 'Постоянная руна' : `Ещё ${r.turnsLeft} ${plural(r.turnsLeft, 'ход', 'хода', 'ходов')}`;
+      chip.setAttribute('aria-label', `${cardName(r.data)} · ${duration}`);
+      chip.innerHTML = `<span class="runeSigil" aria-hidden="true">${FACTION_SIGIL[r.faction] ?? '✦'}</span>
+        <span class="runeCopy"><b>${esc(cardName(r.data))}</b><small>${duration}</small></span>
+        <span class="runeClock" aria-hidden="true">${permanent ? '∞' : `⌛ ${r.turnsLeft}`}</span>`;
       chip.addEventListener('mouseenter', ev => showTooltip(r.data, ev.clientX, ev.clientY));
       chip.addEventListener('mouseleave', hideTooltip);
       host.appendChild(chip);
     }
     for (const rt of pl.rituals) {
       const chip = el('div', 'runeChip ritualChip');
-      chip.innerHTML = `<span class="sig">⧗</span><span>${rt.name}</span><span style="color:var(--muted)">· ритуал ${rt.turnsLeft}⌛</span>`;
+      paintRune(chip, rt.data.faction);
+      chip.dataset.cardId = rt.data.id;
+      const duration = `Сработает через ${rt.turnsLeft} ${plural(rt.turnsLeft, 'ход', 'хода', 'ходов')}`;
+      chip.setAttribute('aria-label', `${cardName(rt.data)} · ${duration}`);
+      chip.innerHTML = `<span class="runeSigil" aria-hidden="true">⧗</span>
+        <span class="runeCopy"><b>${esc(cardName(rt.data))}</b><small>Ритуал · ${duration}</small></span>
+        <span class="runeClock" aria-hidden="true">⌛ ${rt.turnsLeft}</span>`;
       chip.addEventListener('mouseenter', ev => showTooltip(rt.data, ev.clientX, ev.clientY));
       chip.addEventListener('mouseleave', hideTooltip);
       host.appendChild(chip);
@@ -2444,6 +2855,16 @@ class Battle {
   }
 
   /* --------------------- рука: веер + drag&drop --------------------- */
+
+  private canPlayAtPriority(card: CardData, e: GameEngine): boolean {
+    if (this.net && !this.net.isReady()) return false;
+    const instant = card.type === CardType.Spell && card.subtype === SpellSubtype.Instant;
+    if (e.instantWindow !== null && e.instantWindow !== Side.Player) return false;
+    if (this.stackBusy || e.stack.length > 0 || e.instantWindow !== null) {
+      return instant && e.instantWindow === Side.Player;
+    }
+    return true;
+  }
 
   private renderHand(): void {
     const host = $('hand');
@@ -2456,7 +2877,8 @@ class Battle {
       host.appendChild(el('div', '', '<span style="font-size:.7rem;color:#3f4457;letter-spacing:.14em">рука пуста</span>'));
       return;
     }
-    const myMain = e.activeSide === Side.Player && e.phase === Phase.Main && !this.busy && this.running;
+    const myMain = e.activeSide === Side.Player && e.phase === Phase.Main && !this.busy && this.running
+      && !this.stackBusy && e.stack.length === 0 && e.instantWindow === null;
     const maxAngle = Math.min(12, n * 2.1);
     // шаг веера масштабируется от фактической ширины карты (адаптив)
     // v3.8: реальная ширина из CSS-переменной --hand-w (clamp по vh/vw)
@@ -2476,10 +2898,11 @@ class Battle {
       const chk = e.canPlay(Side.Player, i);
       const isInstant = card.type === CardType.Spell && card.subtype === SpellSubtype.Instant;
       // MTG: мгновенные подсвечиваются даже в ход противника, если хватает маны
-      const playable = chk.ok;
+      const priorityOk = this.canPlayAtPriority(card, e);
+      const playable = chk.ok && priorityOk;
       if (!playable) {
         node.classList.add('unplayable');
-        const why = chk.reason ?? (isInstant ? 'Недостаточно маны' : (!myMain ? 'Не ваша основная фаза' : 'Нельзя разыграть'));
+        const why = !priorityOk ? 'Стек разрешается — дождитесь приоритета' : chk.reason ?? (isInstant ? 'Недостаточно маны' : (!myMain ? 'Не ваша основная фаза' : 'Нельзя разыграть'));
         node.appendChild(el('div', 'whyNot', why));
         node.title = why;
       } else if (isInstant && !myMain) {
@@ -2562,7 +2985,7 @@ class Battle {
       ghost.remove();
       node.classList.remove('dragging');
       this.clearHighlights();
-      const drop = this.resolveDrop(ev.clientX, ev.clientY, card);
+      const drop = this.resolveDrop(ev.clientX, ev.clientY, card, index);
       if (drop.ok) await this.playCard(index, drop.uid, drop.side);
       else this.flashHint(drop.reason ?? 'Недопустимая цель — карта вернулась в руку');
       this.renderAll();
@@ -2574,6 +2997,7 @@ class Battle {
       if (this.busy || !this.running) return;
       const e0 = this.engine!;
       const isInstant0 = card.type === CardType.Spell && card.subtype === SpellSubtype.Instant;
+      if (!this.canPlayAtPriority(card, e0)) { this.flashHint('Дождитесь своего приоритета в стеке'); return; }
       if (!isInstant0 && (e0.activeSide !== Side.Player || e0.phase !== Phase.Main)) return;
       if (!isInstant0 && e0.instantWindow !== null && e0.instantWindow !== Side.Player) return;
       // если это был настоящий перенос (указатель уехал далеко) — клик не разыгрываем
@@ -2588,6 +3012,7 @@ class Battle {
       if (this.busy || !this.running) return;
       const e = this.engine!;
       const isInstantDown = card.type === CardType.Spell && card.subtype === SpellSubtype.Instant;
+      if (!this.canPlayAtPriority(card, e)) { this.flashHint('Дождитесь своего приоритета в стеке'); return; }
       if (!isInstantDown && (e.activeSide !== Side.Player || e.phase !== Phase.Main)) return;
       if (!isInstantDown && e.instantWindow !== null && e.instantWindow !== Side.Player) return;
       const chk = e.canPlay(Side.Player, index);
@@ -2633,7 +3058,8 @@ class Battle {
       this.autoToken = '';
       return;
     }
-    const myMain = this.running && !this.busy && e.activeSide === Side.Player
+    const myMain = this.running && !this.busy && (!this.net || this.net.isReady()) && !this.stackBusy
+      && e.stack.length === 0 && e.instantWindow === null && e.activeSide === Side.Player
       && e.phase === Phase.Main && !this.pendingTarget;
     let idle = false;
     if (myMain) {
@@ -2648,7 +3074,8 @@ class Battle {
   }
   private autoTurnFire(): void {
     const e = this.engine;
-    const myMain = e && this.running && !this.busy && e.activeSide === Side.Player
+    const myMain = e && this.running && !this.busy && (!this.net || this.net.isReady()) && !this.stackBusy
+      && e.stack.length === 0 && e.instantWindow === null && e.activeSide === Side.Player
       && e.phase === Phase.Main && !this.pendingTarget;
     if (!myMain || !this.autoToken) {
       if (this.autoTimer !== null) { window.clearInterval(this.autoTimer); this.autoTimer = null; }
@@ -2666,27 +3093,33 @@ class Battle {
     this.endTurnNow();
   }
 
-  /** Аватар героя из папки художника art_raw/heroes/<Faction>/: тянется и масштабируется оттуда. */
-  private setPortrait(hostId: string, faction: Faction): void {
+  /** Герой игрока берётся из отдельной папки deck_heroes; соперник использует базовый портрет фракции. */
+  private setPortrait(hostId: string, faction: Faction, heroId: string = faction): void {
     const host = $(hostId);
     if (!host) return;
     const img = document.createElement('img');
+    const sources = [...new Set([
+      `/deck-heroes/${encodeURIComponent(heroId)}`,
+      `/heroes/${encodeURIComponent(faction)}`,
+    ])];
+    let sourceIndex = 0;
     img.alt = '';
-    img.src = `/heroes/${encodeURIComponent(faction)}`;
-    img.addEventListener('error', () => { host.innerHTML = `<span class="sigFall">${FACTION_SIGIL[faction] ?? '✦'}</span>`; });
+    img.src = sources[sourceIndex]!;
+    img.addEventListener('error', () => {
+      sourceIndex += 1;
+      if (sourceIndex < sources.length) { img.src = sources[sourceIndex]!; return; }
+      host.innerHTML = `<span class="sigFall">${FACTION_SIGIL[faction] ?? '✦'}</span>`;
+    });
     host.innerHTML = '';
     host.appendChild(img);
   }
 
   private renderGraveZone(side: Side, host: HTMLElement, count: number): void {
-    // стопка рубашек вверх в размер карты, как в MTG: толщина растёт до 3 слоёв
+    void side; // зона кладбища кликается отдельно; счётчик уже показан в соседнем .pcount
+    // Колода и кладбище используют одни и те же рубашки/слои, без дублирующего бейджа внутри стопки.
     const want = Math.min(3, count);
     if (host.querySelectorAll('.cardback').length !== want) {
-      host.innerHTML = Array.from({ length: want }, () => '<div class="cardback"></div>').join('')
-        + `<span class="gcount">${count}</span>`;
-    } else {
-      const gc = host.querySelector('.gcount');
-      if (gc) gc.textContent = String(count);
+      host.innerHTML = Array.from({ length: want }, () => '<div class="cardback"></div>').join('');
     }
   }
 
@@ -2722,14 +3155,17 @@ class Battle {
 
   private clearHighlights(): void {
     this.aimStop();
+    this.clearCombatForecast();
     document.querySelectorAll('.targetable').forEach(x => x.classList.remove('targetable'));
     document.querySelectorAll('.droppable').forEach(x => x.classList.remove('droppable'));
     document.querySelectorAll('.unit').forEach(x => ((x as HTMLElement).style.outline = ''));
   }
 
-  private resolveDrop(x: number, y: number, card: CardData): { ok: boolean; uid?: number; side?: Side; reason?: string } {
+  private resolveDrop(x: number, y: number, card: CardData, handIndex: number): { ok: boolean; uid?: number; side?: Side; reason?: string } {
     const e = this.engine!;
     document.querySelectorAll('.unit').forEach(u => ((u as HTMLElement).style.outline = ''));
+    const currentCheck = e.canPlay(Side.Player, handIndex);
+    if (!currentCheck.ok) return { ok: false, reason: currentCheck.reason ?? 'Нельзя разыграть' };
     const under = document.elementFromPoint(x, y);
     if (card.target === TargetKind.None) return { ok: true };
 
@@ -2764,6 +3200,7 @@ class Battle {
     if (index < 0 || index >= pl.hand.length) return;
     const card = db.get(pl.hand[index]);
     if (!card) return;
+    if (!this.canPlayAtPriority(card, e)) { this.flashHint('Дождитесь своего приоритета в стеке'); return; }
     const node = this.handNodes[index];
     if (node) {
       hideZoom();
@@ -2778,13 +3215,16 @@ class Battle {
   }
 
   private async onClickCard(index: number, card: CardData, reason: string): Promise<void> {
-    const e = this.engine!;
+    const e = this.engine;
+    if (!e || !this.canPlayAtPriority(card, e)) { this.flashHint('Дождитесь своего приоритета в стеке'); return; }
     const chk = e.canPlay(Side.Player, index);
     if (!chk.ok) { this.flashHint(chk.reason ?? reason ?? 'Нельзя разыграть'); return; }
     if (card.target === TargetKind.None || !chk.needsTarget) { await this.playCard(index); return; }
 
     const valid = e.validTargets(Side.Player, card);
-    if (valid.length === 0) { await this.playCard(index); return; }
+    // Состояние могло измениться после общей проверки: никогда не разыгрываем
+    // карту как fallback, если обязательная выбираемая цель уже исчезла.
+    if (valid.length === 0) { this.flashHint('Нет допустимой цели'); return; }
     this.flashHint(`Выберите цель для «${card.name}»… (Esc / ПКМ — отмена, цель — своя или чужая)`);
     this.highlightTargets(card);
     this.aimStart(this.handNodes[index] ? Vfx.centerOf(this.handNodes[index]) : Vfx.centerOf($('playerHero'), 0.42));
@@ -2811,6 +3251,7 @@ class Battle {
       if (node?.classList.contains('targetable')) this.pendingTarget(uid, side);
       return;
     }
+    if (this.busy || this.stackBusy || this.net && !this.net.isReady() || (this.engine?.stack.length ?? 0) > 0) return;
     if (this.pendingAttack !== null) {
       if (side === Side.Opponent && this.unitNodes.get(uid)?.classList.contains('targetable')) {
         void this.resolveManualAttack(uid, false);
@@ -2823,35 +3264,26 @@ class Battle {
   }
 
   private async playCard(index: number, uid?: number, side?: Side): Promise<void> {
-    const e = this.engine!;
+    const e = this.engine;
+    if (!e || this.busy || !this.running) return;
     const pl = e.p(Side.Player);
     const card = db.get(pl.hand[index]);
-    const node = this.handNodes[index];
-    if (node && card) {
-      const r = node.getBoundingClientRect();
-      const ghost = el('div', 'card flying');
-      ghost.innerHTML = node.innerHTML;
-      ghost.style.width = r.width + 'px'; ghost.style.height = r.height + 'px';
-      ghost.style.left = r.left + 'px'; ghost.style.top = r.top + 'px';
-      document.body.appendChild(ghost);
-      node.style.opacity = '0';
-      const dest = (card.type === CardType.Creature || card.type === CardType.Rune ? $('playerBoard') : $('enemyBoard')).getBoundingClientRect();
-      await sleep(16);
-      ghost.style.transform = `translate(${dest.left + dest.width / 2 - (r.left + r.width / 2)}px, ${dest.top + 26 - r.top}px) scale(.5) rotate(-5deg)`;
-      ghost.style.opacity = '0.1';
-      setTimeout(() => ghost.remove(), 330);
-    }
+    if (!card || !this.canPlayAtPriority(card, e)) return;
+    const isInstant = card.type === CardType.Spell && card.subtype === SpellSubtype.Instant;
     const played = e.playCard(Side.Player, index, uid, side);
     if (!played) this.flashHint('Движок отклонил розыгрыш');
     else {
+      // Приоритет уступается сразу после розыгрыша: ответ/разрешение не ждёт конца хода.
+      if (isInstant && e.instantWindow === Side.Player) this.finishInstantWindow('acted');
       this.netAct('play', { index, uid, side });
-      Sfx.cardPlay(card?.cost ?? 3);
-      const zone = card && (card.type === CardType.Creature || card.type === CardType.Rune) ? $('playerBoard') : $('enemyBoard');
-      Vfx.screenFlash(paletteOf((card?.faction as string) ?? Faction.Neutral).primary, 0.1, 200);
-      Vfx.impactRing(Vfx.centerOf(zone), paletteOf((card?.faction as string) ?? Faction.Neutral).secondary, 120);
+      Sfx.cardPlay(card.cost ?? 3);
+      const zone = card.type === CardType.Creature || card.type === CardType.Rune ? $('playerBoard') : $('enemyBoard');
+      Vfx.screenFlash(paletteOf(card.faction as string).primary, 0.1, 200);
+      Vfx.impactRing(Vfx.centerOf(zone), paletteOf(card.faction as string).secondary, 120);
     }
     this.renderAll();
-    await sleep(280);
+    await this.waitForStack();
+    await sleep(120);
   }
 
   private manaDeny(reason?: string): void {
@@ -2878,7 +3310,10 @@ class Battle {
     const e = this.engine;
     if (!e) return;
     this.autoTurnPlan();
-    const myMain = this.running && !this.busy && e.activeSide === Side.Player && e.phase === Phase.Main;
+    const connected = !this.net || this.net.isReady();
+    const stackOpen = this.stackBusy || e.stack.length > 0;
+    const myMain = this.running && !this.busy && connected && !stackOpen && e.instantWindow === null
+      && e.activeSide === Side.Player && e.phase === Phase.Main;
     btn('btnEndTurn').disabled = !myMain;
     btn('btnSkip').disabled = !myMain;
     const echo = e.canUseEcho(Side.Player);
@@ -2887,36 +3322,73 @@ class Battle {
       ? `◈ Эхо: повторить «${(echo.card as CardData).name}» (очков ${e.p(Side.Player).echoPoints})`
       : '◈ Использовать Эхо';
     btn('btnEcho').title = echo.reason ?? 'Бесплатно повторить последнее разыгранное заклинание (один раз за игру)';
-    // v3.17: кнопки боевой фазы резервируют место (visibility, а не display) —
-    // панель действий не «прыгает» при смене фаз
+    const fc = btn('btnFullControl');
+    const fullControlUnavailable = !!this.net || this.launchMode === 'tut';
+    const fullControlActive = !!settings.fullControl && !fullControlUnavailable;
+    fc.classList.toggle('on', fullControlActive);
+    fc.setAttribute('aria-pressed', String(fullControlActive));
+    fc.disabled = !this.running || fullControlUnavailable;
+    fc.textContent = settings.fullControl
+      ? fullControlUnavailable
+        ? bi('◉ Полный контроль: недоступен', '◉ Full Control: unavailable')
+        : bi('◉ Полный контроль: ВКЛ', '◉ Full Control: ON')
+      : bi('◯ Полный контроль', '◯ Full Control');
+    fc.title = fullControlUnavailable
+      ? bi('Паузы Full Control доступны в локальных матчах; сетевой приоритет и обучение пока работают по своим правилам.',
+        'Full Control stops are available in local matches; online priority and tutorials use their own flow for now.')
+      : bi('Останавливать приоритет в каждом окне отклика, даже если нет доступных мгновенных заклинаний. Перекрывает авто-приоритет.',
+        'Stop at every priority window, even with no playable instants. Overrides Auto-Pass.');
+    // Кнопки боевой фазы резервируют место; пока стек/сеть заняты — никакие атаки не отправляем.
     const ab = btn('btnAutoBattle');
     ab.classList.toggle('inv', !this.inCombatWindow);
-    ab.disabled = !this.inCombatWindow;
+    ab.disabled = !this.inCombatWindow || !connected || stackOpen;
     const sc = btn('btnSkipCombat');
     sc.classList.toggle('inv', !this.inCombatWindow);
-    sc.disabled = !this.inCombatWindow;
-    const aa = btn('btnAttackAll');   // v3.17: «Атака всеми»
+    sc.disabled = !this.inCombatWindow || !connected || stackOpen;
+    const aa = btn('btnAttackAll');
     aa.classList.toggle('inv', !this.inCombatWindow);
-    aa.disabled = !this.inCombatWindow || this.busy || (this.engine ? this.readyAttackerUids().length === 0 : true);
+    aa.disabled = !this.inCombatWindow || !connected || stackOpen || this.busy
+      || (this.engine ? this.readyAttackerUids().length === 0 : true);
+
+    const hint = $('actionHint');
+    if (!connected) {
+      this.clearThinkWatch();
+      hint.style.color = '';
+      hint.textContent = '📡 Связь с матчем потеряна — ждём переподключения…';
+      return;
+    }
+    if (stackOpen) {
+      this.clearThinkWatch();
+      hint.style.color = '';
+      hint.textContent = e.instantWindow === Side.Player
+        ? '⚡ Ваш приоритет: сыграйте мгновенное заклинание или нажмите «Пас»'
+        : 'Разрешается стек — действия возобновятся сразу после эффекта';
+      return;
+    }
+    if (e.instantWindow === Side.Player) {
+      this.clearThinkWatch();
+      hint.style.color = '';
+      hint.textContent = '⚡ Ваш приоритет: мгновенное заклинание или «Пас»';
+      return;
+    }
     if (this.inCombatWindow) {
       const n = this.readyAttackerUids().length;
       if (!this.massAttack) {
-        $('actionHint').textContent = n > 0
+        hint.textContent = n > 0
           ? `⚔ Фаза боя: ${n} готовых к атаке · клик по своему → цель · «Атака всеми» — все подряд`
           : 'Фаза боя: нечем атаковать — «Пропустить бой» или Space';
       }
       this.armThinkWatch();
       return;
     }
-    if ($('actionHint').style.color) return;
+    if (hint.style.color) return;
     if (this.thinkOn) {
-      /* v3.17.3: подсказка активна — фоновые перерисовки не затирают её текст/свечение,
-         пока ход игрока; иначе гасим и пишем обычный статус */
-      const still = this.running && !this.busy && e?.activeSide === Side.Player && e?.phase === Phase.Main;
+      const still = this.running && !this.busy && connected && !stackOpen
+        && e.instantWindow === null && e.activeSide === Side.Player && e.phase === Phase.Main;
       if (still) return;
       this.clearThinkWatch();
     }
-    $('actionHint').textContent = myMain
+    hint.textContent = myMain
       ? 'Перетащите карту на поле или на цель · Пробел — завершить ход · E — Эхо'
       : 'Ожидание…';
     this.armThinkWatch();
@@ -2934,7 +3406,9 @@ class Battle {
       const h = $('actionHint');
       if (h.textContent?.startsWith('💡')) {
         const e = this.engine;
-        const myMain = this.running && !this.busy && e?.activeSide === Side.Player && e?.phase === Phase.Main;
+        const myMain = this.running && !this.busy && (!this.net || this.net.isReady()) && !this.stackBusy
+          && !!e && e.stack.length === 0 && e.instantWindow === null
+          && e.activeSide === Side.Player && e.phase === Phase.Main;
         h.textContent = myMain
           ? 'Перетащите карту на поле или на цель · Пробел — завершить ход · E — Эхо'
           : 'Ожидание…';
@@ -2945,7 +3419,9 @@ class Battle {
   private armThinkWatch(): void {
     this.clearThinkWatch();   /* v3.17.3: подсветка живёт только до первого действия игрока */
     const e = this.engine;
-    const myMain = this.running && !this.busy && e?.activeSide === Side.Player && e?.phase === Phase.Main;
+    const myMain = this.running && !this.busy && (!this.net || this.net.isReady()) && !this.stackBusy
+      && !!e && e.stack.length === 0 && e.instantWindow === null
+      && e.activeSide === Side.Player && e.phase === Phase.Main;
     if (!myMain || this.tutLesson) { return; }
     if (!this.thinkHooks) {
       this.thinkHooks = true;
@@ -2962,7 +3438,9 @@ class Battle {
       this.thinkTimer = null;
       /* v3.17.3: перепроверяем, что всё ещё ход игрока (всплывающие баннеры фаз и т.п.) */
       const eng = this.engine;
-      const still = this.running && !this.busy && eng?.activeSide === Side.Player && eng?.phase === Phase.Main;
+      const still = this.running && !this.busy && (!this.net || this.net.isReady()) && !this.stackBusy
+        && !!eng && eng.stack.length === 0 && eng.instantWindow === null
+        && eng.activeSide === Side.Player && eng.phase === Phase.Main;
       if (!still || this.tutLesson) return;
       const cards = [...document.querySelectorAll('#hand .card')]
         .filter(n => !n.classList.contains('unplayable') && !n.classList.contains('tilting'));
@@ -2987,9 +3465,10 @@ class Battle {
         return;
       }
     }
-    this.ropeStop();
     const e = this.engine;
-    if (!e || this.busy || e.activeSide !== Side.Player || e.phase !== Phase.Main) return;
+    if (!e || this.busy || this.stackBusy || e.stack.length > 0 || e.instantWindow !== null
+      || this.net && !this.net.isReady() || e.activeSide !== Side.Player || e.phase !== Phase.Main) return;
+    this.ropeStop();
     this.turnDone?.();
   }
 
@@ -3006,11 +3485,13 @@ class Battle {
   private tutCheck(): void {
     if (!this.tutLesson || !this.tutOk()) return;
     const n = this.tutLesson;
+    const introTrial = !meta.introComplete;
     this.tutLesson = 0;
     this.tutCleanup();
     tutCoachHide();
     meta.tutStage = Math.max(meta.tutStage ?? 0, n);
-    meta.tutDone = true;
+    meta.tutDone = introTrial ? meta.tutStage >= LESSONS.length : true;
+    if (introTrial) meta.introStep = 3;
     const rw = n === 3 ? 150 : 100;
     const first = !(meta.tutClaims ?? []).includes(n);
     if (first) {
@@ -3019,8 +3500,16 @@ class Battle {
     }
     metaSave();
     tutGatePractice();
-    showToast(`🎓 ${LESSONS[n - 1].ru} выполнен!${first ? ` +🪙${rw}` : ''}` +
-      (n >= 4 && !meta.tutReward ? ' · Заберите награду в меню «🎓 Обучение»' : ''));
+    const nextText = introTrial
+      ? (n < LESSONS.length ? ` · Следом: ${LESSONS[n].ru}` : ' · Все испытания пройдены — выберите стартовую колоду')
+      : (n >= 4 && !meta.tutReward ? ' · Заберите награду в меню «🎓 Обучение»' : '');
+    showToast(`🎓 ${LESSONS[n - 1].ru} выполнен!${first ? ` +🪙${rw}` : ''}${nextText}`);
+    if (introTrial) {
+      this.setBusy(true);
+      window.setTimeout(() => {
+        if (!meta.introComplete && this.engine && this.tutLesson === 0) openHomeScreen();
+      }, 650);
+    }
   }
 
   /* -------- спека «6. Обучение»: пошаговые уроки (20 шагов, зеркало tutorial.json) -------- */
@@ -3144,7 +3633,8 @@ class Battle {
   /** Публичное использование Эха. */
   async useEchoNow(): Promise<void> {
     const e = this.engine;
-    if (!e || this.busy || e.activeSide !== Side.Player || e.phase !== Phase.Main) return;
+    if (!e || this.busy || this.stackBusy || e.stack.length > 0 || e.instantWindow !== null
+      || this.net && !this.net.isReady() || e.activeSide !== Side.Player || e.phase !== Phase.Main) return;
     const chk = e.canUseEcho(Side.Player);
     if (!chk.ok) { this.flashHint(chk.reason ?? 'Эхо недоступно'); return; }
     const card = chk.card as CardData;
@@ -3199,6 +3689,7 @@ class Battle {
   private async netSetup(): Promise<void> {
     const e = this.engine!, net = this.net!;
     net.onNeedSync = () => { if (this.engine) net.send({ k: 'sync', st: this.engine.exportState() }); };
+    net.onSync = m => { if (this.engine) this.netApply(m.st as EngineNetState | undefined); };
     pushLog(`⚔ Онлайн-матч: вы против ${net.opp.name} (${FACTION_RU[this.enemyFaction]}) · ${net.mode === 'ranked' ? 'рейтинговый' : net.mode === 'friendly' ? 'дружеский' : 'обычный'}`, 'big');
     this.setWho('Подготовка матча…');
     e.setup();
@@ -3254,6 +3745,7 @@ class Battle {
           this.netApply(st);
           break;
         } else if (m.k === 'sync') { this.netApply(st); if (e.activeSide === Side.Player) break; }
+        else if (m.k === 'syncApplied') { if (e.activeSide === Side.Player) break; }
       } catch (err) {
         // локальный повтор не удался — не страшно: снимок соперника всё равно главный
         console.warn('[net] replay', m.k, err); this.netApply(st);
@@ -3272,6 +3764,22 @@ class Battle {
     this.lastWasNet = true;
     window.setTimeout(() => { net.close(); if (this.net === net) this.net = null; void onlineRefreshAfterMatch(); }, 4000);
   }
+  /** Связь матча потеряна/восстановлена: блокируем ввод до синхронизации сокета. */
+  onNetConnection(connected: boolean): void {
+    const net = this.net;
+    if (!net || net.isReady() !== connected || net.overInfo || (!connected && net.closed)) return;
+    if (connected) {
+      pushLog('📡 Связь с матчем восстановлена', 'phase');
+      showToast('📡 Соединение восстановлено');
+    } else {
+      pushLog('📡 Связь потеряна — ждём переподключения', 'big');
+      showToast('📡 Связь потеряна — действия временно приостановлены');
+      this.ropeStop();
+      if (this.pendingTarget) { this.pendingTarget(null, null); this.pendingTarget = null; this.clearHighlights(); }
+    }
+    this.renderAll();
+  }
+
   /** Сервер завершил матч (сдача / обрыв / сверка итогов). */
   netServerOver(winnerSeat: number | null, reason: string): void {
     const e = this.engine, net = this.net;
@@ -3436,11 +3944,21 @@ window.addEventListener('pointerdown', unlockAudio);
 /*  Мета-игра: профиль, XP/лиги, дейлики, кампания, рубашки, история       */
 /* ---------------------------------------------------------------------- */
 interface Quest { id: string; prog: number; goal: number; claimed: boolean; fac?: string }
+interface ReplayLine { turn: number; text: string; type?: GameEventType; side?: Side; cardName?: string; value?: number; absorbed?: boolean }
+interface ReplayRecord {
+  ts: number; win: boolean; fac: string; turns: number; foe: string;
+  result?: GameResult; opponentFaction?: string;
+  stats?: { player?: Partial<MatchStats>; opponent?: Partial<MatchStats>; durationSecs?: number };
+  /** Legacy saves use [turn, text] tuples; the viewer continues to read both formats. */
+  lines: Array<ReplayLine | [number, string]>;
+}
 interface MetaState {
   xp: number; wins: number; losses: number; mmr: number; packs: number;
   facW: Record<string, number>; facL: Record<string, number>;
   history: Array<{ ts: number; win: boolean; fac: string; turns: number; foe?: string; efac?: string; practice?: boolean }>;
   tutDone: boolean; campaign: Record<string, boolean>; starter: boolean;
+  /** Первый сюжетный вход и доступ к пяти базовым стартовым колодам. */
+  introComplete: boolean; starterDecksUnlocked: boolean; introStep: number; introFaction: string; introFactionsSeen: string[];
   backsOwned: string[]; backEq: string;
   questDate: string; quests: Quest[]; ach: Record<string, boolean>; bpClaimed: number[];
   telem?: Array<{ ts: number; fac: string; win: boolean; turns: number; secs: number;
@@ -3451,11 +3969,13 @@ interface MetaState {
   lastSynced?: { shards: number; gems: number; freeOpens: number; mmr: number; wins: number; losses: number; bpXp: number };   // v3.15.3: база дельта-синка валюты
   freeOpens: number; bundles: string[]; tableSkin: string; runeSkin: string; avatarsOwned: string[]; setsOwned: string[];
   borderlessOwned: string[]; borderlessEquipped: string[]; borderlessEventWins: number; borderlessEventClaimed: boolean;
+  /** Собственность каталога героев колод; отдельно от профильных avatarsOwned/avatarFac. */
+  deckHeroesOwned: string[]; deckHeroes: Record<string, string>;
   tablesOwned: string[]; runesOwned: string[];
   friends: Array<{ nick: string; ts: number }>;
   campStars: Record<string, number>; loreRead: string[]; tutStage: number; tutReward: string; tutClaims: number[];
   wquestWeek: string; wquests: Quest[];
-  replays: Array<{ ts: number; win: boolean; fac: string; turns: number; foe: string; lines: Array<[number, string]> }>;
+  replays: ReplayRecord[];
 }
 const META_KEY = 'ec_meta_v1';
 const DAILY_REWARD: Record<string, number> = { win_fac: 200, creatures: 200, runes: 120, pack: 80 };
@@ -3519,13 +4039,16 @@ const WQUEST_RU: Record<string, string> = {
 
 const META_DEFAULT: MetaState = {
   xp: 0, wins: 0, losses: 0, mmr: 1000, packs: 0, facW: {}, facL: {}, history: [],
-  tutDone: false, campaign: {}, starter: false, backsOwned: ['classic'], backEq: 'classic',
+  tutDone: false, campaign: {}, starter: false,
+  introComplete: false, starterDecksUnlocked: false, introStep: 0, introFaction: 'Aurites', introFactionsSeen: [],
+  backsOwned: ['classic'], backEq: 'classic',
   questDate: todayStr(), quests: freshQuests(), ach: {}, bpClaimed: [],
   nick: 'Гость', avatarFac: 'Aurites', frame: 'bronze', gems: 500, signedIn: false, pid: '',
   bpXp: 0, bpClaimedP: [], bpPremium: false, seasonStart: 0, bestMmr: 1000,
   foilTokens: 0, premOpens: 1,
   freeOpens: 5, bundles: [], tableSkin: 'classic', runeSkin: 'classic', avatarsOwned: [], setsOwned: [],
   borderlessOwned: [], borderlessEquipped: [], borderlessEventWins: 0, borderlessEventClaimed: false,
+  deckHeroesOwned: [], deckHeroes: {},
   tablesOwned: [], runesOwned: [],
   friends: [], campStars: {}, loreRead: [], tutStage: 0, tutReward: '', tutClaims: [],
   wquestWeek: '', wquests: [], replays: [],
@@ -3551,6 +4074,11 @@ function metaLoad(): void {
     if (raw) {
       const saved = JSON.parse(raw) as Partial<MetaState>;
       meta = { ...freshMeta(), ...saved };
+      // Профили, существовавшие до вступительного сюжета, не блокируются повторно.
+      if (!Object.prototype.hasOwnProperty.call(saved, 'introComplete')) {
+        meta.introComplete = true;
+        meta.starterDecksUnlocked = true;
+      }
       // Старые аккаунты не получают повторный стартовый грант из новых defaults.
       if (saved.gems == null) meta.gems = 100;
       if (saved.freeOpens == null) meta.freeOpens = 0;
@@ -3570,8 +4098,27 @@ function metaLoad(): void {
   if (meta.foilTokens == null) meta.foilTokens = 0;
   if (meta.premOpens == null) meta.premOpens = 0;
   if (!meta.tutClaims) meta.tutClaims = [];
+  if (!Array.isArray(meta.replays)) meta.replays = [];
+  if (!Number.isInteger(meta.introStep) || meta.introStep < 0 || meta.introStep > 3) meta.introStep = 0;
+  if (!FACTION_IDS.includes(meta.introFaction as Faction)) meta.introFaction = 'Aurites';
+  if (!Array.isArray(meta.introFactionsSeen)) meta.introFactionsSeen = [];
+  if (meta.tutReward) { meta.introComplete = true; meta.starterDecksUnlocked = true; }
+  if (meta.introComplete) meta.starterDecksUnlocked = true;
   if (!Array.isArray(meta.borderlessOwned)) meta.borderlessOwned = [];
   if (!Array.isArray(meta.borderlessEquipped)) meta.borderlessEquipped = [];
+  if (!Array.isArray(meta.deckHeroesOwned)) meta.deckHeroesOwned = [];
+  meta.deckHeroesOwned = [...new Set(meta.deckHeroesOwned.filter(id => {
+    const hero = DECK_HERO_BY_ID.get(id);
+    return !!hero && hero.tier !== 'standard';
+  }))];
+  if (!meta.deckHeroes || typeof meta.deckHeroes !== 'object' || Array.isArray(meta.deckHeroes)) meta.deckHeroes = {};
+  const safeDeckHeroes: Record<string, string> = {};
+  for (const [deckId, heroId] of Object.entries(meta.deckHeroes)) {
+    if (/^[A-Za-z0-9_-]{1,120}$/.test(deckId) && typeof heroId === 'string' && DECK_HERO_BY_ID.has(heroId)) {
+      safeDeckHeroes[deckId] = heroId;
+    }
+  }
+  meta.deckHeroes = safeDeckHeroes;
   if (!Number.isFinite(meta.borderlessEventWins)) meta.borderlessEventWins = 0;
   if (typeof meta.borderlessEventClaimed !== 'boolean') meta.borderlessEventClaimed = false;
   if (Date.now() > meta.seasonStart + SEASON_MS) {
@@ -3588,6 +4135,11 @@ function metaLoad(): void {
   }
 }
 function metaSave(): void { try { window.localStorage.setItem(META_KEY, JSON.stringify(meta)); } catch { void 0; } scheduleSync(); }
+function requireStarterDeckUnlock(): boolean {
+  if (meta.starterDecksUnlocked) return true;
+  openIntroFlow();
+  return false;
+}
 function syncQuestPeriods(): boolean {
   let changed = false;
   const today = todayStr();
@@ -3598,6 +4150,39 @@ function syncQuestPeriods(): boolean {
   return changed;
 }
 metaLoad();
+
+function defaultDeckHeroForFaction(faction: string): DeckHeroDefinition | undefined {
+  return deckHeroesForFaction(faction).find(hero => hero.tier === 'standard');
+}
+function isDeckHeroUnlocked(heroId: string): boolean {
+  const hero = DECK_HERO_BY_ID.get(heroId);
+  return !!hero && (hero.tier === 'standard' || (meta.deckHeroesOwned ?? []).includes(heroId));
+}
+function resolveDeckHero(heroId: string | null | undefined, faction: string): DeckHeroDefinition | undefined {
+  const selected = heroId ? DECK_HERO_BY_ID.get(heroId) : undefined;
+  if (selected && selected.faction === faction && isDeckHeroUnlocked(selected.id)) return selected;
+  return defaultDeckHeroForFaction(faction);
+}
+function deckHeroForDeck(deckId: string, faction: string): DeckHeroDefinition | undefined {
+  return resolveDeckHero(meta.deckHeroes?.[deckId], faction);
+}
+function deckHeroIdForDeck(deckId: string, faction: string): string | undefined {
+  return deckHeroForDeck(deckId, faction)?.id;
+}
+function saveDeckHeroSelection(deckId: string, faction: string, heroId: string, shouldSave = true): boolean {
+  const hero = DECK_HERO_BY_ID.get(heroId);
+  if (!hero || hero.faction !== faction || !isDeckHeroUnlocked(heroId)) return false;
+  meta.deckHeroes = { ...(meta.deckHeroes ?? {}), [deckId]: hero.id };
+  if (shouldSave) metaSave();
+  return true;
+}
+function forgetDeckHeroSelection(deckId: string): void {
+  if (!meta.deckHeroes?.[deckId]) return;
+  const next = { ...meta.deckHeroes };
+  delete next[deckId];
+  meta.deckHeroes = next;
+  metaSave();
+}
 
 /* Borderless — только альтернативный внешний вид тех же карт: id, правила,
    стоимость, владение обычной копией и колоды не меняются. */
@@ -3646,12 +4231,46 @@ function toggleBorderless(id: string): boolean {
 /* ---- Синхронизация с сервером (спека «2. Профиль»): meta_server :8081, best-effort.
    localStorage остаётся источником истины (офлайн-игра); сервер — зеркало профиля,
    реестр никнеймов и клеймы квестов. Троттлинг 1.5с: metaSave() вызывается часто. ---- */
-const META_API = (): string => `http://${window.location.hostname}:8081`;
+type ClientRuntimeConfig = { metaApiBase?: string; matchApiBase?: string; matchWsUrl?: string };
+const CLIENT_RUNTIME_CONFIG = (window as unknown as { EC_CONFIG?: ClientRuntimeConfig }).EC_CONFIG ?? {};
+const clientUrlParams = new URLSearchParams(window.location.search);
+function storedClientUrl(key: string): string {
+  try { return window.localStorage.getItem(key)?.trim() ?? ''; } catch { return ''; }
+}
+function normalizedApiBase(raw: string): string {
+  if (!raw) return '';
+  try {
+    const u = new URL(raw, window.location.href);
+    if ((u.protocol !== 'http:' && u.protocol !== 'https:') || u.username || u.password) return '';
+    // Do not generate mixed-content fetches from HTTPS; invalid explicit config falls back safely.
+    if (window.location.protocol === 'https:' && u.protocol !== 'https:') return '';
+    return u.href.replace(/\/+$/, '');
+  } catch { return ''; }
+}
+const META_API = (): string => {
+  const configured = clientUrlParams.get('api') || storedClientUrl('ec_meta_api') || CLIENT_RUNTIME_CONFIG.metaApiBase || '';
+  const base = normalizedApiBase(configured);
+  if (base) return base;
+  // Local HTTP development keeps the existing split-port setup; HTTPS deployments use
+  // same-origin reverse-proxy routes unless a public API origin is explicitly configured.
+  if (window.location.protocol === 'https:') return window.location.origin;
+  return `${window.location.protocol || 'http:'}//${window.location.hostname || 'localhost'}:8081`;
+};
+const MATCH_HTTP_API = (): string => {
+  const configured = clientUrlParams.get('matchApi') || storedClientUrl('ec_match_api') || CLIENT_RUNTIME_CONFIG.matchApiBase || '';
+  const base = normalizedApiBase(configured);
+  if (base) return base;
+  if (window.location.protocol === 'https:') return window.location.origin;
+  return `${window.location.protocol || 'http:'}//${window.location.hostname || 'localhost'}:8080`;
+};
 /* ---- JWT-авторизация клиента: access (короткий) + refresh (ротация) ---- */
 const AUTH_KEY = 'ec_auth_v1';
 interface AuthTokens { accessToken: string; refreshToken: string; exp: number }
 function authGet(): AuthTokens | null {
-  try { const a = JSON.parse(window.localStorage.getItem(AUTH_KEY) || 'null') as AuthTokens | null; return a && a.accessToken ? a : null; } catch { return null; }
+  try {
+    const a = JSON.parse(window.localStorage.getItem(AUTH_KEY) || 'null') as AuthTokens | null;
+    return a && typeof a.accessToken === 'string' && typeof a.refreshToken === 'string' ? a : null;
+  } catch { return null; }
 }
 function authSet(j: { accessToken?: string; refreshToken?: string; expiresIn?: number } | null): void {
   try {
@@ -3660,31 +4279,85 @@ function authSet(j: { accessToken?: string; refreshToken?: string; expiresIn?: n
   } catch { void 0; }
 }
 let authRefreshing: Promise<boolean> | null = null;
+const AUTH_REFRESH_LOCK = 'ec_auth_refresh_lock_v1';
+type AuthRefreshLease = { owner?: string; exp?: number };
+function waitMs(ms: number): Promise<void> { return new Promise(resolve => window.setTimeout(resolve, ms)); }
+async function authRefreshRequest(tokens: AuthTokens): Promise<boolean> {
+  const ctl = new AbortController();
+  const timeout = window.setTimeout(() => ctl.abort(), 10_000);
+  try {
+    const r = await window.fetch(`${META_API()}/api/auth/refresh`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, signal: ctl.signal,
+      body: JSON.stringify({ refreshToken: tokens.refreshToken }), cache: 'no-store',
+    });
+    const j = await r.json().catch(() => ({})) as { accessToken?: string; refreshToken?: string; expiresIn?: number };
+    if (!r.ok) { if (r.status === 401) { authSet(null); authExpired(); } return false; }
+    if (!j.accessToken || !j.refreshToken) return false;
+    authSet(j);
+    return true;
+  } catch { return false; } finally { window.clearTimeout(timeout); }
+}
+async function authRefreshExclusive(initialRefreshToken: string): Promise<boolean> {
+  const underLock = async (): Promise<boolean> => {
+    const latest = authGet();
+    if (!latest) return false;
+    // Another tab may already have rotated the token while this tab waited for the lock.
+    if (latest.refreshToken !== initialRefreshToken && Number.isFinite(latest.exp) && latest.exp > Date.now() + 30_000) return true;
+    return authRefreshRequest(latest);
+  };
+  const locks = (navigator as unknown as { locks?: { request: <T>(name: string, cb: () => Promise<T>) => Promise<T> } }).locks;
+  if (locks?.request) {
+    try { return await locks.request(AUTH_REFRESH_LOCK, underLock); } catch { /* fall through to localStorage lease */ }
+  }
+  // Cross-tab lease fallback for browsers without Web Locks. The server also has a short
+  // idempotency grace for same-token races, so a tab crash cannot revoke every session.
+  const owner = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  const deadline = Date.now() + 18_000;
+  const store = (): Storage | null => { try { return window.localStorage; } catch { return null; } };
+  const storage = store();
+  if (!storage) return underLock();
+  while (Date.now() < deadline) {
+    const latest = authGet();
+    if (!latest) return false;
+    if (latest.refreshToken !== initialRefreshToken && Number.isFinite(latest.exp) && latest.exp > Date.now() + 30_000) return true;
+    let lease: AuthRefreshLease | null = null;
+    try { lease = JSON.parse(storage.getItem(AUTH_REFRESH_LOCK) || 'null') as AuthRefreshLease | null; } catch { lease = null; }
+    if (!lease || !lease.owner || (lease.exp ?? 0) < Date.now() || lease.owner === owner) {
+      try { storage.setItem(AUTH_REFRESH_LOCK, JSON.stringify({ owner, exp: Date.now() + 15_000 })); } catch { return underLock(); }
+      await waitMs(35 + Math.random() * 35);
+      let verifyLease: AuthRefreshLease | null = null;
+      try { verifyLease = JSON.parse(storage.getItem(AUTH_REFRESH_LOCK) || 'null') as AuthRefreshLease | null; } catch { verifyLease = null; }
+      if (verifyLease?.owner === owner) {
+        try { return await underLock(); }
+        finally {
+          try {
+            const current = JSON.parse(storage.getItem(AUTH_REFRESH_LOCK) || 'null') as { owner?: string } | null;
+            if (current?.owner === owner) storage.removeItem(AUTH_REFRESH_LOCK);
+          } catch { void 0; }
+        }
+      }
+    }
+    await waitMs(45 + Math.random() * 65);
+  }
+  const latest = authGet();
+  return !!latest && latest.refreshToken !== initialRefreshToken && latest.exp > Date.now();
+}
 function authRefresh(): Promise<boolean> {
   const a = authGet();
   if (!a) return Promise.resolve(false);
   if (authRefreshing) return authRefreshing;
-  authRefreshing = (async () => {
-    try {
-      const r = await window.fetch(`${META_API()}/api/auth/refresh`, {
-        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ refreshToken: a.refreshToken }),
-      });
-      const j = await r.json().catch(() => ({})) as { accessToken?: string; refreshToken?: string; expiresIn?: number };
-      if (!r.ok) { if (r.status === 401) { authSet(null); authExpired(); } return false; }
-      authSet(j); return true;
-    } catch { return false; } finally { authRefreshing = null; }
-  })();
+  authRefreshing = authRefreshExclusive(a.refreshToken).finally(() => { authRefreshing = null; });
   return authRefreshing;
 }
 function authExpired(): void {
   if (!meta.signedIn) return;
   meta.signedIn = false; metaSave();
-  try { syncAccountRow(); showToast('🔒 Сессия истекла — войдите снова'); } catch { void 0; }
+  try { syncAccountRow(); showToast('🔒 Сессия истекла — войдите снова'); authGateCheck(); } catch { void 0; }
 }
 /** fetch к meta-server с Bearer-токеном; заранее обновляет истекающий access, при 401 — одна повторная попытка. */
 async function authFetch(url: string, init: RequestInit = {}): Promise<Response> {
   let a = authGet();
-  if (a && a.exp - Date.now() < 30_000) { await authRefresh(); a = authGet(); }
+  if (a && (!Number.isFinite(a.exp) || a.exp - Date.now() < 30_000)) { await authRefresh(); a = authGet(); }
   const withAuth = (t: AuthTokens | null): RequestInit => ({ ...init, headers: { ...(init.headers as Record<string, string> || {}), ...(t ? { authorization: `Bearer ${t.accessToken}` } : {}) } });
   let r = await window.fetch(url, withAuth(a));
   if (r.status === 401 && a && await authRefresh()) r = await window.fetch(url, withAuth(authGet()));
@@ -3703,14 +4376,20 @@ function scheduleSync(): void {
 /* v3.15.4: один раз предупредить в консоли, что сервер без дельта-протокола */
 let metaApiOldWarned = false;
 let syncInFlight: Promise<void> | null = null;
+let syncPending = false;
+let profileSyncPaused = false;
+let profileMigrationNick = '';
 function syncProfile(): Promise<void> {
+  // При смене аккаунта сначала гидратируем его профиль: старые локальные данные
+  // не должны перезаписать существующий профиль, если GET временно недоступен.
+  if (profileSyncPaused) return Promise.resolve();
   /* v3.15.3: валюта/рейтинг шлём РАЗНИЦЕЙ от последнего подтверждённого синка (d*),
      чтобы выдачи админки (/api/admin/adjust) не затирались локальными данными игрока.
      Первый синк (нет lastSynced) — без дельт, сервер принимает абсолютные значения.
      Ответ сервера содержит СМЕРЖЕННЫЙ профиль — в локальную валюту добавляем только
      то, что изменилось на сервере (выдачи админа), и фиксируем новую базу дельт.
      Параллельные вызовы не дублируют дельту (одна в полёте). */
-  if (syncInFlight) return syncInFlight;
+  if (syncInFlight) { syncPending = true; return syncInFlight; }
   const run = (async (): Promise<void> => {
     if (typeof window.fetch !== 'function' || !meta.pid) return;
     try {
@@ -3750,8 +4429,12 @@ function syncProfile(): Promise<void> {
           avatarsOwned: meta.avatarsOwned ?? [],
           tutStage: meta.tutStage ?? 0, tutDone: !!meta.tutDone,
           tutReward: meta.tutReward ?? '', tutClaims: meta.tutClaims ?? [],
+          introComplete: !!meta.introComplete, starterDecksUnlocked: !!meta.starterDecksUnlocked,
+          introStep: meta.introStep ?? 0, introFaction: meta.introFaction ?? 'Aurites',
+          introFactionsSeen: meta.introFactionsSeen ?? [],
           cosmetics: { backs: meta.backsOwned ?? [], tables: meta.tablesOwned ?? [], runes: meta.runesOwned ?? [],
-            backEq: meta.backEq ?? 'classic', tableSkin: meta.tableSkin ?? 'classic', runeSkin: meta.runeSkin ?? 'classic' },
+            backEq: meta.backEq ?? 'classic', tableSkin: meta.tableSkin ?? 'classic', runeSkin: meta.runeSkin ?? 'classic',
+            deckHeroesOwned: meta.deckHeroesOwned ?? [], deckHeroes: meta.deckHeroes ?? {} },
           questDate: meta.questDate, wquestWeek: meta.wquestWeek,
           quests: {
             daily: (meta.quests ?? []).map(q => ({ id: q.id, prog: q.prog, goal: q.goal, claimed: q.claimed, fac: q.fac })),
@@ -3799,7 +4482,11 @@ function syncProfile(): Promise<void> {
     } catch { /* сервер недоступен — полностью локальная игра */ }
   })();
   syncInFlight = run;
-  void run.finally(() => { if (syncInFlight === run) syncInFlight = null; });
+  void run.finally(() => {
+    if (syncInFlight !== run) return;
+    syncInFlight = null;
+    if (syncPending) { syncPending = false; scheduleSync(); }
+  });
   return run;
 }
 function apiSend(path: string, body: unknown): void {
@@ -4298,6 +4985,7 @@ function revealPack(): void {
     st.classList.remove('hasSealed','opening');
     renderPackSlots(slots);
     pendingPack = null;
+    renderPackInventory(); // разблокировать выбор следующего бустера после завершения reveal
   }, 560);
 }
 
@@ -4461,8 +5149,9 @@ function renderPackSlots(slots: PackSlotData[]): void {
   try { attachVolumetric(row); } catch {}
 }
 function selectStoredBooster(kind: 'booster' | 'booster_premium'): boolean {
-  if (pendingPack || document.getElementById('packStage')?.classList.contains('hasResults')) {
-    showToast('Тип бустера нельзя менять после вскрытия карт'); return false;
+  const stage = document.getElementById('packStage');
+  if (pendingPack || stage?.classList.contains('opening')) {
+    showToast('Дождитесь завершения вскрытия бустера'); return false;
   }
   const available = kind === 'booster' ? (meta.freeOpens ?? 0) : (meta.premOpens ?? 0);
   if (available <= 0) { showToast('Этого типа бустера нет в запасе'); return false; }
@@ -4490,18 +5179,20 @@ function renderPackInventory(): void {
   ];
   const total = standard + premium;
   const packStage = document.getElementById('packStage');
-  const selectionLocked = !!pendingPack || !!packStage?.classList.contains('opening') || !!packStage?.classList.contains('hasResults');
+  const opening = !!packStage?.classList.contains('opening');
+  const selectionLocked = !!pendingPack || opening;
+  const hasResults = !!packStage?.classList.contains('hasResults');
   const totalNode = document.getElementById('boosterCountTotal');
   if (totalNode) totalNode.textContent = String(total);
   host.innerHTML = packs.map(p => `<button type="button" class="boosterInvCard${p.count > 0 ? ' has-stock' : ''}${pendingPackKind === p.packKind ? ' selected' : ''}" data-pack="${p.kind}" ${p.count <= 0 || selectionLocked ? 'disabled' : ''}
-      aria-pressed="${pendingPackKind === p.packKind}" aria-label="${selectionLocked ? 'Сначала закройте просмотр уже вскрытых карт' : p.count > 0 ? `Выбрать ${p.title}, в запасе ${p.count}; списание при вскрытии` : `${p.title}, нет в запасе`}">
+      aria-pressed="${pendingPackKind === p.packKind}" aria-label="${selectionLocked ? 'Сначала дождитесь завершения вскрытия' : p.count > 0 ? `Выбрать ${p.title}, в запасе ${p.count}${hasResults ? '; можно вскрыть следующий бустер' : '; запас спишется при вскрытии'}` : `${p.title}, нет в запасе`}">
       <span class="boosterInvVisual">
         <span class="boosterInvFallback" aria-hidden="true"><b>${p.sigil}</b><small>${p.mark}</small></span>
         ${cosmImg('offers', p.art, 'boosterInvArt')}
         <span class="boosterInvCount">×${p.count}</span>
       </span>
       <span class="boosterInvCopy"><strong>${p.title}</strong><small>${p.sub}</small>
-        <span class="boosterInvOpen">${p.count > 0 ? (pendingPackKind === p.packKind ? 'Выбрано · нажмите пачку для вскрытия' : 'Выбрать · запас спишется при вскрытии →') : 'Нет в запасе'}</span></span>
+        <span class="boosterInvOpen">${p.count > 0 ? (selectionLocked ? 'Вскрытие…' : hasResults ? 'Выбрать следующий бустер →' : pendingPackKind === p.packKind ? 'Выбрано · нажмите пачку для вскрытия' : 'Выбрать · запас спишется при вскрытии →') : 'Нет в запасе'}</span></span>
     </button>`).join('');
   host.querySelectorAll<HTMLImageElement>('.boosterInvArt').forEach(img => {
     const markArt = (): void => img.closest('.boosterInvVisual')?.classList.add('hasArt');
@@ -4581,7 +5272,7 @@ function renderShards(): void {
   const bpr = $('btnPackPrem') as HTMLButtonElement | null;
   if (bpr) {
     const stage = document.getElementById('packStage');
-    bpr.disabled = (meta.premOpens ?? 0) <= 0 || !!pendingPack || !!stage?.classList.contains('opening') || !!stage?.classList.contains('hasResults');
+    bpr.disabled = (meta.premOpens ?? 0) <= 0 || !!pendingPack || !!stage?.classList.contains('opening');
     bpr.textContent = `🌟 Премиум-бустер · ×${meta.premOpens ?? 0}`;
   }
   const bc = $('btnCollection');
@@ -4637,16 +5328,19 @@ if (_origRenderShards) {
   // monkey patch after definition; we will redefine renderShards wrapper later
 }
 
-function getAllDecksForGrid(): Array<{ id: string; name: string; faction: string; cards: string[]; format?: string; avatarCardId?: string; updated: number; isPrecon: boolean }> {
-  const all: Array<{ id: string; name: string; faction: string; cards: string[]; format?: string; avatarCardId?: string; updated: number; isPrecon: boolean }> = [];
+function getAllDecksForGrid(): Array<{ id: string; name: string; faction: string; cards: string[]; format?: string; avatarCardId?: string; heroId: string; updated: number; isPrecon: boolean }> {
+  const all: Array<{ id: string; name: string; faction: string; cards: string[]; format?: string; avatarCardId?: string; heroId: string; updated: number; isPrecon: boolean }> = [];
   for (const d of deckList) {
     if (d.id === 'Starter') continue; // служебная смешанная колода не является выбором игрока
-    all.push({ id: d.id, name: d.name, faction: d.faction, cards: d.cards.slice(), format: d.format, updated: 0, isPrecon: true });
+    if (d.format === STARTER_DECK_FORMAT && !meta.starterDecksUnlocked) continue;
+    all.push({ id: d.id, name: d.name, faction: d.faction, cards: d.cards.slice(), format: d.format,
+      heroId: deckHeroIdForDeck(d.id, d.faction) ?? d.faction, updated: 0, isPrecon: true });
   }
   for (const c of loadCustomDecks()) {
     all.push({
       id: c.id, name: c.name, faction: c.faction, cards: c.cards.slice(),
-      avatarCardId: c.avatarCardId, updated: c.updated ?? 0, isPrecon: false,
+      avatarCardId: c.avatarCardId, heroId: deckHeroIdForDeck(c.id, c.faction) ?? c.faction,
+      updated: c.updated ?? 0, isPrecon: false,
     });
   }
   return all;
@@ -4744,9 +5438,11 @@ function renderDeckGrid(): void {
   grid.appendChild(addBox);
   for (const d of all) {
     const isSel = decksSelectedId === d.id;
+    const deckHero = resolveDeckHero(d.heroId, d.faction);
     const box = document.createElement('div');
     box.className = 'deckBox' + (isSel ? ' sel' : '');
     box.dataset.deckId = d.id;
+    box.dataset.heroId = deckHero?.id ?? '';
     box.tabIndex = 0;
     box.setAttribute('role', 'group');
     box.setAttribute('aria-label', `Колода «${d.name}», ${FACTION_RU[d.faction as Faction] ?? d.faction}, ${d.cards.length} карт. Нажмите Enter, чтобы выбрать.`);
@@ -4760,7 +5456,8 @@ function renderDeckGrid(): void {
     const artCard = avatarCard ?? suggestedAvatar;
     const artFaction = artCard?.faction ?? d.faction;
     const artId = artCard?.id ?? d.id;
-    const cardArtUrl = `/art/${encodeURIComponent(artFaction)}/${encodeURIComponent(artId)}.png`;
+    const cardArtUrl = artCard ? cardArtworkUrl(artCard)
+      : `/art/${encodeURIComponent(artFaction)}/${encodeURIComponent(artId)}.png`;
     const fallbackSig = FACTION_SIGIL[d.faction as Faction] ?? '✦';
     const deckArtUrl = `img/decks/${encodeURIComponent(d.id)}.png`;
     const artHtml = avatarCard
@@ -4773,7 +5470,7 @@ function renderDeckGrid(): void {
       ? `<button class="deckArtEdit deckArtGear" type="button" title="Изменить арт колоды" aria-label="Изменить арт колоды «${esc(d.name)}»" data-deck-art-edit="${esc(d.id)}">${GEAR_SVG}</button>`
       : '';
     box.dataset.avatarCardId = avatarCard?.id ?? '';
-    box.title = avatarCard ? `${d.name} · обложка: ${cardName(avatarCard)}` : d.name;
+    box.title = `${d.name}${avatarCard ? ` · обложка: ${cardName(avatarCard)}` : ''} · герой: ${deckHero?.name ?? FACTION_RU[d.faction as Faction] ?? d.faction}`;
     const deckArtClass = `deckArt f-${d.faction}`;
     // deck colors: show faction icon(s) — for now single faction + minor splashes?
     // compute secondary factions from cards
@@ -4890,7 +5587,7 @@ function renderDeckArtPicker(
     const fallback = el('span', 'deckArtChoiceFallback', FACTION_SIGIL[card.faction] ?? '◇');
     media.appendChild(fallback);
     const image = document.createElement('img');
-    image.src = `/art/${encodeURIComponent(card.faction)}/${encodeURIComponent(card.id)}.png`;
+    image.src = cardArtworkUrl(card);
     image.alt = '';
     image.loading = 'lazy';
     image.decoding = 'async';
@@ -4935,6 +5632,160 @@ function openEditorDeckArtPicker(): void {
     if (avatarSelect) avatarSelect.value = card.id;
     renderDeckAvatarPreview();
   }, null);
+}
+
+interface DeckHeroPickerContext {
+  faction: Faction;
+  deckName: string;
+  selectedId: string;
+  onSelect: (heroId: string) => boolean | void;
+}
+let deckHeroPickerContext: DeckHeroPickerContext | null = null;
+let deckHeroPickerReturnFocus: HTMLElement | null = null;
+
+function closeDeckHeroPicker(): void {
+  document.getElementById('deckHeroPickerModal')?.classList.add('hidden');
+  deckHeroPickerContext = null;
+  const focus = deckHeroPickerReturnFocus;
+  deckHeroPickerReturnFocus = null;
+  if (focus?.isConnected) { focus.focus(); return; }
+  const deckPickerButton = document.getElementById('btnDecksHero') as HTMLButtonElement | null;
+  if (deckPickerButton && !deckPickerButton.disabled) { deckPickerButton.focus(); return; }
+  (document.getElementById('btnDbHeroPicker') as HTMLButtonElement | null)?.focus();
+}
+
+function renderDeckHeroPickerGrid(): void {
+  const context = deckHeroPickerContext;
+  const grid = document.getElementById('deckHeroPickerGrid');
+  const wallet = document.getElementById('deckHeroWallet');
+  if (!context || !grid) return;
+  grid.replaceChildren();
+  if (wallet) wallet.textContent = `Баланс: 🪙 ${fmtNum(shardsGet())} · герой за монеты — ${fmtNum(DECK_HERO_COIN_PRICE)}. Платёжные списания пока отключены.`;
+
+  const options = deckHeroesForFaction(context.faction);
+  if (!options.length) {
+    const empty = el('div', 'deckHeroPickerEmpty', 'Для этой фракции пока нет героев.');
+    grid.appendChild(empty);
+    return;
+  }
+  for (const hero of options) {
+    const unlocked = isDeckHeroUnlocked(hero.id);
+    const selected = hero.id === context.selectedId;
+    const option = el('article', `deckHeroOption tier-${hero.tier}${selected ? ' isSelected' : ''}${unlocked ? ' isUnlocked' : ' isLocked'}`);
+    option.dataset.heroId = hero.id;
+    option.setAttribute('role', 'listitem');
+    const tierLabel = hero.tier === 'standard' ? 'СТАНДАРТНЫЙ'
+      : hero.tier === 'coin' ? 'ЗА ИГРОВЫЕ МОНЕТЫ' : 'ДОНАТНАЯ ВИТРИНА';
+    const detail = hero.tier === 'standard' ? 'Доступен сразу'
+      : hero.tier === 'coin' ? `Постоянное открытие · ${fmtNum(DECK_HERO_COIN_PRICE)} 🪙`
+        : 'Платёжный провайдер ещё не подключён';
+    option.innerHTML = `<div class="deckHeroOptionPortrait"><img class="deckHeroOptionArt" alt="${esc(hero.name)}" loading="lazy" decoding="async">
+        <span class="deckHeroTier">${tierLabel}</span></div>
+      <div class="deckHeroOptionInfo"><b class="deckHeroOptionName">${esc(hero.name)}</b>
+        <span class="deckHeroOptionFaction">${esc(FACTION_RU[hero.faction] ?? hero.faction)}</span>
+        <span class="deckHeroOptionDetail">${esc(detail)}</span>
+        ${selected ? '<span class="deckHeroSelectedMark">✓ ГЕРОЙ КОЛОДЫ</span>' : ''}</div>`;
+    artChain(option.querySelector('.deckHeroOptionArt') as HTMLImageElement | null, deckHeroArtUrls(hero.id, context.faction));
+    const action = document.createElement('button');
+    action.type = 'button';
+    action.className = 'deckHeroAction';
+    action.dataset.heroId = hero.id;
+    action.dataset.heroAction = hero.tier === 'coin' && !unlocked ? 'buy' : 'select';
+    if (selected && unlocked) {
+      action.textContent = 'Выбран';
+      action.disabled = true;
+    } else if (hero.tier === 'donation' && !unlocked) {
+      action.textContent = 'Скоро · донат';
+      action.disabled = true;
+      action.title = 'Покупка появится после подключения платёжной системы; деньги не списываются';
+    } else if (hero.tier === 'coin' && !unlocked && shardsGet() < DECK_HERO_COIN_PRICE) {
+      action.textContent = `Нужно ${fmtNum(DECK_HERO_COIN_PRICE)} 🪙`;
+      action.disabled = true;
+      action.title = 'Недостаточно игровых монет';
+    } else if (hero.tier === 'coin' && !unlocked) {
+      action.textContent = `Купить · ${fmtNum(DECK_HERO_COIN_PRICE)} 🪙`;
+      action.title = `Открыть героя за ${fmtNum(DECK_HERO_COIN_PRICE)} игровых монет и выбрать для этой колоды`;
+    } else {
+      action.textContent = 'Выбрать героя';
+      action.title = `Выбрать «${hero.name}» для колоды «${context.deckName}»`;
+    }
+    option.appendChild(action);
+    action.addEventListener('click', () => {
+      const current = deckHeroPickerContext;
+      if (!current) return;
+      const latestHero = DECK_HERO_BY_ID.get(hero.id);
+      if (!latestHero || latestHero.faction !== current.faction) return;
+      if (latestHero.tier === 'coin' && !isDeckHeroUnlocked(latestHero.id)) {
+        if (shardsGet() < DECK_HERO_COIN_PRICE) { renderDeckHeroPickerGrid(); return; }
+        shardsAdd(-DECK_HERO_COIN_PRICE);
+        meta.deckHeroesOwned = [...new Set([...(meta.deckHeroesOwned ?? []), latestHero.id])];
+        metaSave();
+        renderShards();
+        const picked = current.onSelect(latestHero.id);
+        if (picked === false) {
+          shardsAdd(DECK_HERO_COIN_PRICE);
+          meta.deckHeroesOwned = (meta.deckHeroesOwned ?? []).filter(id => id !== latestHero.id);
+          metaSave(); renderShards(); renderDeckHeroPickerGrid();
+          showToast('Не удалось назначить героя; покупка отменена');
+          return;
+        }
+        renderDeckGrid();
+        updateDecksFooter();
+        buildMenu(false);
+        closeDeckHeroPicker();
+        showToast(`«${latestHero.name}» открыт за ${fmtNum(DECK_HERO_COIN_PRICE)} 🪙 и выбран для колоды`);
+        return;
+      }
+      if (!isDeckHeroUnlocked(latestHero.id)) return;
+      const picked = current.onSelect(latestHero.id);
+      if (picked === false) return;
+      Sfx.uiClick();
+      renderDeckGrid();
+      updateDecksFooter();
+      buildMenu(false);
+      closeDeckHeroPicker();
+      showToast(`Герой «${latestHero.name}» выбран для колоды`);
+    });
+    grid.appendChild(option);
+  }
+}
+
+function openDeckHeroPicker(
+  faction: Faction, deckName: string, selectedId: string,
+  onSelect: (heroId: string) => boolean | void, returnFocus: HTMLElement | null = null,
+): void {
+  const modal = document.getElementById('deckHeroPickerModal');
+  const title = document.getElementById('deckHeroPickerTitle');
+  const hint = document.getElementById('deckHeroPickerHint');
+  if (!modal || !title || !hint || !FACTION_IDS.includes(faction)) return;
+  deckHeroPickerReturnFocus = returnFocus ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+  const hero = resolveDeckHero(selectedId, faction);
+  deckHeroPickerContext = { faction, deckName, selectedId: hero?.id ?? faction, onSelect };
+  title.textContent = deckName ? `Герой колоды «${deckName}»` : 'Выберите героя колоды';
+  hint.textContent = `${FACTION_RU[faction]} · доступны только герои этой фракции. Портрет героя хранится отдельно от карточной обложки.`;
+  renderDeckHeroPickerGrid();
+  modal.classList.remove('hidden');
+  (document.getElementById('btnDeckHeroPickerClose') as HTMLButtonElement | null)?.focus();
+}
+
+function openSavedDeckHeroPicker(deckId: string, returnFocus: HTMLElement | null = null): void {
+  const deck = getAllDecksForGrid().find(item => item.id === deckId);
+  if (!deck || !FACTION_IDS.includes(deck.faction as Faction)) { showToast('Колода не найдена'); return; }
+  openDeckHeroPicker(deck.faction as Faction, deck.name, deck.heroId, heroId => {
+    const ok = saveDeckHeroSelection(deck.id, deck.faction, heroId);
+    if (!ok) return false;
+    return true;
+  }, returnFocus);
+}
+
+function openEditorDeckHeroPicker(): void {
+  if (!editing) return;
+  const heroId = resolveDeckHero(editing.heroId, editing.faction)?.id ?? editing.faction;
+  openDeckHeroPicker(editing.faction, editing.name || 'Новая колода', heroId, selectedId => {
+    if (!editing || !saveDeckHeroSelectionForEditor(selectedId)) return false;
+    renderDeckHeroPreview();
+    return true;
+  }, document.getElementById('btnDbHeroPicker') as HTMLButtonElement | null);
 }
 
 function deckPlayProblem(deck: DeckLike): string | null {
@@ -4992,11 +5843,19 @@ function updateDecksFooter(): void {
   const info = document.getElementById('decksSelInfo') as HTMLElement | null;
   const btnEdit = document.getElementById('btnDecksEdit') as HTMLButtonElement | null;
   const btnPlayDeck = document.getElementById('btnDecksPlay') as HTMLButtonElement | null;
+  const btnHero = document.getElementById('btnDecksHero') as HTMLButtonElement | null;
   const btnExp = document.getElementById('btnDecksExport') as HTMLButtonElement | null;
   const btnClone = document.getElementById('btnDecksClone') as HTMLButtonElement | null;
   const btnDel = document.getElementById('btnDecksDelete') as HTMLButtonElement | null;
-  if (info) info.textContent = sel ? `${sel.name} · ${FACTION_RU[sel.faction as Faction] ?? sel.faction} · ${sel.cards.length} карт` : 'Выберите колоду';
+  const selectedHero = sel ? resolveDeckHero(sel.heroId, sel.faction) : undefined;
+  if (info) info.textContent = sel
+    ? `${sel.name} · ${FACTION_RU[sel.faction as Faction] ?? sel.faction} · ${sel.cards.length} карт · ${selectedHero?.name ?? 'герой не выбран'}`
+    : 'Выберите колоду';
   if (btnEdit) btnEdit.disabled = !sel;
+  if (btnHero) {
+    btnHero.disabled = !sel || !deckHeroesForFaction(sel.faction).length;
+    btnHero.title = sel && selectedHero ? `Герой колоды: ${selectedHero.name} · сменить` : 'Выберите колоду';
+  }
   if (btnPlayDeck) {
     const problem = sel ? deckPlayProblem(sel) : null;
     btnPlayDeck.disabled = !sel || !!problem;
@@ -5020,6 +5879,7 @@ function updateDecksFooter(): void {
 }
 
 function openDecksScreen(): void {
+  if (!requireStarterDeckUnlock()) return;
   setAppRoute('decks');
   $('menu').classList.add('hidden');
   $('homeScreen')?.classList.add('hidden');
@@ -5126,10 +5986,35 @@ document.getElementById('deckArtPickerModal')?.addEventListener('click', ev => {
   if (ev.target === document.getElementById('deckArtPickerModal')) closeDeckArtPicker();
 });
 
+// Deck-hero picker: отдельный каталог; донатный вариант не запускает оплату.
+document.getElementById('btnDeckHeroPickerClose')?.addEventListener('click', closeDeckHeroPicker);
+document.getElementById('btnDeckHeroPickerDone')?.addEventListener('click', closeDeckHeroPicker);
+document.getElementById('deckHeroPickerModal')?.addEventListener('click', ev => {
+  if (ev.target === document.getElementById('deckHeroPickerModal')) closeDeckHeroPicker();
+});
+document.getElementById('deckHeroPickerModal')?.addEventListener('keydown', ev => {
+  const key = (ev as KeyboardEvent).key;
+  if (key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); closeDeckHeroPicker(); return; }
+  if (key !== 'Tab') return;
+  const modal = document.getElementById('deckHeroPickerModal');
+  if (!modal) return;
+  const focusable = [...modal.querySelectorAll<HTMLElement>('button:not(:disabled)')]
+    .filter(node => !node.hidden && node.getAttribute('aria-hidden') !== 'true');
+  if (!focusable.length) { ev.preventDefault(); modal.focus(); return; }
+  const first = focusable[0], last = focusable[focusable.length - 1];
+  if ((ev as KeyboardEvent).shiftKey && document.activeElement === first) { ev.preventDefault(); last.focus(); }
+  else if (!(ev as KeyboardEvent).shiftKey && document.activeElement === last) { ev.preventDefault(); first.focus(); }
+});
+
 // decks footer buttons
 document.getElementById('btnDecksClose')?.addEventListener('click', ()=>{ Sfx.uiClick(); navigateApp('back'); });
 document.getElementById('btnDecksPlay')?.addEventListener('click', ()=>{
   if (decksSelectedId) launchDeckForBattle(decksSelectedId);
+});
+document.getElementById('btnDecksHero')?.addEventListener('click', ev => {
+  if (!decksSelectedId) return;
+  Sfx.uiClick();
+  openSavedDeckHeroPicker(decksSelectedId, ev.currentTarget as HTMLElement);
 });
 document.getElementById('btnDecksCollection')?.addEventListener('click', ()=>{
   Sfx.uiClick();
@@ -5172,6 +6057,7 @@ document.getElementById('btnDecksClone')?.addEventListener('click', ()=>{
   const newId = `custom-${Date.now().toString(36)}`;
   const copy = { id: newId, name: `${src.name} (копия)`, faction: src.faction, cards: src.cards.slice(), avatarCardId: src.avatarCardId ?? suggestedDeckArt(src.cards)?.id ?? src.cards[0], updated: Date.now() } as any;
   upsertCustomDeck(copy);
+  saveDeckHeroSelection(newId, src.faction, src.heroId);
   decksSelectedId = newId;
   renderDeckGrid();
   showToast(`Клон: ${copy.name}`);
@@ -5182,6 +6068,7 @@ document.getElementById('btnDecksDelete')?.addEventListener('click', ()=>{
   if (!sel || sel.isPrecon) { showToast('Преконструкт нельзя удалить'); return; }
   if (!window.confirm(`Удалить колоду «${sel.name}»?`)) return;
   deleteCustomDeck(sel.id);
+  forgetDeckHeroSelection(sel.id);
   decksSelectedId = null;
   renderDeckGrid();
   showToast('Колода удалена');
@@ -5199,6 +6086,7 @@ document.getElementById('btnDecksEdit')?.addEventListener('click', ()=>{
     faction: sel.faction as Faction,
     counts,
     avatarCardId: sel.avatarCardId ?? null,
+    heroId: sel.heroId,
   };
   openCollectionScreen();
   const tabB = document.getElementById('tabBuilder') as HTMLElement | null;
@@ -5223,13 +6111,15 @@ setInterval(syncTopWallet, 1500);
 
 /* ── PATCH v2.14.0: Home + Events + Store Featured (скрины 3,4,5,8) ── */
 function openHomeScreen(): void {
+  setAppRoute('home');
   if (!$('battle').classList.contains('hidden')) {
+    const leavingTutorial = battle.tutLesson > 0 || battle.launchMode === 'tut';
     battle.tutCleanup();
     battle.stop();
+    if (leavingTutorial) { battle.tutLesson = 0; battle.launchMode = 'menu'; battle.practice = false; }
     $('battle').classList.add('hidden');
   }
   $('gameover').classList.add('hidden');
-  setAppRoute('home');
   Sfx.uiClick();
   // Хаб — само главное меню (новый макет): закрываем все поверхности и возвращаемся на hub.
   // Перестраиваем витрину при каждом возврате, чтобы импортированные/сохранённые колоды
@@ -5247,6 +6137,7 @@ function openHomeScreen(): void {
   $('menu').classList.remove('hidden');
   document.querySelectorAll('.topTab').forEach(el=> el.classList.toggle('active', (el as HTMLElement).dataset.tab==='home'));
   syncTopWallet();
+  if (!meta.introComplete) openIntroFlow();
 }
 function closeHomeScreen(): void {
   document.getElementById('homeScreen')?.classList.add('hidden');
@@ -5321,7 +6212,7 @@ function eventOnMatchEnd(id: string, win: boolean): string {
     : def.streak ? `${def.title}: серия прервана` : '';
 }
 function launchEvent(def: EventDef): void {
-  if (def.launch === 'campaign') { $('eventsScreen').classList.add('hidden'); openCampaign(); return; }
+  if (def.launch === 'campaign') { openCampaign(); return; }
   if (def.launch === 'tut') { $('eventsScreen').classList.add('hidden'); openTut(); return; }
   if (def.id === 'borderless') {   // рейтинговый матч текущей колодой из меню
     closeEventsScreen(); navigateApp('home');
@@ -5430,10 +6321,12 @@ function renderEvents(): void {
   }
   document.getElementById('eventsScreen')?.classList.add('eventsV3');
   updateQuestCountdowns();
+  animateUiSurface(grid, 'ecSubpanelEnter', 240);
 }
 (window as unknown as { ecEvents: () => unknown }).ecEvents = () => EVENT_DEFS.map(d => ({ id: d.id, ...eventState(d) }));
 
 function openEventsScreen(): void {
+  if (!requireStarterDeckUnlock()) return;
   setAppRoute('events');
   $('menu').classList.add('hidden');
   $('homeScreen')?.classList.add('hidden');
@@ -5612,7 +6505,11 @@ function updateChallengePanel(): void {
       const fb = avaEl.querySelector('.ecOppFallback') as HTMLElement | null;
       if (fb) fb.textContent = isRnd ? '?' : (FACTION_SIGIL[foeFac as Faction] ?? '?');
       if (isRnd) oppImg.style.opacity = '0';
-      else artChain(oppImg, [`/art/${foeFac}/${HUB_ART[foeFac]}.png`, `img/menu_${foeFac.toLowerCase()}.jpg`]);
+      else {
+        const foeHub = HUB_ART[foeFac] ? db.get(HUB_ART[foeFac]) : undefined;
+        const foeArtUrl = foeHub ? cardArtworkUrl(foeHub) : `/art/${foeFac}/${HUB_ART[foeFac]}.png`;
+        artChain(oppImg, [foeArtUrl, `img/menu_${foeFac.toLowerCase()}.jpg`]);
+      }
     }
   }
   const practice = !!(document.getElementById('chkPractice') as HTMLInputElement | null)?.checked;
@@ -5659,12 +6556,22 @@ function updateEcProfile(): void {
 
 function buildMenu(showTour = true): void {
   const customs = loadCustomDecks();
-  const validSelected = menuSelectedDeckId
-    && (deckById.has(menuSelectedDeckId) || customs.some(d => d.id === menuSelectedDeckId));
-  if (!validSelected) {
-    menuSelectedDeckId = starterDeckForFaction(picked)?.id ?? picked;
+  if (!meta.starterDecksUnlocked) {
+    // Колода и бой заперты до завершения вступления; не восстанавливаем старый выбор из localStorage.
+    menuSelectedDeckId = null;
     saveMenuDeck();
+  } else {
+    const validSelected = menuSelectedDeckId
+      && (deckById.has(menuSelectedDeckId) || customs.some(d => d.id === menuSelectedDeckId));
+    if (!validSelected) {
+      menuSelectedDeckId = starterDeckForFaction(picked)?.id ?? picked;
+      saveMenuDeck();
+    }
   }
+
+  const selectedCustomDeck = customs.find(deck => deck.id === menuSelectedDeckId);
+  const heroDeckIdForFaction = (faction: string): string =>
+    selectedCustomDeck?.faction === faction ? selectedCustomDeck.id : starterDeckForFaction(faction as Faction)?.id ?? faction;
 
   const mh = $('menuHeroes');
   if (mh) {
@@ -5678,8 +6585,13 @@ function buildMenu(showTour = true): void {
     mh.querySelectorAll<HTMLElement>('.heroChip').forEach(chip => {
       const f = chip.dataset.f as Faction | undefined;
       const i = f ? FACTION_IDS.indexOf(f) : -1;
-      if (f && i >= 0) artChain(chip.querySelector('.orbIcon') as HTMLImageElement | null,
-        [`/heroes/${f}`, `img/ico_fac_${i}.png`]);
+      if (f && i >= 0) {
+        const hero = deckHeroForDeck(heroDeckIdForFaction(f), f);
+        chip.dataset.heroId = hero?.id ?? f;
+        chip.title = `${FACTION_RU[f]} · герой ${hero?.name ?? FACTION_RU[f]} — быстро выбрать фракцию`;
+        chip.setAttribute('aria-label', `Быстрый выбор фракции ${FACTION_RU[f]}, герой ${hero?.name ?? FACTION_RU[f]}`);
+        artChain(chip.querySelector('.orbIcon') as HTMLImageElement | null, deckHeroArtUrls(hero?.id ?? f, f));
+      }
     });
   }
 
@@ -5688,30 +6600,27 @@ function buildMenu(showTour = true): void {
   for (let i = 0; i < FACTION_IDS.length; i++) {
     const f = FACTION_IDS[i]!;
     const hub = HUB_CARD[f] ?? { name: FACTION_RU[f], cls: '', atk: 5, hp: 15, lvl: 1 };
-    const lvl = hub.lvl + Math.floor((meta.facW[f] ?? 0) / 10);
     const node = el('div', 'fcard' + (f === picked ? ' sel' : ''));
     node.setAttribute('data-f', f);
     node.setAttribute('data-sigil', FACTION_SIGIL[f] ?? '◈');
     node.setAttribute('data-faction', f);
+    const starterHero = deckHeroForDeck(starterDeckForFaction(f)?.id ?? f, f);
+    const heroTitle = starterHero?.name ?? hub.name;
     node.innerHTML =
       `<div class="fcardArt">
         <span class="fcardArtPh" aria-hidden="true"><img src="img/ico_fac_${i}.png" alt="" onerror="this.style.display='none'"></span>
-        <img class="fcardArtImg" src="" alt="" loading="lazy">
+        <img class="fcardArtImg" src="" alt="" loading="lazy" decoding="async">
         <div class="fcardArtGrad"></div>
-        <div class="fcardFacBadge"><img src="img/ico_fac_${i}.png" alt="${HUB_ELEM_RU[f] ?? ''}" onerror="this.style.display='none'"></div>
-        <span class="fcardLvl">Ур. ${lvl}</span>
       </div>
       <div class="fcardBody">
-        <div class="fname">${esc(hub.name)}</div>
+        <div class="fname">${esc(heroTitle)}</div>
         <div class="fclass">${esc(hub.cls)}</div>
-        <div class="fcardSig"><img src="img/ico_fac_${i}.png" alt="" onerror="this.style.display='none'"></div>
-      </div>
-      <div class="fcardStats"><span class="fsAtk" title="Условная атака архетипа">${hub.atk}</span><span class="fsHp" title="Условное здоровье архетипа">${hub.hp}</span></div>
-      <span class="fcardCheck" title="Ваша фракция">✓</span>`;
-    node.title = 'Клик — подробности о фракции (описание, механика, советы, примеры карт)';
+      </div>`;
+    node.title = `Герой: ${heroTitle} · клик — описание и выбор фракции`;
     node.addEventListener('click', () => { Sfx.uiClick(); openFactionModal(f); });
     host.appendChild(node);
-    artChain(node.querySelector('.fcardArtImg') as HTMLImageElement | null, hubArtUrls(f));
+    artChain(node.querySelector('.fcardArtImg') as HTMLImageElement | null,
+      deckHeroArtUrls(starterHero?.id ?? f, f));
   }
 
   if (customs.length) {
@@ -5719,11 +6628,12 @@ function buildMenu(showTour = true): void {
     host.appendChild(label);
     for (const deck of customs) {
       const f = deck.faction;
+      const customDeckHero = deckHeroForDeck(deck.id, f);
       const avatar = deck.avatarCardId && deck.cards.includes(deck.avatarCardId)
         ? db.get(deck.avatarCardId) : undefined;
       const artCard = avatar ?? suggestedDeckArt(deck.cards);
       const artUrls = artCard
-        ? [`/art/${encodeURIComponent(artCard.faction)}/${encodeURIComponent(artCard.id)}.png`, `/heroes/${encodeURIComponent(f)}`]
+        ? [cardArtworkUrl(artCard), `/heroes/${encodeURIComponent(f)}`]
         : [`/heroes/${encodeURIComponent(f)}`, `img/menu_${f.toLowerCase()}.jpg`];
       const node = el('div', 'fcard customDeckCard' + (deck.id === menuSelectedDeckId ? ' sel' : ''));
       node.dataset.deckId = deck.id;
@@ -5732,7 +6642,7 @@ function buildMenu(showTour = true): void {
       node.dataset.format = 'constructed';
       node.setAttribute('role', 'button');
       node.setAttribute('tabindex', '0');
-      node.setAttribute('aria-label', `Выбрать колоду «${deck.name}», ${deck.cards.length} карт`);
+      node.setAttribute('aria-label', `Выбрать колоду «${deck.name}», ${deck.cards.length} карт; герой ${customDeckHero?.name ?? FACTION_RU[f as Faction] ?? f}`);
       node.innerHTML = `<div class="fcardArt">
           <span class="fcardArtPh" aria-hidden="true"><img src="" alt=""></span>
           <img class="fcardArtImg" src="" alt="" loading="lazy" decoding="async">
@@ -5748,7 +6658,7 @@ function buildMenu(showTour = true): void {
       const ph = node.querySelector('.fcardArtPh img') as HTMLImageElement | null;
       artChain(ph, [`/heroes/${encodeURIComponent(f)}`, `img/ico_fac_${FACTION_IDS.indexOf(f as Faction)}.png`]);
       artChain(node.querySelector('.fcardArtImg') as HTMLImageElement | null, artUrls);
-      node.title = `Выбрать колоду «${deck.name}» · ${deck.cards.length} карт`;
+      node.title = `Выбрать колоду «${deck.name}» · ${deck.cards.length} карт · герой: ${customDeckHero?.name ?? FACTION_RU[f as Faction] ?? f}`;
       node.addEventListener('click', () => selectMainMenuDeck(deck.id));
       node.addEventListener('keydown', ev => {
         const key = (ev as KeyboardEvent).key;
@@ -5781,20 +6691,28 @@ function buildMenu(showTour = true): void {
   }
   renderShards();
   tutGatePractice();   // спека 6.3: тренировка заблокирована до прохождения обучения
-  if (showTour && !meta.tutDone) window.setTimeout(() => tourShow(), 400);
+  if (showTour && meta.introComplete && !meta.tutDone) window.setTimeout(() => tourShow(), 400);
   const cnt = $('menuCardCount');
   if (cnt) cnt.textContent = String(ALL_CARDS.length);
-  sel('deckPick').innerHTML = deckList
-    .filter(d => d.id !== 'Starter') // служебная колода — только для тестов/совместимости
-    .map(d => `<option value="${esc(d.id)}">${esc(d.name)} · ${d.format === STARTER_DECK_FORMAT ? 'стартовая' : 'Constructed'} (${d.cards.length})</option>`).join('') +
-    (customs.length
-      ? `<optgroup label="Мои колоды">${customs
-        .map(d => `<option value="${esc(d.id)}">${esc(d.name)} (${d.cards.length} карт)</option>`).join('')}</optgroup>`
-      : '');
-  sel('deckPick').value = menuSelectedDeckId ?? '';
-  if (!sel('deckPick').value) {
-    menuSelectedDeckId = starterDeckForFaction(picked)?.id ?? picked;
-    sel('deckPick').value = menuSelectedDeckId;
+  const deckPicker = sel('deckPick');
+  if (!meta.starterDecksUnlocked) {
+    deckPicker.innerHTML = '<option value="">🔒 Стартовые колоды откроются после вступительных испытаний</option>';
+    deckPicker.value = '';
+    deckPicker.disabled = true;
+  } else {
+    deckPicker.disabled = false;
+    deckPicker.innerHTML = deckList
+      .filter(d => d.id !== 'Starter') // служебная колода — только для тестов/совместимости
+      .map(d => `<option value="${esc(d.id)}">${esc(d.name)} · ${d.format === STARTER_DECK_FORMAT ? 'стартовая' : 'Constructed'} (${d.cards.length})</option>`).join('') +
+      (customs.length
+        ? `<optgroup label="Мои колоды">${customs
+          .map(d => `<option value="${esc(d.id)}">${esc(d.name)} (${d.cards.length} карт)</option>`).join('')}</optgroup>`
+        : '');
+    deckPicker.value = menuSelectedDeckId ?? '';
+    if (!deckPicker.value) {
+      menuSelectedDeckId = starterDeckForFaction(picked)?.id ?? picked;
+      deckPicker.value = menuSelectedDeckId;
+    }
   }
   applyMenuBg();
   updatePlayGate();
@@ -5804,6 +6722,7 @@ function buildMenu(showTour = true): void {
 }
 
 function selectMainMenuDeck(deckId: string): void {
+  if (!meta.starterDecksUnlocked) { openIntroFlow(); return; }
   const deck = resolveDeck(deckId, deckList as unknown as DeckLike[]);
   if (!deck) return;
   menuSelectedDeckId = deckId;
@@ -6635,6 +7554,13 @@ document.addEventListener('keydown', e=>{
 /* ---- Гейт «В БОЙ»: минимум 30 карт, без верхнего лимита, до 4 копий любой карты ---- */
 function updatePlayGate(): void {
   const b = btn('btnPlay');
+  const ph = document.getElementById('playHint') as HTMLElement | null;
+  if (!meta.starterDecksUnlocked && battle.tutLesson <= 0) {
+    b.disabled = true;
+    b.title = 'Сначала пройдите вступительную историю и четыре учебные стычки';
+    if (ph) { ph.hidden = false; ph.textContent = '🎓 Сюжетный пролог обязателен: знакомство с Цитаделью → 4 боевых испытания → 5 стартовых колод.'; }
+    return;
+  }
   const id = sel('deckPick').value;
   const deck = resolveDeck(id, deckList as unknown as DeckLike[]);
   const problem = deck ? deckPlayProblem(deck) : 'колода не найдена';
@@ -6642,7 +7568,6 @@ function updatePlayGate(): void {
   b.disabled = problems.length > 0;
   b.title = problems.length > 0 ? `Колода не собрана: ${problems[0]}` : 'Начать бой';
   // видимая подсказка гейта (не только title) — юзабилити главного экрана
-  const ph = document.getElementById('playHint') as HTMLElement | null;
   if (ph) {
     if (problems.length > 0) { ph.hidden = false; ph.textContent = `⚠ Колода не собрана: ${problems[0]}`; }
     else { ph.hidden = true; ph.textContent = ''; }
@@ -6676,7 +7601,7 @@ async function requestMatchStart(): Promise<string | null> {
     if (typeof window.fetch !== 'function') return null;
     const ctl = new AbortController();
     const timer = window.setTimeout(() => ctl.abort(), 700);
-    const r = await window.fetch(`http://${window.location.hostname}:8080/api/match/start`, {
+    const r = await window.fetch(`${MATCH_HTTP_API()}/api/match/start`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       signal: ctl.signal,
@@ -6742,12 +7667,17 @@ function applyBattleBg(playerFaction: Faction = picked): void {
   loadImg(0);
 }
 btn('btnPlay').addEventListener('click', () => {
+  if (!meta.starterDecksUnlocked && battle.tutLesson <= 0) { openIntroFlow(); return; }
   audioUnlock(); musicStart(); Sfx.uiClick();
   if (battle.net) { battle.net.close(); battle.net = null; }
   battle.lastWasNet = false;
-  applyBattleBg(picked);
-  battle.playerFaction = picked;
-  battle.playerDeckId = sel('deckPick').value;
+  const trainingMatch = battle.tutLesson > 0;
+  const starter = starterDeckForFaction(Faction.Aurites);
+  battle.playerFaction = trainingMatch ? Faction.Aurites : picked;
+  battle.playerDeckId = trainingMatch
+    ? starter?.id ?? Faction.Aurites
+    : sel('deckPick').value;
+  applyBattleBg(battle.playerFaction);
   const fromMenu = battle.launchMode === 'menu';
   if (battle.launchMode !== 'event') battle.eventId = null;
   if (fromMenu) {
@@ -6760,13 +7690,14 @@ btn('btnPlay').addEventListener('click', () => {
     battle.friendFoe = null; battle.bossPower = null; battle.bossHp = 0; battle.tutLesson = 0; battle.campNode = null;
     battle.eventId = null;
   }
-  battle.launchMode = 'menu';
+  battle.launchMode = trainingMatch ? 'tut' : 'menu';
   void (async () => {
     battle.matchId = fromMenu ? await requestMatchStart() : null;
     battle.start().catch(err => reportFatal('start', err));
   })();
 });
 btn('btnEndTurn').addEventListener('click', () => battle.endTurnNow());
+btn('btnFullControl').addEventListener('click', () => battle.setFullControl(!settings.fullControl));
 for (const [hid, sd] of [['playerHero', Side.Player], ['enemyHero', Side.Opponent]] as [string, Side][]) {
   $(hid).addEventListener('click', () => {
     if (battle.pendingTarget && $(hid).classList.contains('droppable')) { battle.pendingTarget(null, sd); return; }
@@ -6782,6 +7713,9 @@ $('enemyGrave').closest('.stat')?.addEventListener('click', () => battle.openGra
 $('graveClose').addEventListener('click', () => $('graveModal').classList.add('hidden'));
 $('graveModal').addEventListener('click', ev => { if (ev.target === $('graveModal')) $('graveModal').classList.add('hidden'); });
 document.addEventListener('keydown', ev => {
+  if (ev.key === 'Escape' && !$('replayModal').classList.contains('hidden')) {
+    ev.preventDefault(); ev.stopImmediatePropagation(); closeReplay(); return;
+  }
   if (ev.key === 'Escape' && !$('factionModal').classList.contains('hidden')) { closeFactionModal(); return; }
   if (ev.key === 'Escape' && !$('graveModal').classList.contains('hidden')) { $('graveModal').classList.add('hidden'); return; }
   if (ev.key === 'Escape') battle.cancelAttack();
@@ -6803,7 +7737,7 @@ window.setInterval(() => {
   const b = $('battle');
   if (!b || b.classList.contains('hidden')) return;
   const W = window.innerWidth, H = window.innerHeight;
-  const known = new Set(['backdrop', 'tableSurface', 'mulligan', 'gameover', 'cardModal', 'graveModal',
+  const known = new Set(['backdrop', 'tableSurface', 'mulligan', 'gameover', 'cardModal', 'graveModal', 'introModal',
     'journalModal', 'replayModal', 'factionModal', 'levelUpFx', 'boosterModal', 'cosmPreview',
     'upgradeModal', 'profileModal', 'adminModal', 'topbar', 'toast', 'screenFlash', 'vignettePulse']);
   for (const elx of Array.from(document.body.children) as HTMLElement[]) {
@@ -7258,13 +8192,14 @@ function openProfile(): void {
   }
   if (profTab === 'hist') {
     bodyHtml = meta.history.slice(0, 20).map(h => {
-      const rp = (meta.replays ?? []).some(r => r.ts === h.ts);
-      return `<div class="jl ${h.win ? 'you' : 'foe'}">${h.win ? '✔ Победа' : '✘ Поражение'} · за ${FACTION_RU[h.fac as Faction]}
-        · vs ${esc(h.foe ?? 'ИИ')}${h.efac ? ` (${FACTION_RU[h.efac as Faction]})` : ''} · ${h.turns} х.
-        · ${new Date(h.ts).toLocaleDateString('ru-RU')}${h.practice ? ' · тренировка' : ''}
-        ${rp ? `<button class="btn replayBtn" data-ts="${h.ts}" style="padding:.1rem .5rem;font-size:.64rem;margin-left:.4rem">▶ Реплей</button>` : ''}</div>`;
+      const replay = (meta.replays ?? []).find(r => r.ts === h.ts);
+      const facName = FACTION_RU[h.fac as Faction] ?? h.fac;
+      return `<div class="jl ${h.win ? 'you' : 'foe'} replayHistoryRow"><span>${h.win ? '✔ Победа' : '✘ Поражение'} · за ${esc(facName)}
+        · vs ${esc(h.foe ?? 'ИИ')}${h.efac ? ` (${esc(FACTION_RU[h.efac as Faction] ?? h.efac)})` : ''} · ${h.turns} х.
+        · ${new Date(h.ts).toLocaleDateString('ru-RU')}${h.practice ? ' · тренировка' : ''}</span>
+        ${replay ? `<button class="btn replayBtn${replay.stats ? ' hasRecap' : ''}" data-ts="${h.ts}" aria-label="Открыть разбор матча">${replay.stats ? '✧ Разбор' : '▶ Реплей'}</button>` : ''}</div>`;
     }).join('') || '<div class="jl">Матчей ещё не было</div>';
-    bodyHtml += '<div class="jl" style="opacity:.7">Реплеи хранятся локально (3 последних): лог событий движка с разбивкой по ходам.</div>';
+    bodyHtml += '<div class="rpHistoryFoot"><b>Реплеи хранятся локально · 3 последних</b><span>Новые матчи получают статистическую сводку и фильтруемую хронологию.</span></div>';
   }
   if (profTab === 'fr') {
     const rows = (meta.friends ?? []).map(f => {
@@ -7285,6 +8220,7 @@ function openProfile(): void {
   updateQuestCountdowns();
   syncProfile();   // спека 2.1–2.4: профиль/задания сохраняются на сервере (best-effort)
   $('profileModal').classList.remove('hidden');
+  animateUiSurface($('profBody'), 'ecSubpanelEnter', 240);
 }
 
 // sleeve selection in profile cosm tab
@@ -7317,27 +8253,249 @@ document.addEventListener('click', ev=>{
   }
 });
 
-function openReplay(ts: number): void {
-  const r = (meta.replays ?? []).find(x => x.ts === ts);
-  if (!r) { showToast('Реплей не найден'); return; }
-  $('replayTitle').textContent = `▶ Реплей: ${r.foe} · ${r.win ? 'победа' : 'поражение'} · ${r.turns} х.`;
-  $('replayBody').innerHTML = r.lines.map((l, i) =>
-    `<div class="jl rpLine" data-i="${i}">[ход ${l[0]}] ${esc(l[1])}</div>`).join('') || '<div class="jl">Лог пуст</div>';
-  $('replayModal').classList.remove('hidden');
-}
+type ReplayKind = 'play' | 'combat' | 'effect' | 'resource' | 'system';
+const REPLAY_KIND_LABEL: Record<ReplayKind, string> = {
+  play: 'Розыгрыш', combat: 'Бой', effect: 'Эффект', resource: 'Ресурс', system: 'Событие',
+};
+const REPLAY_KIND_GLYPH: Record<ReplayKind, string> = {
+  play: '✦', combat: '⚔', effect: '✧', resource: '◈', system: '•',
+};
+const REPLAY_EVENT_KIND: Partial<Record<GameEventType, ReplayKind>> = {
+  [GameEventType.CardPlayed]: 'play', [GameEventType.CreatureSummoned]: 'play',
+  [GameEventType.SpellCast]: 'play', [GameEventType.SpellCopied]: 'play',
+  [GameEventType.RunePlayed]: 'play', [GameEventType.RitualPlaced]: 'play',
+  [GameEventType.RitualResolved]: 'play', [GameEventType.StackPushed]: 'play',
+  [GameEventType.StackResolved]: 'play',
+  [GameEventType.CreatureAttacks]: 'combat', [GameEventType.CreatureDamaged]: 'combat',
+  [GameEventType.CreatureHealed]: 'combat', [GameEventType.CreatureDeath]: 'combat',
+  [GameEventType.PlayerDamage]: 'combat', [GameEventType.PlayerHeal]: 'combat',
+  [GameEventType.PlayerDeath]: 'combat',
+  [GameEventType.StatusApplied]: 'effect', [GameEventType.StatusExpired]: 'effect',
+  [GameEventType.CreatureSilenced]: 'effect', [GameEventType.CreatureBounced]: 'effect',
+  [GameEventType.CreatureStolen]: 'effect', [GameEventType.CardStolen]: 'effect',
+  [GameEventType.CardDrawn]: 'resource', [GameEventType.CardBurned]: 'resource',
+  [GameEventType.CardDiscarded]: 'resource', [GameEventType.ManaChanged]: 'resource',
+  [GameEventType.EchoGained]: 'resource', [GameEventType.EchoSpent]: 'resource',
+  [GameEventType.RuneTick]: 'resource', [GameEventType.RuneExpired]: 'resource',
+};
+let activeReplay: ReplayRecord | null = null;
+let activeReplayLines: ReplayLine[] = [];
+let replayPlaybackLines: HTMLElement[] = [];
 let replayTimer = 0;
-function replayPlay(): void {
-  if (replayTimer) { window.clearInterval(replayTimer); replayTimer = 0; return; }
-  const lines = Array.from(document.querySelectorAll('#replayBody .rpLine')) as HTMLElement[];
-  let i = 0;
-  replayTimer = window.setInterval(() => {
-    if (i >= lines.length) { window.clearInterval(replayTimer); replayTimer = 0; return; }
-    lines.forEach(l => l.classList.remove('you'));
-    lines[i].classList.add('you');
-    lines[i].scrollIntoView({ block: 'nearest' });
-    i += 1;
-  }, 110);
+let replayIndex = 0;
+let replayReturnFocus: HTMLElement | null = null;
+
+function replayEventText(event: GameEvent): string {
+  if (typeof event.text === 'string' && event.text.trim()) return event.text.trim();
+  const card = event.cardName ? `«${event.cardName}»` : '';
+  const value = Number.isFinite(event.value) ? Number(event.value) : 0;
+  switch (event.type) {
+    case GameEventType.CardPlayed: return `Разыграна карта ${card || 'без названия'}`;
+    case GameEventType.CreatureSummoned: return `${card || 'Существо'} призвано на поле`;
+    case GameEventType.SpellCast: return `Разыграно заклинание ${card || ''}`.trim();
+    case GameEventType.SpellCopied: return `Заклинание ${card || ''} повторено`.trim();
+    case GameEventType.RunePlayed: return `Установлена руна ${card || ''}`.trim();
+    case GameEventType.RitualPlaced: return `Начат ритуал ${card || ''}`.trim();
+    case GameEventType.CreatureAttacks: return `${card || 'Существо'} атакует`;
+    case GameEventType.CreatureDamaged: return event.absorbed
+      ? `${card || 'Существо'} полностью защищено щитом`
+      : `${card || 'Существо'} получает ${value} урона`;
+    case GameEventType.CreatureHealed: return `${card || 'Существо'} восстанавливает ${value} здоровья`;
+    case GameEventType.CreatureDeath: return `${card || 'Существо'} погибает`;
+    case GameEventType.PlayerDamage: return `Герой получает ${value} урона`;
+    case GameEventType.PlayerHeal: return `Герой восстанавливает ${value} здоровья`;
+    case GameEventType.CardDrawn: return `Взята карта${card ? ` ${card}` : ''}`;
+    case GameEventType.ManaChanged: return `Мана изменена: ${value}`;
+    case GameEventType.EchoGained: return 'Получено Эхо';
+    case GameEventType.EchoSpent: return `Потрачено Эхо${card ? ` · ${card}` : ''}`;
+    case GameEventType.GameOver: return event.result === GameResult.Draw ? 'Матч завершился ничьей' : 'Матч завершён';
+    default: return card;
+  }
 }
+function normalizeReplayLine(raw: ReplayLine | [number, string]): ReplayLine {
+  if (Array.isArray(raw)) {
+    const turn = Number(raw[0]);
+    return { turn: Number.isFinite(turn) ? Math.max(0, Math.floor(turn)) : 0, text: String(raw[1] ?? '') };
+  }
+  const item = raw as Partial<ReplayLine> | null;
+  const turn = Number(item?.turn);
+  const type = typeof item?.type === 'string' ? item.type as GameEventType : undefined;
+  return {
+    turn: Number.isFinite(turn) ? Math.max(0, Math.floor(turn)) : 0,
+    text: typeof item?.text === 'string' ? item.text : '',
+    type,
+    side: item?.side === Side.Player || item?.side === Side.Opponent ? item.side : undefined,
+    cardName: typeof item?.cardName === 'string' ? item.cardName : undefined,
+    value: Number.isFinite(item?.value) ? Number(item?.value) : undefined,
+    absorbed: typeof item?.absorbed === 'boolean' ? item.absorbed : undefined,
+  };
+}
+function replayKind(line: ReplayLine): ReplayKind {
+  if (line.type && REPLAY_EVENT_KIND[line.type]) return REPLAY_EVENT_KIND[line.type]!;
+  const text = line.text.toLocaleLowerCase();
+  if (/(атака|атакует|урон|погиб|восстанавливает|щит|герой получает)/i.test(text)) return 'combat';
+  if (/(немот|эффект|статус|накладыва|снимает|оглуш|яд|горени)/i.test(text)) return 'effect';
+  if (/(разыгран|разыгрывает|заклинан|призван|существо|ритуал|установлена руна|повторяет)/i.test(text)) return 'play';
+  if (/(мана|эха|руна|добрал|взята карта|сброс|сгорела)/i.test(text)) return 'resource';
+  return 'system';
+}
+function replayStatValue(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+function replayNum(value: number | null): string {
+  return value === null ? '—' : new Intl.NumberFormat('ru-RU').format(value);
+}
+function replayStatCard(label: string, key: keyof MatchStats, record: ReplayRecord): string {
+  const you = replayStatValue(record.stats?.player?.[key]);
+  const foe = replayStatValue(record.stats?.opponent?.[key]);
+  return `<article class="rpStat"><small>${label}</small>
+    <div class="rpStatNums"><b>${replayNum(you)}</b><i>:</i><b>${replayNum(foe)}</b></div>
+    <div class="rpStatSides"><span>Вы</span><span>Соперник</span></div></article>`;
+}
+function replayHasDetailedStats(record: ReplayRecord): boolean {
+  const keys: Array<keyof MatchStats> = ['damageDealt', 'cardsPlayed', 'creaturesSummoned', 'spellsCast', 'runesPlayed', 'healingDone', 'kills', 'echoGained', 'echoUsed'];
+  return keys.some(key => replayStatValue(record.stats?.player?.[key]) !== null
+    || replayStatValue(record.stats?.opponent?.[key]) !== null);
+}
+function replaySummaryHtml(record: ReplayRecord): string {
+  const playerFaction = FACTION_RU[record.fac as Faction] ?? record.fac ?? 'Неизвестно';
+  const opponentFaction = record.opponentFaction
+    ? FACTION_RU[record.opponentFaction as Faction] ?? record.opponentFaction : '';
+  const matchup = `<section class="rpMatchup" aria-label="Участники матча">
+    <div class="rpSeat rpSeatYou"><small>ВАША ФРАКЦИЯ</small><b>${esc(playerFaction)}</b><span>Игрок</span></div>
+    <div class="rpVs" aria-hidden="true"><i></i><b>VS</b><i></i></div>
+    <div class="rpSeat rpSeatFoe"><small>СОПЕРНИК</small><b>${esc(record.foe || 'Соперник')}</b><span>${esc(opponentFaction || 'Фракция не сохранена')}</span></div>
+  </section>`;
+  if (!replayHasDetailedStats(record)) return `${matchup}
+    <div class="rpLegacyNote"><b>Текстовый реплей</b><span>Этот матч сохранён до обновления статистики. Хронология доступна; подробные показатели появятся в новых матчах.</span></div>`;
+  const player = record.stats?.player;
+  const foe = record.stats?.opponent;
+  const echoText = (side: Partial<MatchStats> | undefined): string =>
+    `${replayNum(replayStatValue(side?.echoGained))} / ${replayNum(replayStatValue(side?.echoUsed))}`;
+  const duration = replayStatValue(record.stats?.durationSecs);
+  return `${matchup}<div class="replayStatsGrid" aria-label="Статистика матча">
+    <article class="rpStat rpStatWide"><small>ДЛИТЕЛЬНОСТЬ</small><div class="rpStatNums"><b>${duration === null ? '—' : `${Math.floor(duration / 60)}:${String(Math.floor(duration % 60)).padStart(2, '0')}`}</b></div><div class="rpStatSides"><span>реальное время</span></div></article>
+    ${replayStatCard('УРОН', 'damageDealt', record)}
+    ${replayStatCard('КАРТ СЫГРАНО', 'cardsPlayed', record)}
+    ${replayStatCard('СУЩЕСТВ ПРИЗВАНО', 'creaturesSummoned', record)}
+    ${replayStatCard('ЗАКЛИНАНИЙ', 'spellsCast', record)}
+    ${replayStatCard('ИСЦЕЛЕНИЕ', 'healingDone', record)}
+    ${replayStatCard('РУН', 'runesPlayed', record)}
+    ${replayStatCard('УБИЙСТВ', 'kills', record)}
+    <article class="rpStat rpEchoStat"><small>ЭХО · ПОЛУЧЕНО / ИСПОЛЬЗОВАНО</small><div class="rpEchoPair"><b>${echoText(player)}</b><b>${echoText(foe)}</b></div><div class="rpStatSides"><span>Вы</span><span>Соперник</span></div></article>
+  </div>`;
+}
+function stopReplayPlayback(reset: boolean): void {
+  if (replayTimer) { window.clearInterval(replayTimer); replayTimer = 0; }
+  if (reset) {
+    replayIndex = 0;
+    replayPlaybackLines = [];
+    document.querySelectorAll('#replayBody .rpLine').forEach(line => {
+      line.classList.remove('replayNow'); line.removeAttribute('aria-current');
+    });
+  }
+  const playButton = document.getElementById('btnReplayPlay');
+  if (playButton) { playButton.textContent = '▶ Воспроизвести'; playButton.setAttribute('aria-pressed', 'false'); }
+}
+function replayDelay(): number {
+  const speed = Number((document.getElementById('replaySpeed') as HTMLSelectElement | null)?.value ?? 1);
+  return Math.max(70, Math.round(280 / (Number.isFinite(speed) && speed > 0 ? speed : 1)));
+}
+function replayAdvance(): void {
+  const line = replayPlaybackLines[replayIndex];
+  if (!line) { stopReplayPlayback(false); return; }
+  replayPlaybackLines.forEach(item => { item.classList.remove('replayNow'); item.removeAttribute('aria-current'); });
+  line.classList.add('replayNow'); line.setAttribute('aria-current', 'step');
+  line.scrollIntoView?.({ block: 'nearest', behavior: prefersReducedUiMotion() ? 'auto' : 'smooth' });
+  replayIndex += 1;
+  if (replayIndex >= replayPlaybackLines.length) stopReplayPlayback(false);
+}
+function replayPlay(): void {
+  if (replayTimer) { stopReplayPlayback(false); return; }
+  if (replayIndex >= replayPlaybackLines.length) {
+    replayIndex = 0;
+    document.querySelectorAll('#replayBody .rpLine').forEach(line => {
+      line.classList.remove('replayNow'); line.removeAttribute('aria-current');
+    });
+    replayPlaybackLines = Array.from(document.querySelectorAll('#replayBody .rpLine')) as HTMLElement[];
+  }
+  if (!replayPlaybackLines.length) replayPlaybackLines = Array.from(document.querySelectorAll('#replayBody .rpLine')) as HTMLElement[];
+  if (!replayPlaybackLines.length) return;
+  const playButton = document.getElementById('btnReplayPlay');
+  if (playButton) { playButton.textContent = 'Ⅱ Пауза'; playButton.setAttribute('aria-pressed', 'true'); }
+  replayTimer = window.setInterval(replayAdvance, replayDelay());
+  replayAdvance();
+}
+function renderReplayTimeline(): void {
+  const body = document.getElementById('replayBody');
+  if (!body || !activeReplay) return;
+  stopReplayPlayback(true);
+  const query = ((document.getElementById('replaySearch') as HTMLInputElement | null)?.value ?? '').trim().toLocaleLowerCase();
+  const kind = (document.getElementById('replayKind') as HTMLSelectElement | null)?.value ?? 'all';
+  const turn = (document.getElementById('replayTurn') as HTMLSelectElement | null)?.value ?? 'all';
+  const visible = activeReplayLines.map((line, index) => ({ line, index, category: replayKind(line) }))
+    .filter(item => (kind === 'all' || item.category === kind)
+      && (turn === 'all' || item.line.turn === Number(turn))
+      && (!query || `${item.line.text} ${item.line.type ?? ''} ${REPLAY_KIND_LABEL[item.category]}`.toLocaleLowerCase().includes(query)));
+  const count = document.getElementById('replayCount');
+  if (count) count.textContent = `Показано ${visible.length} из ${activeReplayLines.length} событий`;
+  body.innerHTML = visible.length ? visible.map(({ line, index, category }) => {
+    const actor = line.side === Side.Player ? 'Вы' : line.side === Side.Opponent ? 'Соперник' : '';
+    const sideClass = line.side === Side.Player ? 'rpSideYou' : line.side === Side.Opponent ? 'rpSideFoe' : '';
+    return `<article class="rpLine rpEvent ${sideClass}" role="listitem" data-i="${index}" data-turn="${line.turn}" data-kind="${category}">
+      <span class="rpEventGlyph rpKind-${category}" aria-hidden="true">${REPLAY_KIND_GLYPH[category]}</span>
+      <div class="rpEventContent"><div class="rpEventMeta"><span class="rpTurn">ХОД ${line.turn}</span>
+        <span class="rpKindTag rpKind-${category}">${REPLAY_KIND_LABEL[category]}</span>${actor ? `<span class="rpActor">${actor}</span>` : ''}</div>
+        <p class="rpEventText">${esc(line.text)}</p></div>
+    </article>`;
+  }).join('') : '<div class="rpEmpty"><b>Событий не найдено</b><span>Измените запрос или сбросьте фильтры.</span></div>';
+  replayPlaybackLines = Array.from(body.querySelectorAll('.rpLine')) as HTMLElement[];
+}
+function resetReplayFilters(): void {
+  const search = document.getElementById('replaySearch') as HTMLInputElement | null;
+  const kind = document.getElementById('replayKind') as HTMLSelectElement | null;
+  const turn = document.getElementById('replayTurn') as HTMLSelectElement | null;
+  if (search) search.value = '';
+  if (kind) kind.value = 'all';
+  if (turn) turn.value = 'all';
+  renderReplayTimeline();
+}
+function openReplay(ts: number): void {
+  const r = (meta.replays ?? []).find(x => Number(x.ts) === ts);
+  if (!r) { showToast('Реплей не найден'); return; }
+  stopReplayPlayback(true);
+  replayReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  activeReplay = r;
+  activeReplayLines = (Array.isArray(r.lines) ? r.lines : []).map(normalizeReplayLine).filter(line => !!line.text.trim());
+  const isDraw = r.result === GameResult.Draw;
+  const result = isDraw ? 'Ничья' : r.win ? 'Победа' : 'Поражение';
+  const badge = document.getElementById('replayResult');
+  if (badge) { badge.textContent = result; badge.className = `replayResultBadge ${isDraw ? 'isDraw' : r.win ? 'isWin' : 'isLoss'}`; }
+  $('replayTitle').textContent = 'Разбор матча';
+  const date = new Date(Number(r.ts));
+  const dateText = Number.isFinite(date.getTime())
+    ? date.toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'дата не сохранена';
+  const duration = replayStatValue(r.stats?.durationSecs);
+  $('replayMetaLine').textContent = `${r.foe || 'Соперник'} · ${Number(r.turns) || 0} ходов · ${dateText}${duration === null ? '' : ` · ${Math.floor(duration / 60)}:${String(Math.floor(duration % 60)).padStart(2, '0')}`}`;
+  $('replaySummary').innerHTML = replaySummaryHtml(r);
+  const turnSelect = $('replayTurn') as HTMLSelectElement;
+  const turns = [...new Set(activeReplayLines.map(line => line.turn))].sort((a, b) => a - b);
+  turnSelect.innerHTML = '<option value="all">Все ходы</option>' + turns.map(turnNo => `<option value="${turnNo}">Ход ${turnNo}</option>`).join('');
+  (document.getElementById('replaySearch') as HTMLInputElement).value = '';
+  (document.getElementById('replayKind') as HTMLSelectElement).value = 'all';
+  (document.getElementById('replaySpeed') as HTMLSelectElement).value = '1';
+  $('replayModal').classList.remove('hidden');
+  renderReplayTimeline();
+  (document.getElementById('replaySearch') as HTMLInputElement).focus();
+}
+function closeReplay(): void {
+  stopReplayPlayback(true);
+  $('replayModal').classList.add('hidden');
+  activeReplay = null; activeReplayLines = []; replayPlaybackLines = [];
+  const focus = replayReturnFocus; replayReturnFocus = null;
+  if (focus?.isConnected) focus.focus();
+}
+$('replayModal').addEventListener('click', ev => { if (ev.target === $('replayModal')) closeReplay(); });
 function inviteFriend(nick: string): void {
   battle.launchMode = 'friend';
   battle.friendFoe = nick;
@@ -7614,6 +8772,7 @@ function openShop(): void {
   // объём как в MTG — после рендера витрины цепляем 3D-блик
   try { attachVolumetric(document.getElementById('shopBody')!); } catch {}
   try { const _sealed = document.getElementById('packSealed'); if (_sealed) attachVolumetric(_sealed.parentElement!); } catch {}
+  animateUiSurface($('shopBody'), 'ecSubpanelEnter', 240);
 }
 document.addEventListener('click', ev => {
   const t = ev.target as HTMLElement | null;
@@ -7852,13 +9011,20 @@ document.addEventListener('click', ev => {
     return;
   }
   if (t0?.id === 'btnReplayPlay') { replayPlay(); return; }
-  if (t0?.id === 'btnReplayClose') {
-    if (replayTimer) { window.clearInterval(replayTimer); replayTimer = 0; }
-    $('replayModal').classList.add('hidden');
-  }
+  if (t0?.id === 'btnReplayClose') { closeReplay(); return; }
+  if (t0?.id === 'btnReplayReset') { resetReplayFilters(); return; }
+});
+document.addEventListener('input', ev => {
+  const target = ev.target as HTMLElement | null;
+  if (target?.id === 'replaySearch') renderReplayTimeline();
 });
 document.addEventListener('change', ev => {
   const t0 = ev.target as HTMLElement | null;
+  if (t0?.id === 'replayKind' || t0?.id === 'replayTurn') { renderReplayTimeline(); return; }
+  if (t0?.id === 'replaySpeed') {
+    if (replayTimer) { window.clearInterval(replayTimer); replayTimer = window.setInterval(replayAdvance, replayDelay()); }
+    return;
+  }
   // Никнейм сохраняется по событию change (валидация 3–16/мат/уникальность — см. invalidNick).
 });
 
@@ -7993,6 +9159,7 @@ function openBP(): void {
     </div>`;
   $('bpModal').classList.remove('hidden');
   try { attachVolumetric(document.getElementById('bpBody')!); } catch {}
+  animateUiSurface($('bpBody'), 'ecSubpanelEnter', 240);
 }
 document.addEventListener('click', ev => {
   const t0 = ev.target as HTMLElement | null;
@@ -8099,6 +9266,8 @@ const CAMP_DIFFS = [
 let campSel: string | null = null;
 function campStars(node: string): number { return meta.campStars?.[node] ?? 0; }
 function openCampaign(): void {
+  if (!requireStarterDeckUnlock()) return;
+  setAppRoute('campaign');
   const regions = FACTION_IDS.map(f => {
     const nodes = [1, 2, 3, 4].map(n => {
       const id = `${f}_${n}`;
@@ -8147,8 +9316,8 @@ function openCampaign(): void {
     награды ×1/×1.5/×2 (звёзды ★). Кампания не влияет на рейтинг.</div>${loreBox}${regions}`;
   closeAllScreens();
   $('menu').classList.add('hidden');
-  setAppRoute('campaign');
   $('campaignModal').classList.remove('hidden');
+  animateUiSurface($('campBody'), 'ecSubpanelEnter', 240);
 }
 document.addEventListener('click', ev => {
   const t0 = ev.target as HTMLElement | null;
@@ -8283,7 +9452,213 @@ function tutCoach(text: string): void {
   n.classList.remove('hidden');
 }
 function tutCoachHide(): void { $('tutCoach')?.classList.add('hidden'); }
+
+const INTRO_CHAPTERS = ['Пробуждение у Врат', 'Пять голосов', 'Основы поединка', 'Испытания', 'Новая хранительница Цитадели'];
+function openIntroFlow(): void {
+  if (meta.starterDecksUnlocked) { meta.introComplete = true; return; }
+  const modal = document.getElementById('introModal');
+  if (!modal) return;
+  modal.classList.remove('hidden');
+  document.body.classList.add('introOpen');
+  if (modal.dataset.trapBound !== '1') {
+    modal.dataset.trapBound = '1';
+    modal.addEventListener('keydown', (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); return; }
+      if (ev.key !== 'Tab') return;
+      const focusable = Array.from(modal.querySelectorAll<HTMLElement>(
+        'button:not([disabled]),[href],input:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])'))
+        .filter(node => !node.closest('.hidden'));
+      if (!focusable.length) { ev.preventDefault(); return; }
+      const first = focusable[0], last = focusable[focusable.length - 1];
+      if (ev.shiftKey && (document.activeElement === first || !modal.contains(document.activeElement))) {
+        ev.preventDefault(); last.focus();
+      } else if (!ev.shiftKey && (document.activeElement === last || !modal.contains(document.activeElement))) {
+        ev.preventDefault(); first.focus();
+      }
+    });
+    modal.addEventListener('click', ev => { if (ev.target === modal) ev.preventDefault(); });
+  }
+  renderIntroFlow();
+}
+function closeIntroFlow(): void {
+  document.getElementById('introModal')?.classList.add('hidden');
+  document.body.classList.remove('introOpen');
+}
+function renderIntroFlow(): void {
+  const modal = document.getElementById('introModal');
+  const body = document.getElementById('introBody');
+  const foot = document.getElementById('introFoot');
+  if (!modal || !body || !foot) return;
+  modal.classList.remove('hidden');
+  document.body.classList.add('introOpen');
+  const title = document.getElementById('introTitle');
+  const stepText = document.getElementById('introStepText');
+  const progress = document.getElementById('introProgressFill') as HTMLElement | null;
+  const showCompletion = meta.introComplete && meta.starterDecksUnlocked;
+  const stage = Math.max(0, Math.min(3, Number(meta.introStep) || 0));
+  let progressPct = [18, 38, 58, 72][stage] ?? 18;
+
+  if (showCompletion) {
+    progressPct = 100;
+    if (title) title.textContent = 'Все двери открыты';
+    if (stepText) stepText.textContent = 'ПРОЛОГ · ЗАВЕРШЁН';
+    body.innerHTML = `<div class="introLoreMark">✵</div>
+      <p class="introLead">Эхо признало ваш голос. Вы прошли четыре боевых испытания, познакомились с пятью орденами и готовы защищать Цитадель.</p>
+      <div class="introRewardLine">🔓 Открыты все 5 стартовых колод · 🎁 +5 бустеров · 💎 +100</div>
+      <div class="introDeckGrid">${FACTION_IDS.map(f => {
+        const d = starterDeckForFaction(f);
+        return `<div class="introDeckChoice${f === meta.introFaction ? ' selected' : ''}" style="--ifac:${colorOf(f).primary}">
+          <b>${esc(d?.name ?? FACTION_RU[f])}</b><small>${esc(FACTION_RU[f])} · ${d?.cards.length ?? 30} карт · доступна в разделе «Колоды»</small></div>`;
+      }).join('')}</div>
+      <p class="introLead" style="font-size:.82rem;margin:.3rem auto">Ваш первый выбор: <b>${esc(FACTION_RU[meta.introFaction as Faction] ?? meta.introFaction)}</b>. Остальные колоды тоже уже доступны.</p>`;
+    foot.innerHTML = `<span class="left"><span class="introMeetCount">ПРОЛОГ ЗАВЕРШЁН</span></span>
+      <span class="right"><button type="button" class="btn primary" id="btnIntroEnter">Войти в Цитадель →</button></span>`;
+  } else {
+    if (stepText) stepText.textContent = `ГЛАВА ${stage + 1} / 5`;
+    if (stage === 0) {
+      if (title) title.textContent = INTRO_CHAPTERS[0];
+      body.innerHTML = `<div class="introLoreMark" aria-hidden="true">✦</div>
+        <p class="introLead">За пределами известных королевств стоит Цитадель — крепость на разломе пяти стихий. Её стены хранят не просто магию: они помнят каждую битву.</p>
+        <p class="introLead">Когда древнее <b style="color:#f4d995">Эхо</b> пробудилось, руны заговорили, старые союзы дрогнули, а пять орденов потянулись к его силе. Теперь Цитадели нужен новый хранитель — и сначала ему предстоит понять, кому можно доверить свою колоду.</p>
+        <blockquote class="introQuote">«Цитадель слышит каждое эхо. И каждое — помнит.»</blockquote>
+        <div class="introLoreFacts"><div class="introLoreFact"><b>Пять стихий</b><small>пять взглядов на одну войну</small></div>
+          <div class="introLoreFact"><b>Руны и заклинания</b><small>решение важнее силы карты</small></div>
+          <div class="introLoreFact"><b>Твоё испытание</b><small>четыре боя на настоящем движке</small></div></div>`;
+      foot.innerHTML = `<span class="left"><span class="introMeetCount">ТВОЯ ИСТОРИЯ НАЧИНАЕТСЯ</span></span>
+        <span class="right"><button type="button" class="btn primary" id="btnIntroNext">Встретить пять фракций →</button></span>`;
+    } else if (stage === 1) {
+      progressPct = 38;
+      if (title) title.textContent = INTRO_CHAPTERS[1];
+      const seen = new Set(meta.introFactionsSeen ?? []);
+      const selected = FACTION_IDS.includes(meta.introFaction as Faction) ? meta.introFaction as Faction : Faction.Aurites;
+      const info = FACTION_INFO[selected];
+      const allSeen = FACTION_IDS.every(f => seen.has(f));
+      body.innerHTML = `<p class="introLead" style="margin:.05rem auto .65rem">Каждый орден хранит часть истории Цитадели. Откройте все пять голосов, затем выберите ту фракцию, чьи идеалы поведут вас в бой.</p>
+        <div class="introFactionGrid">${FACTION_IDS.map(f => {
+          const item = FACTION_INFO[f]; const col = colorOf(f); const visited = seen.has(f);
+          return `<button type="button" class="introFactionCard${f === selected ? ' selected' : ''}" data-intro-faction="${f}"
+            style="--ifac:${col.primary}" aria-pressed="${f === selected}" title="Познакомиться с орденом: ${esc(item?.name ?? FACTION_RU[f])}">
+            ${visited ? '<span class="seenMark" aria-label="прочитано">✓</span>' : ''}
+            <span class="introFactionSigil">${FACTION_SIGIL[f]}</span><b>${esc(item?.name ?? FACTION_RU[f])}</b>
+            <small>${esc(item?.tagline ?? HUB_ELEM_RU[f])}</small></button>`;
+        }).join('')}</div>
+        <div class="introFactionDetail" style="--ifac:${colorOf(selected).primary}">
+          <h3>${FACTION_SIGIL[selected]} ${esc(info?.name ?? FACTION_RU[selected])} · ${esc(info?.tagline ?? HUB_ELEM_RU[selected])}</h3>
+          <p>${esc(info?.description ?? '')}</p>
+          <div class="introMechanic"><b>Знак ордена:</b> ${esc(info?.mechanics ?? PASSIVE_TEXT[selected].replace(/<[^>]+>/g, ''))}</div>
+        </div>
+        <div class="introMeetCount"><span>Познакомлено: <b>${seen.size} / ${FACTION_IDS.length}</b></span>
+          <span>${allSeen ? `Выбрано: ${esc(info?.name ?? FACTION_RU[selected])}` : 'Нажмите на каждую фракцию, чтобы узнать её историю'}</span></div>`;
+      foot.innerHTML = `<span class="left"><button type="button" class="btn" id="btnIntroBack">← К прологу</button></span>
+        <span class="right"><button type="button" class="btn primary" id="btnIntroNext" ${allSeen ? '' : 'disabled'}>Изучить бой →</button></span>`;
+    } else if (stage === 2) {
+      progressPct = 58;
+      if (title) title.textContent = INTRO_CHAPTERS[2];
+      body.innerHTML = `<p class="introLead">Карты — это только начало. В каждой партии важны порядок ходов, запас маны и момент, когда вы решаете вмешаться.</p>
+        <div class="introRuleGrid">
+          <div class="introRule"><span class="ruleNum">1</span><div><b>Мана растёт вместе с ходом</b><p>В начале вашего хода максимум маны увеличивается на 1. Планируйте: дешёвая карта сейчас или сильная позже.</p></div></div>
+          <div class="introRule"><span class="ruleNum">2</span><div><b>Руны меняют правила</b><p>Руна занимает отдельное место и усиливает героя или ваших существ. Обычно её эффект остаётся до конца партии.</p></div></div>
+          <div class="introRule"><span class="ruleNum">3</span><div><b>Существа не всегда атакуют сразу</b><p>После призыва большинство существ ждёт следующего хода. Затем вы выбираете цель атаки: существо или герой.</p></div></div>
+          <div class="introRule"><span class="ruleNum">4</span><div><b>Мгновенное заклинание — в нужный момент</b><p>В окне приоритета можно ответить на действие соперника. Следите за стеком и берегите ману для важного ответа.</p></div></div>
+        </div>
+        <blockquote class="introQuote">Цель поединка проста: защити свои планы, читай намерения соперника и доведи его здоровье до нуля.</blockquote>`;
+      foot.innerHTML = `<span class="left"><button type="button" class="btn" id="btnIntroBack">← К фракциям</button></span>
+        <span class="right"><button type="button" class="btn primary" id="btnIntroNext">В учебный лагерь →</button></span>`;
+    } else {
+      progressPct = 68 + Math.round(Math.min(4, meta.tutStage ?? 0) * 7);
+      const completed = Math.max(0, Math.min(LESSONS.length, Number(meta.tutStage) || 0));
+      if (title) title.textContent = INTRO_CHAPTERS[3];
+      if (stepText) stepText.textContent = completed < LESSONS.length
+        ? `ИСПЫТАНИЕ ${completed + 1} / ${LESSONS.length}` : 'НАГРАДА · 5 СТАРТОВЫХ КОЛОД';
+      if (completed < LESSONS.length) {
+        const next = completed + 1;
+        body.innerHTML = `<p class="introLead" style="margin:.05rem auto .55rem">Наставник ждёт на тренировочном поле. Четыре коротких боя научат читать ману, разыгрывать руны, атаковать и применять ключевые способности. Прогресс сохраняется — можно вернуться позже.</p>
+          <div class="introLessonList">${LESSONS.map((l, i) => {
+            const n = i + 1; const done = n <= completed; const active = n === next;
+            const buttonText = done ? 'Пройдено ✓' : active ? 'Начать бой' : 'Закрыто';
+            return `<div class="introLesson${done ? ' done' : active ? ' current' : ''}">
+              <span class="introLessonSeal">${done ? '✓' : n}</span><div><h3>${esc(l.ru)}</h3><p>${esc(l.hint)}</p></div>
+              <button type="button" class="btn${active ? ' primary' : ''}" data-intro-lesson="${n}" ${active ? '' : 'disabled'}>${buttonText}</button>
+            </div>`;
+          }).join('')}</div>
+          <div class="introMeetCount"><span>Пройдено испытаний</span><b>${completed} / ${LESSONS.length}</b></div>`;
+        foot.innerHTML = `<span class="left"><button type="button" class="btn" id="btnIntroBack">← К правилам</button></span>
+          <span class="right"><span class="introMeetCount">Сначала пройдите бой ${next} / 4</span></span>`;
+      } else {
+        progressPct = 92;
+        if (title) title.textContent = 'Последний ключ';
+        body.innerHTML = `<p class="introLead" style="margin:.05rem auto .5rem">Испытания завершены. Совет Цитадели открывает вам все пять базовых колод — выберите одну для первого боя. Остальные тоже останутся в разделе «Колоды».</p>
+          <div class="introDeckGrid">${FACTION_IDS.map(f => {
+            const deck = starterDeckForFaction(f); const chosen = meta.introFaction === f;
+            return `<button type="button" class="introDeckChoice${chosen ? ' selected' : ''}" data-intro-deck="${f}"
+              style="--ifac:${colorOf(f).primary}" aria-pressed="${chosen}">
+              <b>${esc(deck?.name ?? `Стартовая: ${FACTION_RU[f]}`)}</b><small>${FACTION_SIGIL[f]} ${esc(FACTION_RU[f])} · ${deck?.cards.length ?? 30} карт${chosen ? ' · ВАШ ВЫБОР' : ''}</small></button>`;
+          }).join('')}</div>
+          <div class="introRewardLine">🎓 4 испытания пройдены · 🎁 +5 бустеров · 💎 +100 · 🔓 все 5 колод</div>`;
+        foot.innerHTML = `<span class="left"><button type="button" class="btn" id="btnIntroBack">← Испытания</button></span>
+          <span class="right"><button type="button" class="btn primary" id="btnIntroUnlock">Открыть стартовые колоды →</button></span>`;
+      }
+    }
+  }
+  if (progress) progress.style.width = `${progressPct}%`;
+  if (stepText && showCompletion) stepText.textContent = 'ПРОЛОГ · ЗАВЕРШЁН';
+  const focus = modal.querySelector<HTMLElement>('#introFoot button:not([disabled]),.introFactionCard.selected,.introDeckChoice.selected');
+  focus?.focus();
+}
+
+const introModalNode = document.getElementById('introModal');
+if ((window as unknown as { EC_NO_AUTH_GATE?: boolean }).EC_NO_AUTH_GATE) {
+  (window as unknown as { ecIntroSnapshot?: () => unknown }).ecIntroSnapshot = () => ({
+    complete: meta.introComplete, unlocked: meta.starterDecksUnlocked, step: meta.introStep,
+    seen: [...(meta.introFactionsSeen ?? [])], lessonStage: meta.tutStage,
+  });
+  (window as unknown as { ecFinishIntroForTest?: () => void }).ecFinishIntroForTest = () => {
+    meta.introComplete = true; meta.starterDecksUnlocked = true; meta.introStep = 3;
+    metaSave(); closeIntroFlow(); buildMenu(false);
+  };
+  (window as unknown as { ecPrepareIntroRewardForTest?: () => void }).ecPrepareIntroRewardForTest = () => {
+    meta.introComplete = false; meta.starterDecksUnlocked = false; meta.introStep = 3;
+    meta.introFactionsSeen = FACTION_IDS.slice(); meta.tutStage = LESSONS.length; meta.tutDone = true; meta.tutReward = '';
+    metaSave(); buildMenu(false); openIntroFlow();
+  };
+}
+introModalNode?.addEventListener('click', ev => {
+  const target = ev.target as HTMLElement | null;
+  if (!target) return;
+  const factionCard = target.closest('[data-intro-faction]') as HTMLElement | null;
+  if (factionCard?.dataset.introFaction && !meta.introComplete) {
+    const fac = factionCard.dataset.introFaction as Faction;
+    if (!FACTION_IDS.includes(fac)) return;
+    meta.introFaction = fac;
+    meta.introFactionsSeen = [...new Set([...(meta.introFactionsSeen ?? []), fac])];
+    picked = fac; savePicked(); metaSave(); renderIntroFlow(); return;
+  }
+  const deckChoice = target.closest('[data-intro-deck]') as HTMLElement | null;
+  if (deckChoice?.dataset.introDeck && !meta.introComplete) {
+    const fac = deckChoice.dataset.introDeck as Faction;
+    if (FACTION_IDS.includes(fac)) { meta.introFaction = fac; metaSave(); renderIntroFlow(); }
+    return;
+  }
+  const startLessonBtn = target.closest('[data-intro-lesson]') as HTMLElement | null;
+  if (startLessonBtn?.dataset.introLesson && !startLessonBtn.hasAttribute('disabled')) {
+    startLesson(Number(startLessonBtn.dataset.introLesson)); return;
+  }
+  if (target.closest('#btnIntroNext')) {
+    const current = Math.max(0, Math.min(3, Number(meta.introStep) || 0));
+    if (current === 1 && !FACTION_IDS.every(f => (meta.introFactionsSeen ?? []).includes(f))) return;
+    meta.introStep = Math.min(3, current + 1); metaSave(); renderIntroFlow(); return;
+  }
+  if (target.closest('#btnIntroBack')) {
+    meta.introStep = Math.max(0, (Number(meta.introStep) || 0) - 1); metaSave(); renderIntroFlow(); return;
+  }
+  if (target.closest('#btnIntroUnlock')) { grantTutReward(meta.introFaction || 'Aurites'); return; }
+  if (target.closest('#btnIntroEnter')) {
+    closeIntroFlow(); buildMenu(false); $('menu').classList.remove('hidden'); setAppRoute('home');
+    (document.getElementById('btnPlay') as HTMLElement | null)?.focus(); return;
+  }
+});
 function openTut(): void {
+  if (!meta.starterDecksUnlocked) { openIntroFlow(); return; }
   const rows = LESSONS.map((l, i) => {
     const n = i + 1;
     const done = (meta.tutStage ?? 0) >= n;
@@ -8309,17 +9684,38 @@ function openTut(): void {
   $('tutModal').classList.remove('hidden');
 }
 function startLesson(n: number): void {
+  if (!Number.isInteger(n) || n < 1 || n > LESSONS.length) return;
+  if (!meta.introComplete) {
+    const next = Math.min((meta.tutStage ?? 0) + 1, LESSONS.length);
+    if (n !== next) { showToast(`🎓 Сначала завершите испытание ${next}`); return; }
+  }
   battle.tutCleanup();
   battle.launchMode = 'tut';
   battle.practice = true;
   battle.tutLesson = n;
   battle.difficulty = 0.3;
+  battle.playerFaction = Faction.Aurites; // учебная колода фиксирована для воспроизводимых подсказок
+  battle.playerDeckId = starterDeckForFaction(Faction.Aurites)?.id ?? Faction.Aurites;
   battle.enemyFaction = FACTION_IDS[Math.floor(Math.random() * FACTION_IDS.length)];
+  battle.friendFoe = 'Наставник Цитадели';
+  battle.bossPower = null; battle.bossHp = 0; battle.campaignBoss = null; battle.campNode = null; battle.eventId = null;
+  battle.matchId = null;
+  closeIntroFlow();
   $('tutModal').classList.add('hidden');
-  btn('btnPlay').click();
+  audioUnlock(); musicStart(); Sfx.uiClick();
+  battle.start().catch(err => reportFatal('tutorial-start', err));
 }
 function grantTutReward(fac: string): void {
+  if (!FACTION_IDS.includes(fac as Faction) || (meta.tutStage ?? 0) < LESSONS.length) return;
+  const firstStoryUnlock = !meta.starterDecksUnlocked;
   meta.tutReward = fac;
+  meta.starterDecksUnlocked = true; // одновременно открываются все пять 30-карточных преконов
+  meta.introComplete = true;
+  meta.introFaction = fac;
+  meta.tutDone = true;
+  picked = fac as Faction;
+  menuSelectedDeckId = starterDeckForFaction(fac)?.id ?? fac;
+  savePicked(); saveMenuDeck();
   const cheap = [...db.values()].filter(c => c.faction === fac && !isExpansionId(c.id))
     .sort((a, b) => a.cost - b.cost).slice(0, 10);
   for (const c of cheap) owned.set(c.id, Math.min(PLAYSET, (owned.get(c.id) ?? 0) + 2));
@@ -8329,8 +9725,9 @@ function grantTutReward(fac: string): void {
   gemsAdd(100);
   renderShards();
   tutGatePractice();
-  openTut();
-  showToast(`🎁 Стартовая колода «${FACTION_RU[fac as Faction]}»: 10 карт ×2, 5 бустеров, 💎100`);
+  if (firstStoryUnlock) { buildMenu(false); renderIntroFlow(); }
+  else openTut();
+  showToast(`🎁 Открыты все 5 стартовых колод. Вы выбрали «${FACTION_RU[fac as Faction]}» · +5 бустеров · 💎100`);
 }
 /** Спека 6.3: тренировка (матчи без рейтинга) доступна только после обучения. */
 function tutGatePractice(): void {
@@ -8458,6 +9855,10 @@ btn('btnAgain').addEventListener('click', () => {
   if (battle.lastWasNet || battle.net) { battle.lastWasNet = false; openHomeScreen(); openOnline(); return; }
   battle.start().catch(err => reportFatal('restart', err));
 });
+btn('btnGoRecap').addEventListener('click', () => {
+  const latest = Array.isArray(meta.replays) ? meta.replays[0] : undefined;
+  if (latest) openReplay(latest.ts); else showToast('Разбор матча пока недоступен');
+});
 btn('btnGoMenu').addEventListener('click', () => openHomeScreen());
 
 /* --- коллекция: виртуализированная подгрузка оформлениями по 40 карточек --- */
@@ -8472,6 +9873,7 @@ let colActiveStyle = '';
 let colObserver: IntersectionObserver | null = null;
 let colRenderGeneration = 0;
 function openCollectionScreen(): void {
+  if (!requireStarterDeckUnlock()) return;
   setAppRoute('collection');
   $('menu').classList.add('hidden');
   for (const id of ['homeScreen','eventsScreen','decksScreen','shopModal','bpModal','profileModal','boosterModal','campaignModal','journalModal','replayModal'])
@@ -8619,6 +10021,8 @@ const spSel = document.getElementById('setSpeed') as HTMLSelectElement | null;
 if (spSel) spSel.addEventListener('change', () => { settings.animSpeed = Number(spSel.value) || 1; saveSettings(); applySettings(); });
 const apChk = document.getElementById('setAutoPass') as HTMLInputElement | null;
 if (apChk) apChk.addEventListener('change', () => { settings.autoPass = apChk.checked; saveSettings(); applySettings(); });
+const fcChk = document.getElementById('setFullControl') as HTMLInputElement | null;
+if (fcChk) fcChk.addEventListener('change', () => battle.setFullControl(fcChk.checked));
 const rpChk = document.getElementById('setRope') as HTMLInputElement | null;
 if (rpChk) rpChk.addEventListener('change', () => { settings.rope = rpChk.checked; saveSettings(); applySettings(); });
 const cbChk = document.getElementById('setCb') as HTMLInputElement | null;
@@ -8637,6 +10041,7 @@ const qSel = document.getElementById('setQuality') as HTMLSelectElement | null;
 if (qSel) qSel.addEventListener('change', () => { settings.quality = qSel.value; saveSettings(); applySettings(); });
 /* ---- Аккаунт: вход/регистрация через meta-server (LAUNCH_PLAN v2.27.0) ---- */
 let authMode: 'login' | 'register' = 'login';
+let authGateRefreshPending = false;
 function syncAccountRow(): void {
   const inn = !!meta.signedIn;
   const show = (id: string, on: boolean): void => {
@@ -8678,18 +10083,44 @@ function authRequired(): boolean { return !(window as unknown as { EC_NO_AUTH_GA
 function authGateCheck(): void {
   const m = document.getElementById('authModal');
   if (!m || !authRequired()) return;
-  if (meta.signedIn && authGet()) { m.classList.remove('gate'); return; }
+  const tokens = authGet();
+  if (meta.signedIn && tokens && Number.isFinite(tokens.exp) && tokens.exp > Date.now() + 30_000) {
+    m.classList.remove('gate');
+    return;
+  }
   m.classList.add('gate');
+  if (meta.signedIn && tokens) {
+    if (authGateRefreshPending) return;
+    authGateRefreshPending = true;
+    openAuth('login');
+    const err = document.getElementById('authErr');
+    if (err) err.textContent = 'Проверяем сохранённую сессию…';
+    const submit = document.getElementById('authSubmit') as HTMLButtonElement | null;
+    if (submit) submit.disabled = true;
+    void authRefresh().then(ok => {
+      if (ok && meta.signedIn) {
+        m.classList.remove('gate'); closeAuth(); syncAccountRow(); void friendsRefresh();
+      } else {
+        if (!authGet()) { meta.signedIn = false; metaSave(); syncAccountRow(); }
+        if (submit) submit.disabled = false;
+        const msg = document.getElementById('authErr');
+        if (msg) msg.textContent = authGet()
+          ? 'Не удалось проверить сессию. Проверьте соединение и войдите снова.'
+          : 'Сессия истекла — войдите снова.';
+      }
+    }).finally(() => { authGateRefreshPending = false; });
+    return;
+  }
   openAuth('login');
 }
 /** Гидрация профиля с meta-server после логина на новом устройстве. */
-async function pullProfile(pid: string): Promise<void> {
+async function pullProfile(pid: string): Promise<'loaded' | 'missing' | 'error'> {
+  const ctl = new AbortController();
+  const t = window.setTimeout(() => ctl.abort(), 8000);
   try {
-    const ctl = new AbortController();
-    const t = window.setTimeout(() => ctl.abort(), 2000);
-    const r = await authFetch(`${META_API()}/api/profile?pid=${encodeURIComponent(pid)}`, { signal: ctl.signal });
-    window.clearTimeout(t);
-    if (!r.ok) return; // зеркала ещё нет — остаёмся на локальном прогрессе
+    const r = await authFetch(`${META_API()}/api/profile?pid=${encodeURIComponent(pid)}`, { signal: ctl.signal, cache: 'no-store' });
+    if (r.status === 404) return 'missing';
+    if (!r.ok) return 'error';
     const gp = (await r.json()) as Record<string, unknown>;
     meta.nick = String(gp.nick ?? meta.nick);
     meta.xp = Number(gp.xp ?? meta.xp);
@@ -8718,11 +10149,41 @@ async function pullProfile(pid: string): Promise<void> {
     meta.foilTokens = Number(gp.foilTokens ?? meta.foilTokens ?? 0);
     meta.premOpens = Number(gp.premOpens ?? meta.premOpens ?? 0);
     if (Array.isArray(gp.avatarsOwned)) meta.avatarsOwned = gp.avatarsOwned as string[];
-    meta.tutStage = Number(gp.tutStage ?? meta.tutStage ?? 0);
-    if (gp.tutDone != null) meta.tutDone = !!gp.tutDone;
-    meta.tutReward = String(gp.tutReward ?? meta.tutReward ?? '');
-    if (Array.isArray(gp.tutClaims)) meta.tutClaims = gp.tutClaims as number[];
-    const c = gp.cosmetics as { backs?: string[]; tables?: string[]; runes?: string[]; backEq?: string; tableSkin?: string; runeSkin?: string } | null | undefined;
+    const wasStarterDecksLocked = !meta.starterDecksUnlocked;
+    const remoteTutStage = Number(gp.tutStage ?? meta.tutStage ?? 0);
+    if (Number.isFinite(remoteTutStage)) meta.tutStage = Math.max(meta.tutStage ?? 0, Math.max(0, Math.min(LESSONS.length, Math.trunc(remoteTutStage))));
+    meta.tutDone = !!meta.tutDone || gp.tutDone === true || meta.tutStage >= LESSONS.length;
+    const remoteTutReward = String(gp.tutReward ?? '').trim();
+    meta.tutReward = remoteTutReward || meta.tutReward || '';
+    if (Array.isArray(gp.tutClaims)) meta.tutClaims = [...new Set([...(meta.tutClaims ?? []), ...(gp.tutClaims as number[])])];
+
+    const hasIntroState = typeof gp.introComplete === 'boolean' || typeof gp.starterDecksUnlocked === 'boolean';
+    if (hasIntroState) {
+      meta.introComplete = !!meta.introComplete || gp.introComplete === true;
+      meta.starterDecksUnlocked = !!meta.starterDecksUnlocked || gp.starterDecksUnlocked === true;
+      const remoteStep = Number(gp.introStep ?? 0);
+      if (Number.isInteger(remoteStep) && remoteStep >= 0 && remoteStep <= 3) meta.introStep = Math.max(meta.introStep ?? 0, remoteStep);
+      if (FACTION_IDS.includes(gp.introFaction as Faction)) meta.introFaction = gp.introFaction as Faction;
+      if (Array.isArray(gp.introFactionsSeen)) {
+        meta.introFactionsSeen = [...new Set(
+          [...(meta.introFactionsSeen ?? []), ...gp.introFactionsSeen]
+            .filter((f): f is Faction => typeof f === 'string' && FACTION_IDS.includes(f as Faction))
+        )];
+      }
+    }
+    const legacyTutorialComplete = !hasIntroState && meta.introStep === 0 && !(meta.introFactionsSeen ?? []).length
+      && meta.tutDone && meta.tutStage >= LESSONS.length;
+    if (meta.tutReward || legacyTutorialComplete) {
+      meta.introComplete = true; meta.starterDecksUnlocked = true;
+    }
+    if (meta.introComplete) meta.starterDecksUnlocked = true;
+    if (meta.starterDecksUnlocked) meta.introComplete = true;
+    if (wasStarterDecksLocked && meta.starterDecksUnlocked) { closeIntroFlow(); buildMenu(false); }
+    else if (!meta.starterDecksUnlocked && !document.getElementById('introModal')?.classList.contains('hidden')) renderIntroFlow();
+    const c = gp.cosmetics as {
+      backs?: string[]; tables?: string[]; runes?: string[]; backEq?: string; tableSkin?: string; runeSkin?: string;
+      deckHeroesOwned?: string[]; deckHeroes?: Record<string, string>;
+    } | null | undefined;
     if (c) {
       if (Array.isArray(c.backs)) meta.backsOwned = c.backs;
       if (Array.isArray(c.tables)) meta.tablesOwned = c.tables;
@@ -8730,51 +10191,115 @@ async function pullProfile(pid: string): Promise<void> {
       if (c.backEq) meta.backEq = c.backEq;
       if (c.tableSkin) meta.tableSkin = c.tableSkin;
       if (c.runeSkin) meta.runeSkin = c.runeSkin;
+      if (Array.isArray(c.deckHeroesOwned)) {
+        meta.deckHeroesOwned = c.deckHeroesOwned.filter(id => {
+          const hero = DECK_HERO_BY_ID.get(id);
+          return !!hero && hero.tier !== 'standard';
+        });
+      }
+      if (c.deckHeroes && typeof c.deckHeroes === 'object' && !Array.isArray(c.deckHeroes)) {
+        meta.deckHeroes = Object.fromEntries(Object.entries(c.deckHeroes)
+          .filter(([deckId, heroId]) => /^[A-Za-z0-9_-]{1,120}$/.test(deckId)
+            && typeof heroId === 'string' && DECK_HERO_BY_ID.has(heroId)));
+      }
     }
     /* v3.15.3: базовая точка дельт — значения СЕРВЕРА (с учётом выдач админки),
        чтобы следующий syncProfile не прислал старые локальные числа поверх них */
     meta.lastSynced = { shards: shardsGet(), gems: meta.gems ?? 0, freeOpens: meta.freeOpens ?? 0,
       mmr: meta.mmr, wins: meta.wins, losses: meta.losses, bpXp: meta.bpXp ?? 0 };
     metaSave();
-  } catch { /* офлайн — локальный профиль остаётся источником истины */ }
+    return 'loaded';
+  } catch { return 'error'; /* офлайн — локальный профиль остаётся источником истины */ }
+  finally { window.clearTimeout(t); }
 }
+let authAttemptInFlight = false;
 async function authDo(): Promise<void> {
+  if (authAttemptInFlight) return;
+  const mode = authMode;
   const login = (document.getElementById('authLogin') as HTMLInputElement | null)?.value.trim() ?? '';
   const pw = (document.getElementById('authPass') as HTMLInputElement | null)?.value ?? '';
   const er = document.getElementById('authErr');
+  const submit = document.getElementById('authSubmit') as HTMLButtonElement | null;
+  const switcher = document.getElementById('authSwitch') as HTMLButtonElement | null;
   const setErr = (s: string): void => { if (er) er.textContent = s; };
   setErr('');
-  if (!/^[A-Za-z0-9_.-]{3,20}$/.test(login)) { setErr('Логин:3–20 символов, латиница/цифры/_.-'); return; }
-  if (pw.length < 8) { setErr('Пароль: минимум 8 символов'); return; }
+  if (!/^[A-Za-z0-9_.-]{3,20}$/.test(login)) { setErr('Логин: 3–20 символов, латиница/цифры/_.-'); return; }
+  if (!pw.length) { setErr('Введите пароль'); return; }
+  if (mode === 'register' && pw.length < 8) { setErr('Для нового аккаунта пароль должен содержать минимум 8 символов'); return; }
+  authAttemptInFlight = true;
+  if (submit) { submit.disabled = true; submit.textContent = 'Подключение…'; }
+  if (switcher) switcher.disabled = true;
+  const oldPid = String(meta.pid || '');
+  let timer = 0;
   try {
     const ctl = new AbortController();
-    const t = window.setTimeout(() => ctl.abort(), 2500);
-    const r = await window.fetch(`${META_API()}/api/auth/${authMode}`, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, signal: ctl.signal,
+    timer = window.setTimeout(() => ctl.abort(), 15_000);
+    const r = await window.fetch(`${META_API()}/api/auth/${mode}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, signal: ctl.signal, cache: 'no-store',
       body: JSON.stringify({ login, password: pw, pid: meta.pid }),
     });
-    window.clearTimeout(t);
-    const j = (await r.json().catch(() => ({}))) as { error?: string; login?: string; pid?: string; accessToken?: string; refreshToken?: string; expiresIn?: number };
+    const j = (await r.json().catch(() => ({}))) as {
+      error?: string; login?: string; pid?: string; accessToken?: string; refreshToken?: string; expiresIn?: number;
+    };
     if (!r.ok) { setErr(j.error || `Ошибка сервера (${r.status})`); return; }
+    if (!j.accessToken || !j.refreshToken) { setErr('Сервер вернул неполную сессию. Повторите вход.'); return; }
+    const accountPid = String(j.pid || oldPid);
+    const switchingAccount = !!oldPid && accountPid !== oldPid;
+    if (switchingAccount && syncInFlight) await syncInFlight; // не даём старому ответу синка примешаться к новому профилю
     authSet(j);
-    const accPid = String(j.pid || meta.pid);
-    /* v3.15.3: ник до первого синка — иначе дефолтный «Гость» может попасть в 409 (ник занят) */
-    if (meta.nick === 'Гость') meta.nick = String(j.login || login);
-    if (accPid) {
-      if (accPid !== meta.pid) meta.pid = accPid;
-      /* v3.15.3: при каждом входе — сначала отправить неподтверждённые траты (дельты),
-         затем забрать актуальный профиль с сервера, включая всё, что выдал админ */
-      await syncProfile();
-      await pullProfile(accPid);
+    if (switchingAccount) {
+      profileSyncPaused = true;
+      profileMigrationNick = String(j.login || login);
+      meta.pid = accountPid;
+      meta.lastSynced = undefined;
+      const pulled = await pullProfile(accountPid);
+      if (pulled === 'loaded') {
+        profileSyncPaused = false;
+        profileMigrationNick = '';
+      } else if (pulled === 'missing') {
+        // Пустой удалённый профиль подтверждён — только теперь переносим локальную гостевую сессию.
+        profileSyncPaused = false;
+        meta.nick = profileMigrationNick;
+        profileMigrationNick = '';
+        await syncProfile();
+        await pullProfile(accountPid);
+      }
+    } else {
+      meta.pid = accountPid;
+      if (meta.nick === 'Гость') meta.nick = String(j.login || login);
+      if (profileSyncPaused) {
+        const pulled = await pullProfile(accountPid);
+        if (pulled === 'loaded') { profileSyncPaused = false; profileMigrationNick = ''; }
+        else if (pulled === 'missing') {
+          profileSyncPaused = false;
+          if (profileMigrationNick) meta.nick = profileMigrationNick;
+          profileMigrationNick = '';
+          await syncProfile();
+          await pullProfile(accountPid);
+        }
+      } else {
+        // Сначала фиксируем накопленные локальные изменения, затем подтягиваем серверную базу.
+        await syncProfile();
+        const pulled = await pullProfile(accountPid);
+        if (pulled === 'missing') { await syncProfile(); await pullProfile(accountPid); }
+      }
     }
     meta.signedIn = true;
     metaSave(); syncProfile(); syncAccountRow(); renderShards();
     document.getElementById('authModal')?.classList.remove('gate');
     closeAuth();
     void friendsRefresh();
-    showToast(authMode === 'login' ? `🔑 Вы вошли: ${j.login}` : `🎉 Аккаунт создан: ${j.login}`);
-  } catch {
-    setErr('Сервер недоступен. Запустите npm run server:meta (порт 8081) и попробуйте снова.');
+    showToast(mode === 'login' ? `🔑 Вы вошли: ${j.login || login}` : `🎉 Аккаунт создан: ${j.login || login}`);
+    if (profileSyncPaused) showToast('🔒 Профиль сохранён локально; серверную копию безопасно проверим при восстановлении связи.');
+  } catch (err) {
+    setErr(err instanceof DOMException && err.name === 'AbortError'
+      ? 'Сервер отвечает слишком долго. Проверьте сеть и попробуйте ещё раз.'
+      : 'Сервер недоступен. Проверьте META_API_URL и доступность meta-server.');
+  } finally {
+    if (timer) window.clearTimeout(timer);
+    authAttemptInFlight = false;
+    if (submit) { submit.disabled = false; submit.textContent = mode === 'login' ? 'Войти' : 'Создать аккаунт'; }
+    if (switcher) switcher.disabled = false;
   }
 }
 document.getElementById('btnLoginOpen')?.addEventListener('click', () => openAuth('login'));
@@ -8788,6 +10313,23 @@ for (const id of ['authLogin', 'authPass']) {
 }
 syncAccountRow();
 authGateCheck();
+window.addEventListener('storage', ev => {
+  if (ev.key === AUTH_KEY && !authGet() && meta.signedIn) {
+    meta.signedIn = false;
+    syncAccountRow();
+    authGateCheck();
+    return;
+  }
+  if (ev.key !== META_KEY || !ev.newValue) return;
+  try {
+    const remote = JSON.parse(ev.newValue) as Partial<MetaState>;
+    if (typeof remote.signedIn === 'boolean') meta.signedIn = remote.signedIn;
+    if (typeof remote.pid === 'string') meta.pid = remote.pid;
+    if (typeof remote.nick === 'string') meta.nick = remote.nick;
+    syncAccountRow();
+    authGateCheck();
+  } catch { /* malformed storage update — ignore */ }
+});
 
 const logoutB = document.getElementById('btnLogout');
 if (logoutB) logoutB.addEventListener('click', () => {
@@ -8923,9 +10465,17 @@ $('cardModal').addEventListener('click', ev => { if (ev.target === $('cardModal'
 /*  Конструктор колод (пользовательские колоды, localStorage)              */
 /* ---------------------------------------------------------------------- */
 
-interface EditDeck { id: string | null; name: string; faction: Faction; counts: Map<string, number>; avatarCardId: string | null }
+interface EditDeck { id: string | null; name: string; faction: Faction; counts: Map<string, number>; avatarCardId: string | null; heroId: string }
 let editing: EditDeck | null = null;
 let builderOn = false;
+
+function saveDeckHeroSelectionForEditor(heroId: string): boolean {
+  if (!editing) return false;
+  const hero = DECK_HERO_BY_ID.get(heroId);
+  if (!hero || hero.faction !== editing.faction || !isDeckHeroUnlocked(heroId)) return false;
+  editing.heroId = hero.id;
+  return editing.id ? saveDeckHeroSelection(editing.id, editing.faction, hero.id) : true;
+}
 
 /** Весь пул карт, включая нейтральные (коллекция их не показывает). */
 const POOL_CARDS: CardData[] = cardsJson.cards as CardData[];
@@ -8935,6 +10485,176 @@ function editingCards(): string[] {
   const out: string[] = [];
   if (editing) for (const [id, n] of editing.counts) for (let i = 0; i < n; i++) out.push(id);
   return out;
+}
+
+/* Пробная стартовая рука: изолированная симуляция 5 карт и одного муллигана.
+   Она копирует текущий состав колоды и никогда не меняет editing.counts/save state. */
+let handTesterDeckKey = '';
+let handTesterDrawPile: string[] = [];
+let handTesterHand: string[] = [];
+let handTesterSwap = new Set<number>();
+let handTesterMulliganUsed = false;
+let handTesterHasDeal = false;
+let handTesterStatus = 'Новая рука ещё не роздана.';
+let handTesterReturnFocus: HTMLElement | null = null;
+
+function handTesterSignature(cards: string[]): string {
+  const ordered = cards.slice().sort((a, b) => a.localeCompare(b));
+  return `${editing?.id ?? 'new'}|${editing?.faction ?? ''}|${ordered.join(',')}`;
+}
+
+function syncHandTesterDeck(cards: string[]): void {
+  const signature = handTesterSignature(cards);
+  const changed = signature !== handTesterDeckKey;
+  const open = document.getElementById('btnDbHandTest') as HTMLButtonElement | null;
+  if (open) {
+    open.disabled = cards.length === 0;
+    open.title = cards.length
+      ? `Раздать 5 карт из текущей колоды (${cards.length})`
+      : 'Сначала добавьте карты в колоду';
+  }
+  if (!changed) return;
+  handTesterDeckKey = signature;
+  handTesterDrawPile = [];
+  handTesterHand = [];
+  handTesterSwap.clear();
+  handTesterMulliganUsed = false;
+  handTesterHasDeal = false;
+  handTesterStatus = cards.length
+    ? 'Состав колоды изменился — раздайте новую руку.'
+    : 'Добавьте карты в колоду, чтобы начать тест.';
+  const modal = document.getElementById('dbHandModal');
+  if (modal && !modal.classList.contains('hidden')) renderHandTester();
+}
+
+function shuffleHandTester(cards: string[]): void {
+  for (let i = cards.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [cards[i], cards[j]] = [cards[j], cards[i]];
+  }
+}
+
+function renderHandTester(focusIndex?: number): void {
+  const stats = document.getElementById('dbHandDeckStats');
+  const summary = document.getElementById('dbHandSummary');
+  const cardsHost = document.getElementById('dbHandCards');
+  const status = document.getElementById('dbHandStatus');
+  const replaceButton = document.getElementById('btnDbHandMulligan') as HTMLButtonElement | null;
+  const dealButton = document.getElementById('btnDbHandDeal') as HTMLButtonElement | null;
+  if (!stats || !summary || !cardsHost || !status || !replaceButton || !dealButton) return;
+
+  const deck = editingCards().map(dbLookup).filter((card): card is CardData => !!card);
+  const countType = (type: CardType): number => deck.filter(card => card.type === type).length;
+  const averageCost = (list: CardData[]): string => list.length
+    ? (list.reduce((sum, card) => sum + card.cost, 0) / list.length).toFixed(1).replace('.', ',')
+    : '—';
+  const metrics: [string, string][] = [
+    [String(deck.length), 'карт'],
+    [String(countType(CardType.Creature)), 'существа'],
+    [String(countType(CardType.Spell)), 'заклинания'],
+    [String(countType(CardType.Rune)), 'руны'],
+    [averageCost(deck), 'средняя цена'],
+  ];
+  stats.innerHTML = metrics.map(([value, label]) =>
+    `<div class="dbHandMetric"><b>${esc(value)}</b><span>${esc(label)}</span></div>`).join('');
+
+  cardsHost.replaceChildren();
+  if (handTesterHasDeal) {
+    const handCards = handTesterHand.map(dbLookup).filter((card): card is CardData => !!card);
+    const countHandType = (type: CardType): number => handCards.filter(card => card.type === type).length;
+    summary.textContent = `Рука ${handCards.length}/5 · существа ${countHandType(CardType.Creature)} · заклинания ${countHandType(CardType.Spell)} · руны ${countHandType(CardType.Rune)} · средняя цена ${averageCost(handCards)}`;
+    handTesterHand.forEach((id, index) => {
+      const card = dbLookup(id);
+      if (!card) return;
+      const node = renderCard(card);
+      const selected = handTesterSwap.has(index);
+      node.dataset.handIndex = String(index);
+      node.tabIndex = 0;
+      node.setAttribute('role', 'button');
+      node.setAttribute('aria-pressed', selected ? 'true' : 'false');
+      node.setAttribute('aria-label', `${cardName(card)} · ${card.cost} маны · ${selected
+        ? 'отмечена для пересдачи' : 'нажмите, чтобы отметить для пересдачи'}`);
+      node.classList.toggle('isMulliganSelected', selected);
+      if (selected) node.appendChild(el('span', 'dbHandSwapLabel', 'ЗАМЕНИТЬ'));
+      const toggle = (): void => toggleHandTesterCard(index);
+      node.addEventListener('click', toggle);
+      node.addEventListener('keydown', ev => {
+        if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); toggle(); }
+      });
+      node.addEventListener('mouseenter', ev => showZoom(card, (ev as MouseEvent).clientX, (ev as MouseEvent).clientY));
+      node.addEventListener('mouseleave', hideZoom);
+      cardsHost.appendChild(node);
+    });
+  } else {
+    summary.textContent = `${deck.length} карт в колоде · стартовая рука — до 5 карт.`;
+  }
+
+  status.textContent = handTesterStatus;
+  replaceButton.disabled = !handTesterHasDeal || handTesterMulliganUsed || handTesterSwap.size === 0;
+  replaceButton.textContent = handTesterMulliganUsed
+    ? 'Муллиган использован'
+    : `Пересдать выбранные${handTesterSwap.size ? ` · ${handTesterSwap.size}` : ''}`;
+  dealButton.disabled = deck.length === 0;
+  dealButton.textContent = handTesterHasDeal ? 'Новая раздача' : 'Раздать руку';
+  if (focusIndex !== undefined) cardsHost.querySelector<HTMLElement>(`[data-hand-index="${focusIndex}"]`)?.focus();
+}
+
+function toggleHandTesterCard(index: number): void {
+  if (!handTesterHasDeal || handTesterMulliganUsed) return;
+  if (handTesterSwap.has(index)) handTesterSwap.delete(index);
+  else handTesterSwap.add(index);
+  renderHandTester(index);
+}
+
+function dealHandTesterHand(): void {
+  const cards = editingCards();
+  syncHandTesterDeck(cards);
+  if (!cards.length) {
+    handTesterStatus = 'Добавьте хотя бы одну карту в колоду.';
+    renderHandTester();
+    return;
+  }
+  handTesterDrawPile = cards.slice();
+  shuffleHandTester(handTesterDrawPile);
+  handTesterHand = handTesterDrawPile.splice(0, Math.min(5, handTesterDrawPile.length));
+  handTesterSwap.clear();
+  handTesterMulliganUsed = false;
+  handTesterHasDeal = true;
+  handTesterStatus = cards.length < 5
+    ? `В колоде всего ${cards.length} карт — показаны все доступные. Это тест, бой не запускается.`
+    : 'Отметьте неподходящие карты и пересдайте их один раз. Состав колоды не изменится.';
+  renderHandTester();
+}
+
+function mulliganHandTesterCards(): void {
+  if (!handTesterHasDeal || handTesterMulliganUsed || handTesterSwap.size === 0) return;
+  const selected = new Set(handTesterSwap);
+  const returned = handTesterHand.filter((_, index) => selected.has(index));
+  const kept = handTesterHand.filter((_, index) => !selected.has(index));
+  handTesterDrawPile.push(...returned);
+  shuffleHandTester(handTesterDrawPile);
+  const replacements = handTesterDrawPile.splice(0, returned.length);
+  handTesterHand = [...kept, ...replacements];
+  handTesterSwap.clear();
+  handTesterMulliganUsed = true;
+  handTesterStatus = `Муллиган выполнен: заменено ${replacements.length} из ${handTesterHand.length} карт. Второй муллиган недоступен.`;
+  renderHandTester();
+}
+
+function openHandTester(): void {
+  if (!editing || editingCards().length === 0) return;
+  handTesterReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  syncHandTesterDeck(editingCards());
+  if (!handTesterHasDeal) dealHandTesterHand();
+  $('dbHandModal').classList.remove('hidden');
+  renderHandTester();
+  (document.getElementById('btnDbHandClose') as HTMLButtonElement | null)?.focus();
+}
+
+function closeHandTester(): void {
+  $('dbHandModal').classList.add('hidden');
+  if (handTesterReturnFocus?.isConnected && !handTesterReturnFocus.hasAttribute('disabled')) handTesterReturnFocus.focus();
+  handTesterReturnFocus = null;
 }
 
 function dbStatus(msg: string, ok = false): void {
@@ -8985,7 +10705,7 @@ function renderDeckAvatarPreview(): void {
   host.appendChild(fallback);
   if (card) {
     const image = document.createElement('img');
-    image.src = `/art/${encodeURIComponent(card.faction)}/${encodeURIComponent(card.id)}.png`;
+    image.src = cardArtworkUrl(card);
     image.alt = '';
     image.loading = 'lazy';
     image.onerror = () => image.remove();
@@ -8996,9 +10716,35 @@ function renderDeckAvatarPreview(): void {
   }
 }
 
+function renderDeckHeroPreview(): void {
+  const host = document.getElementById('dbHeroPreview') as HTMLElement | null;
+  const name = document.getElementById('dbHeroName') as HTMLElement | null;
+  const tier = document.getElementById('dbHeroTier') as HTMLElement | null;
+  if (!host || !editing) return;
+  const hero = resolveDeckHero(editing.heroId, editing.faction);
+  if (!hero) return;
+  editing.heroId = hero.id;
+  host.replaceChildren();
+  const fallback = el('span', 'dbHeroPreviewGlyph', FACTION_SIGIL[editing.faction] ?? '✦');
+  host.appendChild(fallback);
+  const image = document.createElement('img');
+  image.className = 'dbHeroPreviewArt';
+  image.alt = '';
+  image.loading = 'lazy';
+  image.decoding = 'async';
+  host.appendChild(image);
+  artChain(image, deckHeroArtUrls(hero.id, editing.faction));
+  host.title = `Герой колоды: ${hero.name}`;
+  if (name) name.textContent = hero.name;
+  if (tier) tier.textContent = hero.tier === 'standard' ? 'Стандартный · доступен сразу'
+    : hero.tier === 'coin' ? 'Монетный · 2000 🪙'
+      : 'Донатный · покупка временно недоступна';
+}
+
 function renderEditor(): void {
   if (!editing) return;
   const cards = editingCards();
+  syncHandTesterDeck(cards);
   $('dbDeckFaction').textContent = `· ${FACTION_RU[editing.faction]}`;
   $('dbCount').textContent = `${cards.length} · мин. ${MIN_DECK_SIZE}`;
   $('dbCount').title = `Минимум ${MIN_DECK_SIZE} карт; верхнего лимита нет`;
@@ -9025,6 +10771,9 @@ function renderEditor(): void {
     avatarGallery.title = avatarCards.length ? 'Открыть галерею артов карт этой колоды' : 'Сначала добавьте карты';
   }
   renderDeckAvatarPreview();
+  const activeDeckHero = resolveDeckHero(editing.heroId, editing.faction);
+  editing.heroId = activeDeckHero?.id ?? editing.faction;
+  renderDeckHeroPreview();
 
   /* список колоды */
   const listHost = $('dbDeckList');
@@ -9139,19 +10888,21 @@ function renderMyDecksSel(): void {
 }
 
 function newEditing(faction: Faction): EditDeck {
-  return { id: null, name: '', faction, counts: new Map(), avatarCardId: null };
+  return { id: null, name: '', faction, counts: new Map(), avatarCardId: null, heroId: faction };
 }
 
 function loadIntoEditor(deck: DeckLike | null): void {
   if (!deck) return;
   const counts = new Map<string, number>();
   for (const id of deck.cards) counts.set(id, (counts.get(id) ?? 0) + 1);
+  const faction = deck.faction as Faction;
   editing = {
     id: deck.id.startsWith('custom-') ? deck.id : null,
     name: deck.name,
-    faction: deck.faction as Faction,
+    faction,
     counts,
     avatarCardId: deck.avatarCardId ?? null,
+    heroId: deckHeroIdForDeck(deck.id, faction) ?? faction,
   };
   dbStatus(''); renderEditor();
 }
@@ -9173,6 +10924,7 @@ function setTab(builder: boolean): void {
     $('colCount').textContent = '';
     renderCollection();
   }
+  animateUiSurface(builder ? $('dbMain') : $('colGrid'), 'ecSubpanelEnter', 260);
 }
 
 btn('tabCollection').addEventListener('click', () => { Sfx.uiClick(); setTab(false); });
@@ -9216,6 +10968,7 @@ btn('btnDbSave').addEventListener('click', () => {
   const over = [...editing.counts.entries()].filter(([id, n]) => n > ownedCount(id));
   if (over.length > 0) { dbStatus('Копий в колоде больше, чем получено из бустеров'); return; }
   const id = editing.id ?? `custom-${Date.now().toString(36)}`;
+  const selectedHeroId = resolveDeckHero(editing.heroId, editing.faction)?.id ?? editing.faction;
   const deck: CustomDeck = {
     id,
     name,
@@ -9225,10 +10978,12 @@ btn('btnDbSave').addEventListener('click', () => {
     updated: Date.now(),
   };
   upsertCustomDeck(deck);
-  editing.id = id; editing.name = name;
+  saveDeckHeroSelection(id, editing.faction, selectedHeroId, false);
+  metaSave();
+  editing.id = id; editing.name = name; editing.heroId = selectedHeroId;
   buildMenu(); renderMyDecksSel();
   sel('dbMyDecks').value = id;
-  dbStatus(`Сохранено: «${name}» — выберите обложку и запускайте бой кнопкой «В бой» или через Колоды → «Играть».`, true);
+  dbStatus(`Сохранено: «${name}» — обложка карты и визуальный герой хранятся отдельно. Запускайте бой кнопкой «В бой» или через Колоды → «Играть».`, true);
   Sfx.uiClick();
 });
 btn('btnDbExport').addEventListener('click', () => {
@@ -9257,7 +11012,9 @@ btn('btnDbImport').addEventListener('click', () => {
 });
 btn('btnDbDelete').addEventListener('click', () => {
   if (!editing?.id) { dbStatus('Сохранённая колода не выбрана'); return; }
-  deleteCustomDeck(editing.id);
+  const deletedId = editing.id;
+  deleteCustomDeck(deletedId);
+  forgetDeckHeroSelection(deletedId);
   dbStatus(`Колода удалена из хранилища.`, true);
   editing.id = null;
   buildMenu(); renderMyDecksSel(); Sfx.uiClick();
@@ -9300,6 +11057,24 @@ sel('dbAvatarCard').addEventListener('change', () => {
   renderDeckAvatarPreview();
 });
 btn('btnDbAvatarGallery').addEventListener('click', openEditorDeckArtPicker);
+btn('btnDbHeroPicker').addEventListener('click', openEditorDeckHeroPicker);
+btn('btnDbHandTest').addEventListener('click', openHandTester);
+btn('btnDbHandClose').addEventListener('click', closeHandTester);
+btn('btnDbHandDone').addEventListener('click', closeHandTester);
+btn('btnDbHandDeal').addEventListener('click', dealHandTesterHand);
+btn('btnDbHandMulligan').addEventListener('click', mulliganHandTesterCards);
+$('dbHandModal').addEventListener('click', ev => { if (ev.target === $('dbHandModal')) closeHandTester(); });
+$('dbHandModal').addEventListener('keydown', (ev: KeyboardEvent) => {
+  if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); closeHandTester(); return; }
+  if (ev.key !== 'Tab') return;
+  const modal = $('dbHandModal');
+  const focusable = [...modal.querySelectorAll<HTMLElement>('button:not(:disabled),[tabindex="0"]')]
+    .filter(node => !node.hidden && node.getAttribute('aria-hidden') !== 'true');
+  if (!focusable.length) { ev.preventDefault(); modal.focus(); return; }
+  const first = focusable[0], last = focusable[focusable.length - 1];
+  if (ev.shiftKey && document.activeElement === first) { ev.preventDefault(); last.focus(); }
+  else if (!ev.shiftKey && document.activeElement === last) { ev.preventDefault(); first.focus(); }
+});
 sel('dbFaction').innerHTML = FACTION_IDS.map(f => `<option value="${f}">${FACTION_RU[f]}</option>`).join('');
 ['dbSearch', 'dbType'].forEach(id => $(id).addEventListener(id === 'dbSearch' ? 'input' : 'change', renderPool));
 
@@ -9322,6 +11097,13 @@ sel('dbFaction').innerHTML = FACTION_IDS.map(f => `<option value="${f}">${FACTIO
   pool: faction => POOL_CARDS
     .filter(c => c.faction === faction || c.faction === Faction.Neutral)
     .map(c => ({ id: c.id, rarity: c.rarity as string })),
+};
+(window as any).__deckHeroes = {
+  catalog: DECK_HERO_CATALOG,
+  owned: isDeckHeroUnlocked,
+  forDeck: deckHeroIdForDeck,
+  setForDeck: saveDeckHeroSelection,
+  openForDeck: openSavedDeckHeroPicker,
 };
 
 
@@ -9499,6 +11281,7 @@ function renderRules(): void {
   const sec = RULES_SECTIONS.find(r => r.id === rulesSection) ?? RULES_SECTIONS[0];
   body.innerHTML = sec.html();
   (body.parentElement as HTMLElement).scrollTop = 0;
+  animateUiSurface(body as HTMLElement, 'ecSubpanelEnter', 230);
 }
 function openRules(section?: string): void {
   if (section) rulesSection = section;
@@ -9541,11 +11324,15 @@ document.addEventListener('keydown', (ev: KeyboardEvent) => {
   const inBattle = !$('battle').classList.contains('hidden');
 
   if (ev.key === 'Escape') {
+    if (!$('dbHandModal').classList.contains('hidden')) { closeHandTester(); return; }
     if (!$('deckArtPickerModal').classList.contains('hidden')) { closeDeckArtPicker(); return; }
     if (!$('cardModal').classList.contains('hidden')) { closeCardModal(); return; }
     for (const id of ['cosmPreview','journalModal','replayModal','factionModal','graveModal']) {
       const modal = document.getElementById(id);
-      if (modal && !modal.classList.contains('hidden')) { modal.classList.add('hidden'); return; }
+      if (modal && !modal.classList.contains('hidden')) {
+        if (id === 'replayModal') closeReplay(); else modal.classList.add('hidden');
+        return;
+      }
     }
     if (!$('authModal').classList.contains('hidden')) { closeAuth(); return; }
     if (!$('rules').classList.contains('hidden')) { closeRules(); return; }
@@ -9595,6 +11382,7 @@ document.addEventListener('keydown', (ev: KeyboardEvent) => {
 applySettings();
 
 buildMenu();
+if (!meta.starterDecksUnlocked) openIntroFlow();
 // Отладочный доступ (используется headless-тестом tools/smoke_prototype.js).
 (window as unknown as { __battle?: Battle }).__battle = battle;
 console.log('[Эхо-Цитадель] прототип готов. Карт в базе:', db.size, '| колод:', deckList.length,
@@ -9633,17 +11421,28 @@ try { window.setTimeout(()=> attachVolumetric(document.body), 600); } catch {}
 type OnlineUser = { login: string; nick: string; avatarFac: string; status: string; mmr: number; rank: string; wins: number; losses: number; friend?: boolean; pending?: boolean; id?: string; place?: number; games?: number };
 let onlineTab: 'play' | 'friends' | 'top' = 'play';
 let onlinePoll = 0;
+let onlinePollMs = 0;
+let onlinePollInFlight = false;
+let onlineLaunchTimer = 0;
+let onlineStarting = false;
 let onlineSearch: { mode: string; since: number } | null = null;
 let onlineFound: { match: string; seat: number; mode: string; opponent: OnlineUser; ticket: string; wsUrl?: string } | null = null;
 let onlineLastChallenges = new Set<string>();
 let onlineResultsHtml = '';
 const ONLINE_STATUS_RU: Record<string, string> = { online: 'в сети', searching: 'ищет матч', in_match: 'в матче', offline: 'не в сети' };
 async function onApi<T = Record<string, unknown>>(method: 'GET' | 'POST', path: string, body?: unknown): Promise<{ ok: boolean; status: number; j: T & { error?: string } }> {
+  const ctl = new AbortController();
+  const timer = window.setTimeout(() => ctl.abort(), 8000);
   try {
-    const r = await authFetch(`${META_API()}${path}`, { method, headers: { 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+    const r = await authFetch(`${META_API()}${path}`, {
+      method, headers: { 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined,
+      signal: ctl.signal, cache: 'no-store',
+    });
     const j = await r.json().catch(() => ({})) as T & { error?: string };
     return { ok: r.ok, status: r.status, j };
-  } catch { return { ok: false, status: 0, j: { error: 'Сервер недоступен (npm run server:meta, порт 8081)' } as T & { error?: string } }; }
+  } catch {
+    return { ok: false, status: 0, j: { error: 'Нет ответа от meta-server. Проверьте соединение и URL API.' } as T & { error?: string } };
+  } finally { window.clearTimeout(timer); }
 }
 function onlineEnsureModal(): HTMLElement {
   let m = document.getElementById('onlineModal');
@@ -9686,7 +11485,7 @@ function onlineDeckArts(deck: { faction: string; cards: string[]; avatarCardId?:
   const f = deck.faction;
   const av = deck.avatarCardId && deck.cards.includes(deck.avatarCardId) ? db.get(deck.avatarCardId) : undefined;
   const c = av ?? suggestedDeckArt(deck.cards);
-  const urls = c ? [`/art/${encodeURIComponent(c.faction)}/${encodeURIComponent(c.id)}.png`] : [];
+  const urls = c ? [cardArtworkUrl(c)] : [];
   urls.push(`/heroes/${encodeURIComponent(f)}`, `img/menu_${f.toLowerCase()}.jpg`);
   return urls.join('|');
 }
@@ -9697,7 +11496,7 @@ function onlineLobbyHtml(me: { season: number; mmr: number; rank: { label: strin
   const sel = decks.find(d => d.id === selId) ?? decks[0];
   const busy = !!(onlineSearch || onlineFound);
   const problem = sel ? deckPlayProblem(sel as unknown as DeckLike) : 'Нет колоды';
-  const tiles = decks.map(d => `<button data-f="${esc(d.faction)}" class="alDeck${d.id === sel?.id ? ' sel' : ''}" data-on="deck" data-arg="${esc(d.id)}" ${busy ? 'disabled' : ''} title="${esc(d.name)} · ${d.cards.length} карт">
+  const tiles = decks.map(d => `<button data-f="${esc(d.faction)}" class="alDeck${d.id === sel?.id ? ' sel' : ''}" data-on="deck" data-arg="${esc(d.id)}" ${busy ? 'disabled' : ''} title="${esc(d.name)} · ${d.cards.length} карт · герой: ${esc(resolveDeckHero(d.heroId, d.faction)?.name ?? d.faction)}">
       <img data-arts="${esc(onlineDeckArts(d))}" alt="" loading="lazy">
       <span class="alDeckName">${esc(d.name)}</span>
       <span class="alDeckSub">${esc(FACTION_RU[d.faction as Faction] ?? d.faction)} · ${d.cards.length}</span>
@@ -9795,11 +11594,19 @@ async function onlineAction(a: string, arg: string): Promise<void> {
   const fail = (r: { ok: boolean; j: { error?: string } }): boolean => { if (!r.ok) showToast(`⚠ ${r.j.error ?? 'Ошибка'}`); return !r.ok; };
   if (a === 'login' || a === 'register') { closeOnline(); openAuth(a); return; }
   if (a === 'queue') {
+    if (onlineSearch || onlineFound || onlineStarting) return;
     const r = await onApi<{ state: string }>('POST', '/api/mm/queue', { mode: arg, deckId: onlineDeckId() });
     if (fail(r)) return;
     onlineSearch = { mode: arg, since: Date.now() };
+    ensureOnlinePoll();
   }
-  if (a === 'cancel') { await onApi('POST', '/api/mm/cancel'); onlineSearch = null; }
+  if (a === 'cancel') {
+    const r = await onApi('POST', '/api/mm/cancel');
+    if (fail(r)) return;
+    onlineSearch = null;
+    if (onlineLaunchTimer) { window.clearTimeout(onlineLaunchTimer); onlineLaunchTimer = 0; }
+    ensureOnlinePoll();
+  }
   if (a === 'mode') { onlineMode = arg === 'casual' ? 'casual' : 'ranked'; await renderOnline(); return; }
   if (a === 'deck') { selectMainMenuDeck(arg); await renderOnline(); return; }
   if (a === 'foundOk') onlineFound = null;
@@ -9826,42 +11633,70 @@ async function onlineAction(a: string, arg: string): Promise<void> {
   await onlinePollTick(true);
 }
 async function onlinePollTick(forceRender = false): Promise<void> {
-  if (!meta.signedIn || !authGet()) return;
-  const st = await onApi<{ state: string; match?: string; seat?: number; mode?: string; opponent?: OnlineUser; ticket?: string; wsUrl?: string; waited?: number; window?: number; inQueue?: number }>('GET', '/api/mm/status');
-  if (st.ok && st.j.state === 'found' && st.j.opponent) {
-    onlineSearch = null;
-    onlineFound = { match: st.j.match!, seat: st.j.seat!, mode: st.j.mode!, opponent: st.j.opponent, ticket: st.j.ticket ?? '', wsUrl: st.j.wsUrl };
-    const tk = onlineFound.ticket;
-    const wu = onlineFound.wsUrl;
-    window.setTimeout(() => { if (onlineFound?.ticket === tk) void startOnlineBattle(tk, wu); }, 1800);
-    onlineTab = 'play';
-    Sfx.uiClick(); showToast(`⚔ Соперник найден: ${st.j.opponent.nick}`);
-    forceRender = true;
-  } else if (st.ok && st.j.state === 'idle' && onlineSearch && onlineSearch.mode !== 'friendly') { onlineSearch = null; forceRender = true; }
-  const open = !document.getElementById('onlineModal')?.classList.contains('hidden') && !!document.getElementById('onlineModal');
-  const typing = document.activeElement?.id === 'onSearch';
-  if (open && !typing && (forceRender || onlineTab !== 'play')) await renderOnline();
-  else if (open && onlineSearch) {
-    const t = document.querySelector('#onlineModal .onTimer');
-    const sec = Math.round((Date.now() - onlineSearch.since) / 1000);
-    if (t) t.textContent = `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
-    const inf = document.getElementById('onMmInfo');
-    if (inf && st.ok && st.j.state === 'searching') inf.textContent = `Окно подбора ±${st.j.window} MMR · в очереди: ${st.j.inQueue}`;
-  }
+  if (!meta.signedIn || !authGet() || onlinePollInFlight || onlineStarting) return;
+  onlinePollInFlight = true;
+  try {
+    const st = await onApi<{ state: string; match?: string; seat?: number; mode?: string; opponent?: OnlineUser; ticket?: string; wsUrl?: string; waited?: number; window?: number; inQueue?: number }>('GET', '/api/mm/status');
+    if (st.ok && st.j.state === 'found' && st.j.opponent) {
+      onlineSearch = null;
+      onlineFound = { match: st.j.match!, seat: st.j.seat!, mode: st.j.mode!, opponent: st.j.opponent, ticket: st.j.ticket ?? '', wsUrl: st.j.wsUrl };
+      const tk = onlineFound.ticket;
+      const wu = onlineFound.wsUrl;
+      if (onlineLaunchTimer) window.clearTimeout(onlineLaunchTimer);
+      onlineLaunchTimer = window.setTimeout(() => {
+        onlineLaunchTimer = 0;
+        if (onlineFound?.ticket === tk) void startOnlineBattle(tk, wu);
+      }, 1800);
+      onlineTab = 'play';
+      Sfx.uiClick(); showToast(`⚔ Соперник найден: ${st.j.opponent.nick}`);
+      forceRender = true;
+    } else if (st.ok && st.j.state === 'idle' && onlineSearch && onlineSearch.mode !== 'friendly') {
+      onlineSearch = null; forceRender = true;
+    }
+    ensureOnlinePoll();
+    const modal = document.getElementById('onlineModal');
+    const open = !!modal && !modal.classList.contains('hidden');
+    const typing = document.activeElement?.id === 'onSearch';
+    if (open && !typing && (forceRender || onlineTab !== 'play')) await renderOnline();
+    else if (open && onlineSearch) {
+      const t = document.querySelector('#onlineModal .onTimer');
+      const sec = Math.round((Date.now() - onlineSearch.since) / 1000);
+      if (t) t.textContent = `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+      const inf = document.getElementById('onMmInfo');
+      if (inf && st.ok && st.j.state === 'searching') inf.textContent = `Окно подбора ±${st.j.window} MMR · в очереди: ${st.j.inQueue}`;
+      if (inf && !st.ok) inf.textContent = 'Проверяем очередь… сервер временно не отвечает';
+    }
+  } finally { onlinePollInFlight = false; }
 }
+function ensureOnlinePoll(runNow = false): void {
+  const modalOpen = !!document.getElementById('onlineModal') && !document.getElementById('onlineModal')!.classList.contains('hidden');
+  if (!onlineSearch && !modalOpen) {
+    window.clearInterval(onlinePoll); onlinePoll = 0; onlinePollMs = 0;
+    return;
+  }
+  const interval = onlineSearch ? 1000 : 8000;
+  if (!onlinePoll || onlinePollMs !== interval) {
+    window.clearInterval(onlinePoll);
+    onlinePollMs = interval;
+    onlinePoll = window.setInterval(() => { void onlinePollTick(); }, interval);
+  }
+  if (runNow) void onlinePollTick();
+}
+function startOnlinePoll(): void { ensureOnlinePoll(true); }
 function openOnline(): void {
+  if (!requireStarterDeckUnlock()) return;
+  setAppRoute('online');
   closeAllScreens();
   $('menu').classList.add('hidden');
-  setAppRoute('online');
   const m = onlineEnsureModal();
   m.classList.remove('hidden');
+  animateUiSurface(m, 'ecRouteEnter', 400);
   void renderOnline();
-  window.clearInterval(onlinePoll);
-  onlinePoll = window.setInterval(() => { void onlinePollTick(); }, 2500);
+  startOnlinePoll();
 }
 function closeOnline(): void {
   document.getElementById('onlineModal')?.classList.add('hidden');
-  window.clearInterval(onlinePoll); onlinePoll = 0;
+  ensureOnlinePoll();
 }
 /* v3.12: баннер входящего вызова на главной + быстрые CTA панели боя */
 function renderHomeChallengeBanner(): void {
@@ -9898,7 +11733,19 @@ window.setInterval(() => {
   /* v3.15.4: фоновый синк профиля — idle-игрок получает выдачи админки ≤30 с без
      каких-либо действий (раньше выдача становилась видна только после его следующей
      metaSave). Цикла не образуется: success-хендлер пересинкает только при изменении. */
-  void syncProfile();
+  if (profileSyncPaused) {
+    const pid = meta.pid;
+    void pullProfile(pid).then(status => {
+      if (meta.pid !== pid || !meta.signedIn) return;
+      if (status === 'loaded') { profileSyncPaused = false; profileMigrationNick = ''; showToast('🔄 Серверный профиль синхронизирован'); }
+      else if (status === 'missing') {
+        profileSyncPaused = false;
+        if (profileMigrationNick) meta.nick = profileMigrationNick;
+        profileMigrationNick = '';
+        void syncProfile();
+      }
+    });
+  } else void syncProfile();
   void onApi('POST', '/api/presence', { status: 'online' });
   void onApi<{ challenges: OnlineUser[] }>('GET', '/api/friends').then(r => {
     if (!r.ok) return;
@@ -9925,68 +11772,200 @@ class NetLink {
   you!: NetSeatInfo;
   opp!: NetSeatInfo;
   overInfo: { winnerSeat: number | null; reason: string } | null = null;
+  connected = false;
+  resumeSyncPending = false;
+  closed = false;
+  onConnectionChange: ((ready: boolean) => void) | null = null;
   onNeedSync: (() => void) | null = null;
+  onSync: ((message: NetMsg) => void) | null = null;
   private ws: WebSocket | null = null;
   private queue: NetMsg[] = [];
   private waiters: Array<{ kind?: string; res: (m: NetMsg | null) => void }> = [];
-  private closed = false;
   private started: ((ok: boolean, err?: string) => void) | null = null;
   private retries = 0;
   private urlIdx = 0;
+  private retryTimer = 0;
+  private connectTimer = 0;
+  private connectDeadline = 0;
+  private disconnectedAt = 0;
+  private connectionAccepted = false;
   constructor(private urls: string[], private ticket: string, private joinInfo: { deck: string[]; faction: string; name: string }) {}
 
+  isReady(): boolean { return this.connected && !this.resumeSyncPending && !this.closed && !this.overInfo; }
+  private notifyConnection(): void { this.onConnectionChange?.(this.isReady()); }
+  private setConnected(value: boolean): void {
+    if (this.connected === value) return;
+    this.connected = value;
+    this.notifyConnection();
+  }
+  private finishStarted(ok: boolean, err?: string): void {
+    const resolve = this.started;
+    if (!resolve) return;
+    this.started = null;
+    if (this.connectTimer) { window.clearTimeout(this.connectTimer); this.connectTimer = 0; }
+    resolve(ok, err);
+  }
   connect(timeoutMs = 20000): Promise<void> {
     return new Promise((resolve, reject) => {
-      const t = window.setTimeout(() => { this.started = null; reject(new Error('Соперник не подключился вовремя')); }, timeoutMs);
-      this.started = (ok, err) => { window.clearTimeout(t); this.started = null; if (ok) resolve(); else reject(new Error(err || 'Ошибка подключения')); };
+      if (!this.urls.length) { reject(new Error('Не задан адрес матч-сервера')); return; }
+      this.connectDeadline = Date.now() + timeoutMs;
+      this.started = (ok, err) => { if (ok) resolve(); else reject(new Error(err || 'Ошибка подключения')); };
       this.open();
+      this.armConnectTimeout();
     });
   }
+  private armConnectTimeout(): void {
+    if (!this.started) return;
+    if (this.connectTimer) window.clearTimeout(this.connectTimer);
+    const left = this.connectDeadline - Date.now();
+    if (left <= 0) { this.finishStarted(false, 'Сервер матча не ответил вовремя'); return; }
+    const remainingTargets = Math.max(1, this.urls.length - this.urlIdx);
+    const attemptMs = this.connectionAccepted ? left : Math.min(8000, Math.max(2500, Math.floor(left / remainingTargets)));
+    this.connectTimer = window.setTimeout(() => {
+      if (!this.started) return;
+      if (this.connectionAccepted) {
+        this.finishStarted(false, 'Соперник не подключился к матч-серверу вовремя. Повторите поиск.');
+        return;
+      }
+      if (this.urlIdx < this.urls.length - 1) {
+        const old = this.ws;
+        this.ws = null;
+        this.urlIdx++;
+        try { old?.close(); } catch { void 0; }
+        this.open();
+        this.armConnectTimeout();
+      } else this.finishStarted(false, 'Матч-сервер не ответил. Проверьте MATCH_WS_PUBLIC_URL.');
+    }, Math.min(attemptMs, left));
+  }
+  private tryNextInitialEndpoint(reason: string): void {
+    if (!this.started) return;
+    if (this.urlIdx < this.urls.length - 1 && !/билет|место занято|уже заверш|недействительн/i.test(reason)) {
+      const old = this.ws;
+      this.ws = null;
+      this.urlIdx++;
+      try { old?.close(); } catch { void 0; }
+      this.open();
+      this.armConnectTimeout();
+    } else this.finishStarted(false, reason);
+  }
   private open(): void {
+    if (this.closed || this.overInfo || !this.urls.length) return;
     let ws: WebSocket;
-    try { ws = new WebSocket(this.urls[this.urlIdx]); } catch { this.started?.(false, 'Матч-сервер недоступен'); return; }
+    try { ws = new WebSocket(this.urls[this.urlIdx]); }
+    catch {
+      if (this.started) this.tryNextInitialEndpoint('Матч-сервер недоступен');
+      else this.scheduleReconnect();
+      return;
+    }
     this.ws = ws;
-    let opened = false;
-    ws.onopen = () => { opened = true; this.retries = 0; ws.send(JSON.stringify({ t: 'join', ticket: this.ticket, ...this.joinInfo })); };
+    this.connectionAccepted = false;
+    ws.onopen = () => {
+      if (this.ws !== ws || this.closed) return;
+      try { ws.send(JSON.stringify({ t: 'join', ticket: this.ticket, ...this.joinInfo })); }
+      catch { try { ws.close(); } catch { void 0; } }
+    };
     ws.onmessage = ev => {
+      if (this.ws !== ws || this.closed) return;
       let m: Record<string, unknown>;
       try { m = JSON.parse(String(ev.data)); } catch { return; }
       if (m.t === 'start') {
-        this.seat = m.seat === 1 ? 1 : 0; this.mode = String(m.mode ?? 'casual'); this.match = String(m.match ?? '');
-        this.you = m.you as NetSeatInfo; this.opp = m.opp as NetSeatInfo;
-        if (m.resume) { pushLog('📡 Соединение восстановлено', 'phase'); return; }
-        this.started?.(true);
+        this.seat = m.seat === 1 ? 1 : 0;
+        this.mode = String(m.mode ?? 'casual');
+        this.match = String(m.match ?? '');
+        this.you = m.you as NetSeatInfo;
+        this.opp = m.opp as NetSeatInfo;
+        this.resumeSyncPending = !!m.resume;
+        this.retries = 0;
+        this.disconnectedAt = 0;
+        this.setConnected(true);
+        this.notifyConnection();
+        if (m.resume) {
+          this.queue.length = 0;
+          pushLog('📡 Соединение восстановлено — синхронизируем матч', 'phase');
+          return;
+        }
+        this.finishStarted(true);
       } else if (m.t === 'joined') {
+        this.connectionAccepted = true;
         if (m.waiting) setOnlineConnecting('Ждём соперника…');
+        if (this.started) this.armConnectTimeout();
       } else if (m.t === 'net') {
         const nm = m.m as NetMsg;
         if (nm?.k === 'needSync') { this.onNeedSync?.(); return; }
+        if (nm?.k === 'sync') {
+          this.onSync?.(nm);
+          this.resumeSyncPending = false;
+          this.notifyConnection();
+          // Wake a netTurn waiter without replaying the already-applied authoritative snapshot twice.
+          this.push({ k: 'syncApplied' });
+          return;
+        }
         this.push(nm);
       } else if (m.t === 'oppLeft') {
-        pushLog(`📡 Соперник отключился — ждём до ${m.graceSec ?? 60} с`, 'big'); showToast('📡 Соперник отключился');
+        pushLog(`📡 Соперник отключился — ждём до ${m.graceSec ?? 60} с`, 'big');
+        showToast('📡 Соперник отключился');
       } else if (m.t === 'oppBack') {
         pushLog('📡 Соперник вернулся', 'phase');
       } else if (m.t === 'over') {
         this.overInfo = { winnerSeat: (m.winnerSeat as number | null) ?? null, reason: String(m.reason ?? '') };
-        battle.netServerOver(this.overInfo.winnerSeat, this.overInfo.reason);
+        this.resumeSyncPending = false;
+        this.setConnected(false);
         this.flush();
+        battle.netServerOver(this.overInfo.winnerSeat, this.overInfo.reason);
       } else if (m.t === 'err') {
-        showToast(`⚠ ${m.msg}`);
-        this.started?.(false, String(m.msg));
+        const message = String(m.msg ?? 'Ошибка матч-сервера');
+        if (this.started) this.tryNextInitialEndpoint(message);
+        else {
+          this.overInfo = { winnerSeat: null, reason: message };
+          this.resumeSyncPending = false;
+          this.setConnected(false);
+          this.flush();
+          showToast(`⚠ ${message}`);
+          battle.netServerOver(null, message);
+        }
       }
     };
     ws.onclose = () => {
+      if (this.ws !== ws) return; // старый сокет уже заменён при failover/close
       this.ws = null;
+      this.setConnected(false);
       if (this.closed || this.overInfo) return;
-      if (this.started && !opened && this.urlIdx < this.urls.length - 1) { this.urlIdx++; this.open(); return; }
-      if (this.started) { this.started(false, 'Сервер недоступен — запустите npm run server:meta'); return; }
-      // обрыв посреди матча: переподключаемся тем же билетом (сервер держит место 60 с)
-      if (this.retries++ < 20) { pushLog('📡 Связь потеряна — переподключение…', 'big'); window.setTimeout(() => this.open(), 1500); }
+      if (this.started) {
+        if (!this.connectionAccepted && this.urlIdx < this.urls.length - 1) {
+          this.urlIdx++;
+          this.open();
+          this.armConnectTimeout();
+        } else this.finishStarted(false, this.connectionAccepted
+          ? 'Соединение с матч-сервером потеряно до начала игры.'
+          : 'Сервер недоступен — проверьте URL матч-сервера.');
+        return;
+      }
+      this.scheduleReconnect();
     };
+  }
+  private scheduleReconnect(): void {
+    if (this.closed || this.overInfo || this.retryTimer) return;
+    if (!this.disconnectedAt) this.disconnectedAt = Date.now();
+    if (Date.now() - this.disconnectedAt >= 55_000) {
+      // Match-server drops an absent seat after 60s; end the local wait instead of hanging forever.
+      const winnerSeat = this.seat === 0 ? 1 : 0;
+      this.overInfo = { winnerSeat, reason: 'disconnect' };
+      this.flush();
+      battle.netServerOver(winnerSeat, 'disconnect');
+      return;
+    }
+    const base = Math.min(4500, 500 * (1.6 ** Math.min(this.retries, 5)));
+    const delay = Math.round(base + Math.random() * 300);
+    this.retries++;
+    this.retryTimer = window.setTimeout(() => {
+      this.retryTimer = 0;
+      if (!this.closed && !this.overInfo) this.open();
+    }, delay);
   }
   private push(m: NetMsg): void {
     const i = this.waiters.findIndex(w => !w.kind || w.kind === m.k);
-    if (i >= 0) { const w = this.waiters.splice(i, 1)[0]; w.res(m); } else this.queue.push(m);
+    if (i >= 0) { const w = this.waiters.splice(i, 1)[0]; w.res(m); }
+    else { this.queue.push(m); if (this.queue.length > 128) this.queue.splice(0, this.queue.length - 128); }
   }
   private flush(): void { for (const w of this.waiters.splice(0)) w.res(null); }
   /** следующий ход соперника (null — матч завершён) */
@@ -10002,12 +11981,46 @@ class NetLink {
     return new Promise(res => this.waiters.push({ kind, res }));
   }
   send(m: Record<string, unknown>): void { this.sendRaw({ t: 'net', m }); }
-  sendRaw(m: Record<string, unknown>): void { if (this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(m)); }
+  sendRaw(m: Record<string, unknown>): void {
+    if (this.connected && this.ws && this.ws.readyState === WebSocket.OPEN) {
+      try { this.ws.send(JSON.stringify(m)); } catch { /* socket will close and reconnect */ }
+    }
+  }
   concede(): void { this.sendRaw({ t: 'concede' }); }
-  close(): void { this.closed = true; this.flush(); try { this.ws?.close(); } catch { void 0; } }
+  close(): void {
+    this.closed = true;
+    if (this.retryTimer) { window.clearTimeout(this.retryTimer); this.retryTimer = 0; }
+    if (this.connectTimer) { window.clearTimeout(this.connectTimer); this.connectTimer = 0; }
+    this.resumeSyncPending = false;
+    this.setConnected(false);
+    this.finishStarted(false, 'Подключение отменено');
+    this.flush();
+    const ws = this.ws; this.ws = null;
+    try { ws?.close(); } catch { void 0; }
+  }
 }
-/** PvP-сокет: по умолчанию встроен в meta-server (порт 8081, путь /match). */
-const MATCH_WS = (): string[] => [META_API().replace(/^http/, 'ws') + '/match', `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.hostname}:8080`];
+/** PvP-сокет: явный runtime URL → meta-server `/match` → локальный порт 8080.
+    Любой WS на HTTPS автоматически повышается до WSS, чтобы браузер не блокировал матч. */
+function normalizedWsUrl(raw: string): string {
+  if (!raw) return '';
+  try {
+    const u = new URL(raw, window.location.href);
+    if (u.protocol === 'http:') u.protocol = 'ws:';
+    if (u.protocol === 'https:') u.protocol = 'wss:';
+    if (u.protocol === 'ws:' && window.location.protocol === 'https:') u.protocol = 'wss:';
+    if (u.protocol !== 'ws:' && u.protocol !== 'wss:') return '';
+    return u.href.replace(/\/+$/, '');
+  } catch { return ''; }
+}
+const MATCH_WS = (preferred = ''): string[] => {
+  const configured = clientUrlParams.get('matchWs') || storedClientUrl('ec_match_ws') || CLIENT_RUNTIME_CONFIG.matchWsUrl || '';
+  const explicit = [preferred, ...configured.split(',')].map(x => normalizedWsUrl(x.trim())).filter(Boolean);
+  const apiSocket = normalizedWsUrl(`${META_API().replace(/^http/, 'ws')}/match`);
+  const fallback = window.location.protocol === 'https:'
+    ? normalizedWsUrl(`${window.location.origin.replace(/^http/, 'ws')}/match`)
+    : normalizedWsUrl(`ws://${window.location.hostname || 'localhost'}:8080/match`);
+  return [...new Set([...explicit, apiSocket, fallback])];
+};
 
 function setOnlineConnecting(text: string | null): void {
   let o = document.getElementById('onlineConnecting');
@@ -10023,18 +12036,26 @@ function setOnlineConnecting(text: string | null): void {
     v3.16: wsUrl — адрес конкретного шарда матч-тиера (если задан MATCH_SHARDS на
     meta-server): ставим его ПЕРВЫМ в списке попыток, фолбэк на штатные адреса. */
 async function startOnlineBattle(ticket: string, wsUrl?: string): Promise<void> {
+  if (!requireStarterDeckUnlock()) return;
+  if (onlineStarting || !ticket) return;
+  onlineStarting = true;
+  if (onlineLaunchTimer) { window.clearTimeout(onlineLaunchTimer); onlineLaunchTimer = 0; }
   const deckId = onlineDeckId();
   const def = resolveDeck(deckId, deckList as unknown as DeckLike[]) ?? starterDeckForFaction(picked) ?? deckById.get(picked)!;
-  const urls = wsUrl ? [wsUrl, ...MATCH_WS()] : MATCH_WS();
+  const urls = MATCH_WS(wsUrl);
   const link = new NetLink(urls, ticket, { deck: def.cards.slice(), faction: String(def.faction), name: String(meta.nick || 'Игрок') });
+  link.onConnectionChange = connected => { if (battle.net === link) battle.onNetConnection(connected); };
+  onlineSearch = null;
   closeOnline();
   setOnlineConnecting('Подключение к матчу…');
   try {
-    await link.connect(25000);
+    await link.connect(60000);
   } catch (err) {
     setOnlineConnecting(null);
     link.close();
-    showToast(`⚠ ${(err as Error).message}`);
+    onlineFound = null;
+    onlineStarting = false;
+    showToast(`⚠ ${(err as Error).message}. Запустите поиск ещё раз.`);
     openOnline();
     return;
   }
@@ -10050,6 +12071,7 @@ async function startOnlineBattle(ticket: string, wsUrl?: string): Promise<void> 
   battle.friendFoe = null; battle.bossPower = null; battle.bossHp = 0; battle.tutLesson = 0; battle.campNode = null; battle.eventId = null;
   battle.matchId = link.match;
   applyBattleBg(battle.playerFaction);
+  onlineStarting = false;
   battle.start().catch(err => reportFatal('online-start', err));
 }
 async function onlineRefreshAfterMatch(): Promise<void> {

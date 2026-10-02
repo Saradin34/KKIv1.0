@@ -11,7 +11,7 @@
     "resolveJsonModule": true,
     "outDir": "build",
     "rootDir": ".",
-    "lib": ["ES2020", "DOM"],
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
     "types": ["node"],
     "noUnusedLocals": false,
     "noUnusedParameters": false

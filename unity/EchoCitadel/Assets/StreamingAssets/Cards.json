@@ -73,7 +73,87 @@
    "tokens": "Assets/Resources/Cards/_Tokens",
    "size": "512x720",
    "naming": "<cardId>.png",
-   "note": "Папки созданы tools/generator/make_art_folders.py; в каждой лежат README.md и manifest.csv"
+   "note": "Подфракции находятся во вложенных папках основной фракции; папки содержат README.md и manifest.csv.",
+   "bySubfaction": {
+    "meh": {
+     "name": "Мехи / механоиды",
+     "faction": "Aurites",
+     "direction": "агро",
+     "folder": "Assets/Resources/Cards/Aurites/Mechanoids"
+    },
+    "grm": {
+     "name": "Гремлины",
+     "faction": "Pyromancer",
+     "direction": "агро",
+     "folder": "Assets/Resources/Cards/Pyromancer/Gremlins"
+    },
+    "spr": {
+     "name": "Спрайты",
+     "faction": "Ethereal",
+     "direction": "агро",
+     "folder": "Assets/Resources/Cards/Ethereal/Sprites"
+    },
+    "vmp": {
+     "name": "Вампиры",
+     "faction": "Necrus",
+     "direction": "отжор",
+     "folder": "Assets/Resources/Cards/Necrus/Vampires"
+    },
+    "cnb": {
+     "name": "Каннибалы",
+     "faction": "Pyromancer",
+     "direction": "отжор",
+     "folder": "Assets/Resources/Cards/Pyromancer/Cannibals"
+    },
+    "scc": {
+     "name": "Суккубы",
+     "faction": "Ethereal",
+     "direction": "отжор",
+     "folder": "Assets/Resources/Cards/Ethereal/Succubi"
+    },
+    "ent": {
+     "name": "Энты",
+     "faction": "Terramorph",
+     "direction": "токены",
+     "folder": "Assets/Resources/Cards/Terramorph/Ents"
+    },
+    "pal": {
+     "name": "Братство паладинов",
+     "faction": "Aurites",
+     "direction": "токены",
+     "folder": "Assets/Resources/Cards/Aurites/PaladinBrotherhood"
+    },
+    "sbd": {
+     "name": "Священное братство / священники",
+     "faction": "Neutral",
+     "direction": "токены",
+     "folder": "Assets/Resources/Cards/Neutral/SacredBrotherhood"
+    },
+    "wtc": {
+     "name": "Ведьмы",
+     "faction": "Necrus",
+     "direction": "яд и порча",
+     "folder": "Assets/Resources/Cards/Necrus/Witches"
+    },
+    "asp": {
+     "name": "Аспиды",
+     "faction": "Terramorph",
+     "direction": "яд и порча",
+     "folder": "Assets/Resources/Cards/Terramorph/Aspids"
+    },
+    "wtd": {
+     "name": "Иссохшие",
+     "faction": "Neutral",
+     "direction": "яд и порча",
+     "folder": "Assets/Resources/Cards/Neutral/Withered"
+    },
+    "nsu": {
+     "name": "Наёмники",
+     "faction": "Neutral",
+     "direction": "поддержка",
+     "folder": "Assets/Resources/Cards/Neutral/Mercenaries"
+    }
+   }
   },
   "expansion": {
    "set": "Эхо-Цитадель: Расширение II «Архетипы»",
@@ -7633,8 +7713,7 @@
    "artworkPath": "Resources/Cards/Pyromancer/ter_s10.png",
    "artPrompt": "epic cinematic composition, volumetric light, dark fantasy trading card game illustration, a burst of spore-infused fire magic: \"Споровый голем\", ember-red spores spreading across a dark fantasy battlefield, glowing fungal clusters, ash, heat distortion, fiery shockwave, Pyromancer energy, centered composition, rich color grading, painterly brushwork, high detail --ar 3:4 --style raw --v 6",
    "negativePrompt": "text, letters, watermark, signature, ui, frame, border, extra limbs, deformed hands, lowres, blurry, jpeg artifacts, modern clothing, photograph, 3d render plastic look",
-   "artSize": "512x720",
-   "subtype": "Instant"
+   "artSize": "512x720"
   },
   {
    "id": "ter_s11",
@@ -9950,8 +10029,8 @@
     "aggro",
     "meh"
    ],
-   "art": "Resources/Cards/Aurites/meh_01.png",
-   "artworkPath": "Resources/Cards/Aurites/meh_01.png",
+   "art": "Resources/Cards/Aurites/Mechanoids/meh_01.png",
+   "artworkPath": "Resources/Cards/Aurites/Mechanoids/meh_01.png",
    "artPrompt": "dark fantasy trading card game illustration, brass clockwork golem mech, gears and steam: \"Мех-труженик\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -9980,8 +10059,8 @@
     "aggro",
     "meh"
    ],
-   "art": "Resources/Cards/Aurites/meh_02.png",
-   "artworkPath": "Resources/Cards/Aurites/meh_02.png",
+   "art": "Resources/Cards/Aurites/Mechanoids/meh_02.png",
+   "artworkPath": "Resources/Cards/Aurites/Mechanoids/meh_02.png",
    "artPrompt": "dark fantasy trading card game illustration, brass clockwork golem mech, gears and steam: \"Скутер-ломщик\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -10011,8 +10090,8 @@
     "aggro",
     "meh"
    ],
-   "art": "Resources/Cards/Aurites/meh_03.png",
-   "artworkPath": "Resources/Cards/Aurites/meh_03.png",
+   "art": "Resources/Cards/Aurites/Mechanoids/meh_03.png",
+   "artworkPath": "Resources/Cards/Aurites/Mechanoids/meh_03.png",
    "artPrompt": "dark fantasy trading card game illustration, brass clockwork golem mech, gears and steam: \"Протокол «Страж»\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -10041,8 +10120,8 @@
     "aggro",
     "meh"
    ],
-   "art": "Resources/Cards/Aurites/meh_04.png",
-   "artworkPath": "Resources/Cards/Aurites/meh_04.png",
+   "art": "Resources/Cards/Aurites/Mechanoids/meh_04.png",
+   "artworkPath": "Resources/Cards/Aurites/Mechanoids/meh_04.png",
    "artPrompt": "dark fantasy trading card game illustration, brass clockwork golem mech, gears and steam: \"Штурмовой корпус\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -10095,8 +10174,8 @@
     "aggro",
     "meh"
    ],
-   "art": "Resources/Cards/Aurites/meh_05.png",
-   "artworkPath": "Resources/Cards/Aurites/meh_05.png",
+   "art": "Resources/Cards/Aurites/Mechanoids/meh_05.png",
+   "artworkPath": "Resources/Cards/Aurites/Mechanoids/meh_05.png",
    "artPrompt": "dark fantasy trading card game illustration, brass clockwork golem mech, gears and steam: \"Инженер Сборки\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -10138,8 +10217,8 @@
     "aggro",
     "meh"
    ],
-   "art": "Resources/Cards/Aurites/meh_06.png",
-   "artworkPath": "Resources/Cards/Aurites/meh_06.png",
+   "art": "Resources/Cards/Aurites/Mechanoids/meh_06.png",
+   "artworkPath": "Resources/Cards/Aurites/Mechanoids/meh_06.png",
    "artPrompt": "dark fantasy trading card game illustration, brass clockwork golem mech, gears and steam: \"Обшивщик броней\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -10168,8 +10247,8 @@
     "aggro",
     "meh"
    ],
-   "art": "Resources/Cards/Aurites/meh_07.png",
-   "artworkPath": "Resources/Cards/Aurites/meh_07.png",
+   "art": "Resources/Cards/Aurites/Mechanoids/meh_07.png",
+   "artworkPath": "Resources/Cards/Aurites/Mechanoids/meh_07.png",
    "artPrompt": "dark fantasy trading card game illustration, brass clockwork golem mech, gears and steam: \"Ремонтный дрон\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -10198,8 +10277,8 @@
     "aggro",
     "meh"
    ],
-   "art": "Resources/Cards/Aurites/meh_08.png",
-   "artworkPath": "Resources/Cards/Aurites/meh_08.png",
+   "art": "Resources/Cards/Aurites/Mechanoids/meh_08.png",
+   "artworkPath": "Resources/Cards/Aurites/Mechanoids/meh_08.png",
    "artPrompt": "dark fantasy trading card game illustration, brass clockwork golem mech, gears and steam: \"Мех-громила\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -10252,8 +10331,8 @@
     "aggro",
     "meh"
    ],
-   "art": "Resources/Cards/Aurites/meh_09.png",
-   "artworkPath": "Resources/Cards/Aurites/meh_09.png",
+   "art": "Resources/Cards/Aurites/Mechanoids/meh_09.png",
+   "artworkPath": "Resources/Cards/Aurites/Mechanoids/meh_09.png",
    "artPrompt": "dark fantasy trading card game illustration, brass clockwork golem mech, gears and steam: \"Конвейерный боец\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -10283,8 +10362,8 @@
     "aggro",
     "meh"
    ],
-   "art": "Resources/Cards/Aurites/meh_10.png",
-   "artworkPath": "Resources/Cards/Aurites/meh_10.png",
+   "art": "Resources/Cards/Aurites/Mechanoids/meh_10.png",
+   "artworkPath": "Resources/Cards/Aurites/Mechanoids/meh_10.png",
    "artPrompt": "dark fantasy trading card game illustration, brass clockwork golem mech, gears and steam: \"Осадный шагоход\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -10318,8 +10397,8 @@
     "aggro",
     "meh"
    ],
-   "art": "Resources/Cards/Aurites/meh_11.png",
-   "artworkPath": "Resources/Cards/Aurites/meh_11.png",
+   "art": "Resources/Cards/Aurites/Mechanoids/meh_11.png",
+   "artworkPath": "Resources/Cards/Aurites/Mechanoids/meh_11.png",
    "artPrompt": "dark fantasy trading card game illustration, brass clockwork golem mech, gears and steam: \"Бастион Мануфактории\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -10348,8 +10427,8 @@
     "aggro",
     "meh"
    ],
-   "art": "Resources/Cards/Aurites/meh_12.png",
-   "artworkPath": "Resources/Cards/Aurites/meh_12.png",
+   "art": "Resources/Cards/Aurites/Mechanoids/meh_12.png",
+   "artworkPath": "Resources/Cards/Aurites/Mechanoids/meh_12.png",
    "artPrompt": "dark fantasy trading card game illustration, brass clockwork golem mech, gears and steam: \"Паровой потрошитель\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -10382,8 +10461,8 @@
     "aggro",
     "meh"
    ],
-   "art": "Resources/Cards/Aurites/meh_13.png",
-   "artworkPath": "Resources/Cards/Aurites/meh_13.png",
+   "art": "Resources/Cards/Aurites/Mechanoids/meh_13.png",
+   "artworkPath": "Resources/Cards/Aurites/Mechanoids/meh_13.png",
    "artPrompt": "dark fantasy trading card game illustration, brass clockwork golem mech, gears and steam: \"Перегрев\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -10413,8 +10492,8 @@
     "aggro",
     "meh"
    ],
-   "art": "Resources/Cards/Aurites/meh_14.png",
-   "artworkPath": "Resources/Cards/Aurites/meh_14.png",
+   "art": "Resources/Cards/Aurites/Mechanoids/meh_14.png",
+   "artworkPath": "Resources/Cards/Aurites/Mechanoids/meh_14.png",
    "artPrompt": "dark fantasy trading card game illustration, brass clockwork golem mech, gears and steam: \"Титан Мануфактории\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -10444,8 +10523,8 @@
     "aggro",
     "grm"
    ],
-   "art": "Resources/Cards/Pyromancer/grm_01.png",
-   "artworkPath": "Resources/Cards/Pyromancer/grm_01.png",
+   "art": "Resources/Cards/Pyromancer/Gremlins/grm_01.png",
+   "artworkPath": "Resources/Cards/Pyromancer/Gremlins/grm_01.png",
    "artPrompt": "dark fantasy trading card game illustration, feral goblin raider with torch and jagged knife: \"Гремлин-шнырь\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -10480,8 +10559,8 @@
     "aggro",
     "grm"
    ],
-   "art": "Resources/Cards/Pyromancer/grm_02.png",
-   "artworkPath": "Resources/Cards/Pyromancer/grm_02.png",
+   "art": "Resources/Cards/Pyromancer/Gremlins/grm_02.png",
+   "artworkPath": "Resources/Cards/Pyromancer/Gremlins/grm_02.png",
    "artPrompt": "dark fantasy trading card game illustration, feral goblin raider with torch and jagged knife: \"Гремлин-искра\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -10511,8 +10590,8 @@
     "aggro",
     "grm"
    ],
-   "art": "Resources/Cards/Pyromancer/grm_03.png",
-   "artworkPath": "Resources/Cards/Pyromancer/grm_03.png",
+   "art": "Resources/Cards/Pyromancer/Gremlins/grm_03.png",
+   "artworkPath": "Resources/Cards/Pyromancer/Gremlins/grm_03.png",
    "artPrompt": "dark fantasy trading card game illustration, feral goblin raider with torch and jagged knife: \"Налётчик стаи\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -10542,8 +10621,8 @@
     "aggro",
     "grm"
    ],
-   "art": "Resources/Cards/Pyromancer/grm_04.png",
-   "artworkPath": "Resources/Cards/Pyromancer/grm_04.png",
+   "art": "Resources/Cards/Pyromancer/Gremlins/grm_04.png",
+   "artworkPath": "Resources/Cards/Pyromancer/Gremlins/grm_04.png",
    "artPrompt": "dark fantasy trading card game illustration, feral goblin raider with torch and jagged knife: \"Гремлин-двойняшка\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -10572,8 +10651,8 @@
     "aggro",
     "grm"
    ],
-   "art": "Resources/Cards/Pyromancer/grm_05.png",
-   "artworkPath": "Resources/Cards/Pyromancer/grm_05.png",
+   "art": "Resources/Cards/Pyromancer/Gremlins/grm_05.png",
+   "artworkPath": "Resources/Cards/Pyromancer/Gremlins/grm_05.png",
    "artPrompt": "dark fantasy trading card game illustration, feral goblin raider with torch and jagged knife: \"Рвач добычи\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -10628,8 +10707,8 @@
     "aggro",
     "grm"
    ],
-   "art": "Resources/Cards/Pyromancer/grm_06.png",
-   "artworkPath": "Resources/Cards/Pyromancer/grm_06.png",
+   "art": "Resources/Cards/Pyromancer/Gremlins/grm_06.png",
+   "artworkPath": "Resources/Cards/Pyromancer/Gremlins/grm_06.png",
    "artPrompt": "dark fantasy trading card game illustration, feral goblin raider with torch and jagged knife: \"Вожак налёта\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -10658,8 +10737,8 @@
     "aggro",
     "grm"
    ],
-   "art": "Resources/Cards/Pyromancer/grm_07.png",
-   "artworkPath": "Resources/Cards/Pyromancer/grm_07.png",
+   "art": "Resources/Cards/Pyromancer/Gremlins/grm_07.png",
+   "artworkPath": "Resources/Cards/Pyromancer/Gremlins/grm_07.png",
    "artPrompt": "dark fantasy trading card game illustration, feral goblin raider with torch and jagged knife: \"Трущобный нож\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -10695,8 +10774,8 @@
     "aggro",
     "grm"
    ],
-   "art": "Resources/Cards/Pyromancer/grm_08.png",
-   "artworkPath": "Resources/Cards/Pyromancer/grm_08.png",
+   "art": "Resources/Cards/Pyromancer/Gremlins/grm_08.png",
+   "artworkPath": "Resources/Cards/Pyromancer/Gremlins/grm_08.png",
    "artPrompt": "dark fantasy trading card game illustration, feral goblin raider with torch and jagged knife: \"Гремлин-подрывник\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -10726,8 +10805,8 @@
     "aggro",
     "grm"
    ],
-   "art": "Resources/Cards/Pyromancer/grm_09.png",
-   "artworkPath": "Resources/Cards/Pyromancer/grm_09.png",
+   "art": "Resources/Cards/Pyromancer/Gremlins/grm_09.png",
+   "artworkPath": "Resources/Cards/Pyromancer/Gremlins/grm_09.png",
    "artPrompt": "dark fantasy trading card game illustration, feral goblin raider with torch and jagged knife: \"Бешеный резак\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -10807,8 +10886,8 @@
     "aggro",
     "grm"
    ],
-   "art": "Resources/Cards/Pyromancer/grm_10.png",
-   "artworkPath": "Resources/Cards/Pyromancer/grm_10.png",
+   "art": "Resources/Cards/Pyromancer/Gremlins/grm_10.png",
+   "artworkPath": "Resources/Cards/Pyromancer/Gremlins/grm_10.png",
    "artPrompt": "dark fantasy trading card game illustration, feral goblin raider with torch and jagged knife: \"Клич стаи\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -10840,8 +10919,8 @@
     "aggro",
     "grm"
    ],
-   "art": "Resources/Cards/Pyromancer/grm_11.png",
-   "artworkPath": "Resources/Cards/Pyromancer/grm_11.png",
+   "art": "Resources/Cards/Pyromancer/Gremlins/grm_11.png",
+   "artworkPath": "Resources/Cards/Pyromancer/Gremlins/grm_11.png",
    "artPrompt": "dark fantasy trading card game illustration, feral goblin raider with torch and jagged knife: \"Гремлин-бунт\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -10871,8 +10950,8 @@
     "aggro",
     "grm"
    ],
-   "art": "Resources/Cards/Pyromancer/grm_12.png",
-   "artworkPath": "Resources/Cards/Pyromancer/grm_12.png",
+   "art": "Resources/Cards/Pyromancer/Gremlins/grm_12.png",
+   "artworkPath": "Resources/Cards/Pyromancer/Gremlins/grm_12.png",
    "artPrompt": "dark fantasy trading card game illustration, feral goblin raider with torch and jagged knife: \"Вождь Гремлинов\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -10905,8 +10984,8 @@
     "aggro",
     "grm"
    ],
-   "art": "Resources/Cards/Pyromancer/grm_13.png",
-   "artworkPath": "Resources/Cards/Pyromancer/grm_13.png",
+   "art": "Resources/Cards/Pyromancer/Gremlins/grm_13.png",
+   "artworkPath": "Resources/Cards/Pyromancer/Gremlins/grm_13.png",
    "artPrompt": "dark fantasy trading card game illustration, feral goblin raider with torch and jagged knife: \"Угольная искра\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -10939,8 +11018,8 @@
     "aggro",
     "grm"
    ],
-   "art": "Resources/Cards/Pyromancer/grm_14.png",
-   "artworkPath": "Resources/Cards/Pyromancer/grm_14.png",
+   "art": "Resources/Cards/Pyromancer/Gremlins/grm_14.png",
+   "artworkPath": "Resources/Cards/Pyromancer/Gremlins/grm_14.png",
    "artPrompt": "dark fantasy trading card game illustration, feral goblin raider with torch and jagged knife: \"Ярость стаи\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -10969,8 +11048,8 @@
     "aggro",
     "spr"
    ],
-   "art": "Resources/Cards/Ethereal/spr_01.png",
-   "artworkPath": "Resources/Cards/Ethereal/spr_01.png",
+   "art": "Resources/Cards/Ethereal/Sprites/spr_01.png",
+   "artworkPath": "Resources/Cards/Ethereal/Sprites/spr_01.png",
    "artPrompt": "dark fantasy trading card game illustration, glowing fae sprite with translucent wings: \"Спрайт-мерцание\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -10997,8 +11076,8 @@
     "aggro",
     "spr"
    ],
-   "art": "Resources/Cards/Ethereal/spr_02.png",
-   "artworkPath": "Resources/Cards/Ethereal/spr_02.png",
+   "art": "Resources/Cards/Ethereal/Sprites/spr_02.png",
+   "artworkPath": "Resources/Cards/Ethereal/Sprites/spr_02.png",
    "artPrompt": "dark fantasy trading card game illustration, glowing fae sprite with translucent wings: \"Спрайт-осколок\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -11027,8 +11106,8 @@
     "aggro",
     "spr"
    ],
-   "art": "Resources/Cards/Ethereal/spr_03.png",
-   "artworkPath": "Resources/Cards/Ethereal/spr_03.png",
+   "art": "Resources/Cards/Ethereal/Sprites/spr_03.png",
+   "artworkPath": "Resources/Cards/Ethereal/Sprites/spr_03.png",
    "artPrompt": "dark fantasy trading card game illustration, glowing fae sprite with translucent wings: \"Ночной шептун\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -11057,8 +11136,8 @@
     "aggro",
     "spr"
    ],
-   "art": "Resources/Cards/Ethereal/spr_04.png",
-   "artworkPath": "Resources/Cards/Ethereal/spr_04.png",
+   "art": "Resources/Cards/Ethereal/Sprites/spr_04.png",
+   "artworkPath": "Resources/Cards/Ethereal/Sprites/spr_04.png",
    "artPrompt": "dark fantasy trading card game illustration, glowing fae sprite with translucent wings: \"Спрайт-завеса\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -11087,8 +11166,8 @@
     "aggro",
     "spr"
    ],
-   "art": "Resources/Cards/Ethereal/spr_05.png",
-   "artworkPath": "Resources/Cards/Ethereal/spr_05.png",
+   "art": "Resources/Cards/Ethereal/Sprites/spr_05.png",
+   "artworkPath": "Resources/Cards/Ethereal/Sprites/spr_05.png",
    "artPrompt": "dark fantasy trading card game illustration, glowing fae sprite with translucent wings: \"Звёздный налётчик\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -11123,8 +11202,8 @@
     "aggro",
     "spr"
    ],
-   "art": "Resources/Cards/Ethereal/spr_06.png",
-   "artworkPath": "Resources/Cards/Ethereal/spr_06.png",
+   "art": "Resources/Cards/Ethereal/Sprites/spr_06.png",
+   "artworkPath": "Resources/Cards/Ethereal/Sprites/spr_06.png",
    "artPrompt": "dark fantasy trading card game illustration, glowing fae sprite with translucent wings: \"Хранительница мерцания\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -11160,8 +11239,8 @@
     "aggro",
     "spr"
    ],
-   "art": "Resources/Cards/Ethereal/spr_07.png",
-   "artworkPath": "Resources/Cards/Ethereal/spr_07.png",
+   "art": "Resources/Cards/Ethereal/Sprites/spr_07.png",
+   "artworkPath": "Resources/Cards/Ethereal/Sprites/spr_07.png",
    "artPrompt": "dark fantasy trading card game illustration, glowing fae sprite with translucent wings: \"Спрайт-весть\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -11190,8 +11269,8 @@
     "aggro",
     "spr"
    ],
-   "art": "Resources/Cards/Ethereal/spr_08.png",
-   "artworkPath": "Resources/Cards/Ethereal/spr_08.png",
+   "art": "Resources/Cards/Ethereal/Sprites/spr_08.png",
+   "artworkPath": "Resources/Cards/Ethereal/Sprites/spr_08.png",
    "artPrompt": "dark fantasy trading card game illustration, glowing fae sprite with translucent wings: \"Сумеречный клинок\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -11221,8 +11300,8 @@
     "aggro",
     "spr"
    ],
-   "art": "Resources/Cards/Ethereal/spr_09.png",
-   "artworkPath": "Resources/Cards/Ethereal/spr_09.png",
+   "art": "Resources/Cards/Ethereal/Sprites/spr_09.png",
+   "artworkPath": "Resources/Cards/Ethereal/Sprites/spr_09.png",
    "artPrompt": "dark fantasy trading card game illustration, glowing fae sprite with translucent wings: \"Двойная вспышка\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -11257,8 +11336,8 @@
     "aggro",
     "spr"
    ],
-   "art": "Resources/Cards/Ethereal/spr_10.png",
-   "artworkPath": "Resources/Cards/Ethereal/spr_10.png",
+   "art": "Resources/Cards/Ethereal/Sprites/spr_10.png",
+   "artworkPath": "Resources/Cards/Ethereal/Sprites/spr_10.png",
    "artPrompt": "dark fantasy trading card game illustration, glowing fae sprite with translucent wings: \"Спрайт-похититель\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -11290,8 +11369,8 @@
     "aggro",
     "spr"
    ],
-   "art": "Resources/Cards/Ethereal/spr_11.png",
-   "artworkPath": "Resources/Cards/Ethereal/spr_11.png",
+   "art": "Resources/Cards/Ethereal/Sprites/spr_11.png",
+   "artworkPath": "Resources/Cards/Ethereal/Sprites/spr_11.png",
    "artPrompt": "dark fantasy trading card game illustration, glowing fae sprite with translucent wings: \"Поток звёзд\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -11321,8 +11400,8 @@
     "aggro",
     "spr"
    ],
-   "art": "Resources/Cards/Ethereal/spr_12.png",
-   "artworkPath": "Resources/Cards/Ethereal/spr_12.png",
+   "art": "Resources/Cards/Ethereal/Sprites/spr_12.png",
+   "artworkPath": "Resources/Cards/Ethereal/Sprites/spr_12.png",
    "artPrompt": "dark fantasy trading card game illustration, glowing fae sprite with translucent wings: \"Фантом-прилива\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -11355,8 +11434,8 @@
     "aggro",
     "spr"
    ],
-   "art": "Resources/Cards/Ethereal/spr_13.png",
-   "artworkPath": "Resources/Cards/Ethereal/spr_13.png",
+   "art": "Resources/Cards/Ethereal/Sprites/spr_13.png",
+   "artworkPath": "Resources/Cards/Ethereal/Sprites/spr_13.png",
    "artPrompt": "dark fantasy trading card game illustration, glowing fae sprite with translucent wings: \"Стремительность\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -11389,8 +11468,8 @@
     "aggro",
     "spr"
    ],
-   "art": "Resources/Cards/Ethereal/spr_14.png",
-   "artworkPath": "Resources/Cards/Ethereal/spr_14.png",
+   "art": "Resources/Cards/Ethereal/Sprites/spr_14.png",
+   "artworkPath": "Resources/Cards/Ethereal/Sprites/spr_14.png",
    "artPrompt": "dark fantasy trading card game illustration, glowing fae sprite with translucent wings: \"Лунная стрела\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -11419,8 +11498,8 @@
     "drain",
     "vmp"
    ],
-   "art": "Resources/Cards/Necrus/vmp_01.png",
-   "artworkPath": "Resources/Cards/Necrus/vmp_01.png",
+   "art": "Resources/Cards/Necrus/Vampires/vmp_01.png",
+   "artworkPath": "Resources/Cards/Necrus/Vampires/vmp_01.png",
    "artPrompt": "dark fantasy trading card game illustration, pale vampire noble with crimson eyes: \"Полуночный ловчий\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -11449,8 +11528,8 @@
     "drain",
     "vmp"
    ],
-   "art": "Resources/Cards/Necrus/vmp_02.png",
-   "artworkPath": "Resources/Cards/Necrus/vmp_02.png",
+   "art": "Resources/Cards/Necrus/Vampires/vmp_02.png",
+   "artworkPath": "Resources/Cards/Necrus/Vampires/vmp_02.png",
    "artPrompt": "dark fantasy trading card game illustration, pale vampire noble with crimson eyes: \"Вурдалак-следопыт\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -11480,8 +11559,8 @@
     "drain",
     "vmp"
    ],
-   "art": "Resources/Cards/Necrus/vmp_03.png",
-   "artworkPath": "Resources/Cards/Necrus/vmp_03.png",
+   "art": "Resources/Cards/Necrus/Vampires/vmp_03.png",
+   "artworkPath": "Resources/Cards/Necrus/Vampires/vmp_03.png",
    "artPrompt": "dark fantasy trading card game illustration, pale vampire noble with crimson eyes: \"Княжий отпрыск\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -11511,8 +11590,8 @@
     "drain",
     "vmp"
    ],
-   "art": "Resources/Cards/Necrus/vmp_04.png",
-   "artworkPath": "Resources/Cards/Necrus/vmp_04.png",
+   "art": "Resources/Cards/Necrus/Vampires/vmp_04.png",
+   "artworkPath": "Resources/Cards/Necrus/Vampires/vmp_04.png",
    "artPrompt": "dark fantasy trading card game illustration, pale vampire noble with crimson eyes: \"Кровавый привратник\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -11541,8 +11620,8 @@
     "drain",
     "vmp"
    ],
-   "art": "Resources/Cards/Necrus/vmp_05.png",
-   "artworkPath": "Resources/Cards/Necrus/vmp_05.png",
+   "art": "Resources/Cards/Necrus/Vampires/vmp_05.png",
+   "artworkPath": "Resources/Cards/Necrus/Vampires/vmp_05.png",
    "artPrompt": "dark fantasy trading card game illustration, pale vampire noble with crimson eyes: \"Старейший жнец\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -11572,8 +11651,8 @@
     "drain",
     "vmp"
    ],
-   "art": "Resources/Cards/Necrus/vmp_06.png",
-   "artworkPath": "Resources/Cards/Necrus/vmp_06.png",
+   "art": "Resources/Cards/Necrus/Vampires/vmp_06.png",
+   "artworkPath": "Resources/Cards/Necrus/Vampires/vmp_06.png",
    "artPrompt": "dark fantasy trading card game illustration, pale vampire noble with crimson eyes: \"Нетопырь-резун\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -11609,8 +11688,8 @@
     "drain",
     "vmp"
    ],
-   "art": "Resources/Cards/Necrus/vmp_07.png",
-   "artworkPath": "Resources/Cards/Necrus/vmp_07.png",
+   "art": "Resources/Cards/Necrus/Vampires/vmp_07.png",
+   "artworkPath": "Resources/Cards/Necrus/Vampires/vmp_07.png",
    "artPrompt": "dark fantasy trading card game illustration, pale vampire noble with crimson eyes: \"Целительница склепа\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -11639,8 +11718,8 @@
     "drain",
     "vmp"
    ],
-   "art": "Resources/Cards/Necrus/vmp_08.png",
-   "artworkPath": "Resources/Cards/Necrus/vmp_08.png",
+   "art": "Resources/Cards/Necrus/Vampires/vmp_08.png",
+   "artworkPath": "Resources/Cards/Necrus/Vampires/vmp_08.png",
    "artPrompt": "dark fantasy trading card game illustration, pale vampire noble with crimson eyes: \"Барон Багровой Луны\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -11675,8 +11754,8 @@
     "drain",
     "vmp"
    ],
-   "art": "Resources/Cards/Necrus/vmp_09.png",
-   "artworkPath": "Resources/Cards/Necrus/vmp_09.png",
+   "art": "Resources/Cards/Necrus/Vampires/vmp_09.png",
+   "artworkPath": "Resources/Cards/Necrus/Vampires/vmp_09.png",
    "artPrompt": "dark fantasy trading card game illustration, pale vampire noble with crimson eyes: \"Ламия-чревовещательница\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -11706,8 +11785,8 @@
     "drain",
     "vmp"
    ],
-   "art": "Resources/Cards/Necrus/vmp_10.png",
-   "artworkPath": "Resources/Cards/Necrus/vmp_10.png",
+   "art": "Resources/Cards/Necrus/Vampires/vmp_10.png",
+   "artworkPath": "Resources/Cards/Necrus/Vampires/vmp_10.png",
    "artPrompt": "dark fantasy trading card game illustration, pale vampire noble with crimson eyes: \"Капеллан Жажды\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -11736,8 +11815,8 @@
     "drain",
     "vmp"
    ],
-   "art": "Resources/Cards/Necrus/vmp_11.png",
-   "artworkPath": "Resources/Cards/Necrus/vmp_11.png",
+   "art": "Resources/Cards/Necrus/Vampires/vmp_11.png",
+   "artworkPath": "Resources/Cards/Necrus/Vampires/vmp_11.png",
    "artPrompt": "dark fantasy trading card game illustration, pale vampire noble with crimson eyes: \"Патриарх Рода\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -11772,8 +11851,8 @@
     "drain",
     "vmp"
    ],
-   "art": "Resources/Cards/Necrus/vmp_12.png",
-   "artworkPath": "Resources/Cards/Necrus/vmp_12.png",
+   "art": "Resources/Cards/Necrus/Vampires/vmp_12.png",
+   "artworkPath": "Resources/Cards/Necrus/Vampires/vmp_12.png",
    "artPrompt": "dark fantasy trading card game illustration, pale vampire noble with crimson eyes: \"Сумрачная графиня\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -11806,8 +11885,8 @@
     "drain",
     "vmp"
    ],
-   "art": "Resources/Cards/Necrus/vmp_13.png",
-   "artworkPath": "Resources/Cards/Necrus/vmp_13.png",
+   "art": "Resources/Cards/Necrus/Vampires/vmp_13.png",
+   "artworkPath": "Resources/Cards/Necrus/Vampires/vmp_13.png",
    "artPrompt": "dark fantasy trading card game illustration, pale vampire noble with crimson eyes: \"Глоток крови\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -11845,8 +11924,8 @@
     "drain",
     "vmp"
    ],
-   "art": "Resources/Cards/Necrus/vmp_14.png",
-   "artworkPath": "Resources/Cards/Necrus/vmp_14.png",
+   "art": "Resources/Cards/Necrus/Vampires/vmp_14.png",
+   "artworkPath": "Resources/Cards/Necrus/Vampires/vmp_14.png",
    "artPrompt": "dark fantasy trading card game illustration, pale vampire noble with crimson eyes: \"Сифон души\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -11875,8 +11954,8 @@
     "drain",
     "cnb"
    ],
-   "art": "Resources/Cards/Pyromancer/cnb_01.png",
-   "artworkPath": "Resources/Cards/Pyromancer/cnb_01.png",
+   "art": "Resources/Cards/Pyromancer/Cannibals/cnb_01.png",
+   "artworkPath": "Resources/Cards/Pyromancer/Cannibals/cnb_01.png",
    "artPrompt": "dark fantasy trading card game illustration, savage cannibal warband brute with bone trophies: \"Пожиратель падали\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -11903,8 +11982,8 @@
     "drain",
     "cnb"
    ],
-   "art": "Resources/Cards/Pyromancer/cnb_02.png",
-   "artworkPath": "Resources/Cards/Pyromancer/cnb_02.png",
+   "art": "Resources/Cards/Pyromancer/Cannibals/cnb_02.png",
+   "artworkPath": "Resources/Cards/Pyromancer/Cannibals/cnb_02.png",
    "artPrompt": "dark fantasy trading card game illustration, savage cannibal warband brute with bone trophies: \"Костегрыз\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -11947,8 +12026,8 @@
     "drain",
     "cnb"
    ],
-   "art": "Resources/Cards/Pyromancer/cnb_03.png",
-   "artworkPath": "Resources/Cards/Pyromancer/cnb_03.png",
+   "art": "Resources/Cards/Pyromancer/Cannibals/cnb_03.png",
+   "artworkPath": "Resources/Cards/Pyromancer/Cannibals/cnb_03.png",
    "artPrompt": "dark fantasy trading card game illustration, savage cannibal warband brute with bone trophies: \"Трапезник войны\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -11992,8 +12071,8 @@
     "drain",
     "cnb"
    ],
-   "art": "Resources/Cards/Pyromancer/cnb_04.png",
-   "artworkPath": "Resources/Cards/Pyromancer/cnb_04.png",
+   "art": "Resources/Cards/Pyromancer/Cannibals/cnb_04.png",
+   "artworkPath": "Resources/Cards/Pyromancer/Cannibals/cnb_04.png",
    "artPrompt": "dark fantasy trading card game illustration, savage cannibal warband brute with bone trophies: \"Обжора отряда\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -12037,8 +12116,8 @@
     "drain",
     "cnb"
    ],
-   "art": "Resources/Cards/Pyromancer/cnb_05.png",
-   "artworkPath": "Resources/Cards/Pyromancer/cnb_05.png",
+   "art": "Resources/Cards/Pyromancer/Cannibals/cnb_05.png",
+   "artworkPath": "Resources/Cards/Pyromancer/Cannibals/cnb_05.png",
    "artPrompt": "dark fantasy trading card game illustration, savage cannibal warband brute with bone trophies: \"Прожорливый вал\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -12078,8 +12157,8 @@
     "drain",
     "cnb"
    ],
-   "art": "Resources/Cards/Pyromancer/cnb_06.png",
-   "artworkPath": "Resources/Cards/Pyromancer/cnb_06.png",
+   "art": "Resources/Cards/Pyromancer/Cannibals/cnb_06.png",
+   "artworkPath": "Resources/Cards/Pyromancer/Cannibals/cnb_06.png",
    "artPrompt": "dark fantasy trading card game illustration, savage cannibal warband brute with bone trophies: \"Насыщенный зверь\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -12108,8 +12187,8 @@
     "drain",
     "cnb"
    ],
-   "art": "Resources/Cards/Pyromancer/cnb_07.png",
-   "artworkPath": "Resources/Cards/Pyromancer/cnb_07.png",
+   "art": "Resources/Cards/Pyromancer/Cannibals/cnb_07.png",
+   "artworkPath": "Resources/Cards/Pyromancer/Cannibals/cnb_07.png",
    "artPrompt": "dark fantasy trading card game illustration, savage cannibal warband brute with bone trophies: \"Рвач мяса\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -12146,8 +12225,8 @@
     "drain",
     "cnb"
    ],
-   "art": "Resources/Cards/Pyromancer/cnb_08.png",
-   "artworkPath": "Resources/Cards/Pyromancer/cnb_08.png",
+   "art": "Resources/Cards/Pyromancer/Cannibals/cnb_08.png",
+   "artworkPath": "Resources/Cards/Pyromancer/Cannibals/cnb_08.png",
    "artPrompt": "dark fantasy trading card game illustration, savage cannibal warband brute with bone trophies: \"Пиршественный шаман\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -12191,8 +12270,8 @@
     "drain",
     "cnb"
    ],
-   "art": "Resources/Cards/Pyromancer/cnb_09.png",
-   "artworkPath": "Resources/Cards/Pyromancer/cnb_09.png",
+   "art": "Resources/Cards/Pyromancer/Cannibals/cnb_09.png",
+   "artworkPath": "Resources/Cards/Pyromancer/Cannibals/cnb_09.png",
    "artPrompt": "dark fantasy trading card game illustration, savage cannibal warband brute with bone trophies: \"Глот-костолом\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -12235,8 +12314,8 @@
     "drain",
     "cnb"
    ],
-   "art": "Resources/Cards/Pyromancer/cnb_10.png",
-   "artworkPath": "Resources/Cards/Pyromancer/cnb_10.png",
+   "art": "Resources/Cards/Pyromancer/Cannibals/cnb_10.png",
+   "artworkPath": "Resources/Cards/Pyromancer/Cannibals/cnb_10.png",
    "artPrompt": "dark fantasy trading card game illustration, savage cannibal warband brute with bone trophies: \"Пожиратель Костей\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -12272,8 +12351,8 @@
     "drain",
     "cnb"
    ],
-   "art": "Resources/Cards/Pyromancer/cnb_11.png",
-   "artworkPath": "Resources/Cards/Pyromancer/cnb_11.png",
+   "art": "Resources/Cards/Pyromancer/Cannibals/cnb_11.png",
+   "artworkPath": "Resources/Cards/Pyromancer/Cannibals/cnb_11.png",
    "artPrompt": "dark fantasy trading card game illustration, savage cannibal warband brute with bone trophies: \"Ритуал трапезы\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -12317,8 +12396,8 @@
     "drain",
     "cnb"
    ],
-   "art": "Resources/Cards/Pyromancer/cnb_12.png",
-   "artworkPath": "Resources/Cards/Pyromancer/cnb_12.png",
+   "art": "Resources/Cards/Pyromancer/Cannibals/cnb_12.png",
+   "artworkPath": "Resources/Cards/Pyromancer/Cannibals/cnb_12.png",
    "artPrompt": "dark fantasy trading card game illustration, savage cannibal warband brute with bone trophies: \"Матерь Обжорства\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -12356,8 +12435,8 @@
     "drain",
     "cnb"
    ],
-   "art": "Resources/Cards/Pyromancer/cnb_13.png",
-   "artworkPath": "Resources/Cards/Pyromancer/cnb_13.png",
+   "art": "Resources/Cards/Pyromancer/Cannibals/cnb_13.png",
+   "artworkPath": "Resources/Cards/Pyromancer/Cannibals/cnb_13.png",
    "artPrompt": "dark fantasy trading card game illustration, savage cannibal warband brute with bone trophies: \"Сытная похлёбка\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -12394,8 +12473,8 @@
     "drain",
     "cnb"
    ],
-   "art": "Resources/Cards/Pyromancer/cnb_14.png",
-   "artworkPath": "Resources/Cards/Pyromancer/cnb_14.png",
+   "art": "Resources/Cards/Pyromancer/Cannibals/cnb_14.png",
+   "artworkPath": "Resources/Cards/Pyromancer/Cannibals/cnb_14.png",
    "artPrompt": "dark fantasy trading card game illustration, savage cannibal warband brute with bone trophies: \"Полное брюхо\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -12424,8 +12503,8 @@
     "drain",
     "scc"
    ],
-   "art": "Resources/Cards/Ethereal/scc_01.png",
-   "artworkPath": "Resources/Cards/Ethereal/scc_01.png",
+   "art": "Resources/Cards/Ethereal/Succubi/scc_01.png",
+   "artworkPath": "Resources/Cards/Ethereal/Succubi/scc_01.png",
    "artPrompt": "dark fantasy trading card game illustration, alluring succubus demoness with violet flame: \"Суккуб-лихорадка\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -12454,8 +12533,8 @@
     "drain",
     "scc"
    ],
-   "art": "Resources/Cards/Ethereal/scc_02.png",
-   "artworkPath": "Resources/Cards/Ethereal/scc_02.png",
+   "art": "Resources/Cards/Ethereal/Succubi/scc_02.png",
+   "artworkPath": "Resources/Cards/Ethereal/Succubi/scc_02.png",
    "artPrompt": "dark fantasy trading card game illustration, alluring succubus demoness with violet flame: \"Суккуб-полуночница\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -12491,8 +12570,8 @@
     "drain",
     "scc"
    ],
-   "art": "Resources/Cards/Ethereal/scc_03.png",
-   "artworkPath": "Resources/Cards/Ethereal/scc_03.png",
+   "art": "Resources/Cards/Ethereal/Succubi/scc_03.png",
+   "artworkPath": "Resources/Cards/Ethereal/Succubi/scc_03.png",
    "artPrompt": "dark fantasy trading card game illustration, alluring succubus demoness with violet flame: \"Чаровница вздохов\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -12521,8 +12600,8 @@
     "drain",
     "scc"
    ],
-   "art": "Resources/Cards/Ethereal/scc_04.png",
-   "artworkPath": "Resources/Cards/Ethereal/scc_04.png",
+   "art": "Resources/Cards/Ethereal/Succubi/scc_04.png",
+   "artworkPath": "Resources/Cards/Ethereal/Succubi/scc_04.png",
    "artPrompt": "dark fantasy trading card game illustration, alluring succubus demoness with violet flame: \"Демонесса-обет\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -12551,8 +12630,8 @@
     "drain",
     "scc"
    ],
-   "art": "Resources/Cards/Ethereal/scc_05.png",
-   "artworkPath": "Resources/Cards/Ethereal/scc_05.png",
+   "art": "Resources/Cards/Ethereal/Succubi/scc_05.png",
+   "artworkPath": "Resources/Cards/Ethereal/Succubi/scc_05.png",
    "artPrompt": "dark fantasy trading card game illustration, alluring succubus demoness with violet flame: \"Суккуб-целительница\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -12589,8 +12668,8 @@
     "drain",
     "scc"
    ],
-   "art": "Resources/Cards/Ethereal/scc_06.png",
-   "artworkPath": "Resources/Cards/Ethereal/scc_06.png",
+   "art": "Resources/Cards/Ethereal/Succubi/scc_06.png",
+   "artworkPath": "Resources/Cards/Ethereal/Succubi/scc_06.png",
    "artPrompt": "dark fantasy trading card game illustration, alluring succubus demoness with violet flame: \"Шёпот искушения\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -12626,8 +12705,8 @@
     "drain",
     "scc"
    ],
-   "art": "Resources/Cards/Ethereal/scc_07.png",
-   "artworkPath": "Resources/Cards/Ethereal/scc_07.png",
+   "art": "Resources/Cards/Ethereal/Succubi/scc_07.png",
+   "artworkPath": "Resources/Cards/Ethereal/Succubi/scc_07.png",
    "artPrompt": "dark fantasy trading card game illustration, alluring succubus demoness with violet flame: \"Госпожа Вуали\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -12657,8 +12736,8 @@
     "drain",
     "scc"
    ],
-   "art": "Resources/Cards/Ethereal/scc_08.png",
-   "artworkPath": "Resources/Cards/Ethereal/scc_08.png",
+   "art": "Resources/Cards/Ethereal/Succubi/scc_08.png",
+   "artworkPath": "Resources/Cards/Ethereal/Succubi/scc_08.png",
    "artPrompt": "dark fantasy trading card game illustration, alluring succubus demoness with violet flame: \"Суккуб-баронесса\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -12699,8 +12778,8 @@
     "drain",
     "scc"
    ],
-   "art": "Resources/Cards/Ethereal/scc_09.png",
-   "artworkPath": "Resources/Cards/Ethereal/scc_09.png",
+   "art": "Resources/Cards/Ethereal/Succubi/scc_09.png",
+   "artworkPath": "Resources/Cards/Ethereal/Succubi/scc_09.png",
    "artPrompt": "dark fantasy trading card game illustration, alluring succubus demoness with violet flame: \"Поцелуй лихорадки\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -12730,8 +12809,8 @@
     "drain",
     "scc"
    ],
-   "art": "Resources/Cards/Ethereal/scc_10.png",
-   "artworkPath": "Resources/Cards/Ethereal/scc_10.png",
+   "art": "Resources/Cards/Ethereal/Succubi/scc_10.png",
+   "artworkPath": "Resources/Cards/Ethereal/Succubi/scc_10.png",
    "artPrompt": "dark fantasy trading card game illustration, alluring succubus demoness with violet flame: \"Ночная госпожа\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -12763,8 +12842,8 @@
     "drain",
     "scc"
    ],
-   "art": "Resources/Cards/Ethereal/scc_11.png",
-   "artworkPath": "Resources/Cards/Ethereal/scc_11.png",
+   "art": "Resources/Cards/Ethereal/Succubi/scc_11.png",
+   "artworkPath": "Resources/Cards/Ethereal/Succubi/scc_11.png",
    "artPrompt": "dark fantasy trading card game illustration, alluring succubus demoness with violet flame: \"Украденный сон\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -12802,8 +12881,8 @@
     "drain",
     "scc"
    ],
-   "art": "Resources/Cards/Ethereal/scc_12.png",
-   "artworkPath": "Resources/Cards/Ethereal/scc_12.png",
+   "art": "Resources/Cards/Ethereal/Succubi/scc_12.png",
+   "artworkPath": "Resources/Cards/Ethereal/Succubi/scc_12.png",
    "artPrompt": "dark fantasy trading card game illustration, alluring succubus demoness with violet flame: \"Чары подчинения\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -12842,8 +12921,8 @@
     "drain",
     "scc"
    ],
-   "art": "Resources/Cards/Ethereal/scc_13.png",
-   "artworkPath": "Resources/Cards/Ethereal/scc_13.png",
+   "art": "Resources/Cards/Ethereal/Succubi/scc_13.png",
+   "artworkPath": "Resources/Cards/Ethereal/Succubi/scc_13.png",
    "artPrompt": "dark fantasy trading card game illustration, alluring succubus demoness with violet flame: \"Матерь Искушений\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -12881,8 +12960,8 @@
     "drain",
     "scc"
    ],
-   "art": "Resources/Cards/Ethereal/scc_14.png",
-   "artworkPath": "Resources/Cards/Ethereal/scc_14.png",
+   "art": "Resources/Cards/Ethereal/Succubi/scc_14.png",
+   "artworkPath": "Resources/Cards/Ethereal/Succubi/scc_14.png",
    "artPrompt": "dark fantasy trading card game illustration, alluring succubus demoness with violet flame: \"Обет крови\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -12912,8 +12991,8 @@
     "tokens",
     "ent"
    ],
-   "art": "Resources/Cards/Terramorph/ent_01.png",
-   "artworkPath": "Resources/Cards/Terramorph/ent_01.png",
+   "art": "Resources/Cards/Terramorph/Ents/ent_01.png",
+   "artworkPath": "Resources/Cards/Terramorph/Ents/ent_01.png",
    "artPrompt": "dark fantasy trading card game illustration, ancient bark ent with mossy shoulders: \"Юный древень\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -12967,8 +13046,8 @@
     "tokens",
     "ent"
    ],
-   "art": "Resources/Cards/Terramorph/ent_02.png",
-   "artworkPath": "Resources/Cards/Terramorph/ent_02.png",
+   "art": "Resources/Cards/Terramorph/Ents/ent_02.png",
+   "artworkPath": "Resources/Cards/Terramorph/Ents/ent_02.png",
    "artPrompt": "dark fantasy trading card game illustration, ancient bark ent with mossy shoulders: \"Энт-рощеносец\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -13022,8 +13101,8 @@
     "tokens",
     "ent"
    ],
-   "art": "Resources/Cards/Terramorph/ent_03.png",
-   "artworkPath": "Resources/Cards/Terramorph/ent_03.png",
+   "art": "Resources/Cards/Terramorph/Ents/ent_03.png",
+   "artworkPath": "Resources/Cards/Terramorph/Ents/ent_03.png",
    "artPrompt": "dark fantasy trading card game illustration, ancient bark ent with mossy shoulders: \"Старый корнеплёт\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -13035,11 +13114,12 @@
    "attack": 4,
    "health": 5,
    "keywords": [
-    "Taunt"
+    "Taunt",
+    "Vigilance"
    ],
    "effects": [],
    "onDeath": [],
-   "abilityText": "Таунт. Стоит с Первой Посадки.",
+   "abilityText": "Провокация. Бдительность: не поворачивается после атаки.",
    "target": "None",
    "element": "None",
    "type": "Creature",
@@ -13052,8 +13132,8 @@
     "tokens",
     "ent"
    ],
-   "art": "Resources/Cards/Terramorph/ent_04.png",
-   "artworkPath": "Resources/Cards/Terramorph/ent_04.png",
+   "art": "Resources/Cards/Terramorph/Ents/ent_04.png",
+   "artworkPath": "Resources/Cards/Terramorph/Ents/ent_04.png",
    "artPrompt": "dark fantasy trading card game illustration, ancient bark ent with mossy shoulders: \"Дуб-часовой\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -13107,8 +13187,8 @@
     "tokens",
     "ent"
    ],
-   "art": "Resources/Cards/Terramorph/ent_05.png",
-   "artworkPath": "Resources/Cards/Terramorph/ent_05.png",
+   "art": "Resources/Cards/Terramorph/Ents/ent_05.png",
+   "artworkPath": "Resources/Cards/Terramorph/Ents/ent_05.png",
    "artPrompt": "dark fantasy trading card game illustration, ancient bark ent with mossy shoulders: \"Сеятель рощи\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -13137,8 +13217,8 @@
     "tokens",
     "ent"
    ],
-   "art": "Resources/Cards/Terramorph/ent_06.png",
-   "artworkPath": "Resources/Cards/Terramorph/ent_06.png",
+   "art": "Resources/Cards/Terramorph/Ents/ent_06.png",
+   "artworkPath": "Resources/Cards/Terramorph/Ents/ent_06.png",
    "artPrompt": "dark fantasy trading card game illustration, ancient bark ent with mossy shoulders: \"Кора-крепость\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -13173,8 +13253,8 @@
     "tokens",
     "ent"
    ],
-   "art": "Resources/Cards/Terramorph/ent_07.png",
-   "artworkPath": "Resources/Cards/Terramorph/ent_07.png",
+   "art": "Resources/Cards/Terramorph/Ents/ent_07.png",
+   "artworkPath": "Resources/Cards/Terramorph/Ents/ent_07.png",
    "artPrompt": "dark fantasy trading card game illustration, ancient bark ent with mossy shoulders: \"Энт-садовник\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -13204,8 +13284,8 @@
     "tokens",
     "ent"
    ],
-   "art": "Resources/Cards/Terramorph/ent_08.png",
-   "artworkPath": "Resources/Cards/Terramorph/ent_08.png",
+   "art": "Resources/Cards/Terramorph/Ents/ent_08.png",
+   "artworkPath": "Resources/Cards/Terramorph/Ents/ent_08.png",
    "artPrompt": "dark fantasy trading card game illustration, ancient bark ent with mossy shoulders: \"Ломоветвь\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -13240,8 +13320,8 @@
     "tokens",
     "ent"
    ],
-   "art": "Resources/Cards/Terramorph/ent_09.png",
-   "artworkPath": "Resources/Cards/Terramorph/ent_09.png",
+   "art": "Resources/Cards/Terramorph/Ents/ent_09.png",
+   "artworkPath": "Resources/Cards/Terramorph/Ents/ent_09.png",
    "artPrompt": "dark fantasy trading card game illustration, ancient bark ent with mossy shoulders: \"Рощемать\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -13296,8 +13376,8 @@
     "tokens",
     "ent"
    ],
-   "art": "Resources/Cards/Terramorph/ent_10.png",
-   "artworkPath": "Resources/Cards/Terramorph/ent_10.png",
+   "art": "Resources/Cards/Terramorph/Ents/ent_10.png",
+   "artworkPath": "Resources/Cards/Terramorph/Ents/ent_10.png",
    "artPrompt": "dark fantasy trading card game illustration, ancient bark ent with mossy shoulders: \"Древень-патриарх\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -13394,8 +13474,8 @@
     "tokens",
     "ent"
    ],
-   "art": "Resources/Cards/Terramorph/ent_11.png",
-   "artworkPath": "Resources/Cards/Terramorph/ent_11.png",
+   "art": "Resources/Cards/Terramorph/Ents/ent_11.png",
+   "artworkPath": "Resources/Cards/Terramorph/Ents/ent_11.png",
    "artPrompt": "dark fantasy trading card game illustration, ancient bark ent with mossy shoulders: \"Буйный рост\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -13473,8 +13553,8 @@
     "tokens",
     "ent"
    ],
-   "art": "Resources/Cards/Terramorph/ent_12.png",
-   "artworkPath": "Resources/Cards/Terramorph/ent_12.png",
+   "art": "Resources/Cards/Terramorph/Ents/ent_12.png",
+   "artworkPath": "Resources/Cards/Terramorph/Ents/ent_12.png",
    "artPrompt": "dark fantasy trading card game illustration, ancient bark ent with mossy shoulders: \"Древний Рощи\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -13507,8 +13587,8 @@
     "tokens",
     "ent"
    ],
-   "art": "Resources/Cards/Terramorph/ent_13.png",
-   "artworkPath": "Resources/Cards/Terramorph/ent_13.png",
+   "art": "Resources/Cards/Terramorph/Ents/ent_13.png",
+   "artworkPath": "Resources/Cards/Terramorph/Ents/ent_13.png",
    "artPrompt": "dark fantasy trading card game illustration, ancient bark ent with mossy shoulders: \"Дубовая кожа\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -13540,8 +13620,8 @@
     "tokens",
     "ent"
    ],
-   "art": "Resources/Cards/Terramorph/ent_14.png",
-   "artworkPath": "Resources/Cards/Terramorph/ent_14.png",
+   "art": "Resources/Cards/Terramorph/Ents/ent_14.png",
+   "artworkPath": "Resources/Cards/Terramorph/Ents/ent_14.png",
    "artPrompt": "dark fantasy trading card game illustration, ancient bark ent with mossy shoulders: \"Весенний сок\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -13570,8 +13650,8 @@
     "tokens",
     "pal"
    ],
-   "art": "Resources/Cards/Aurites/pal_01.png",
-   "artworkPath": "Resources/Cards/Aurites/pal_01.png",
+   "art": "Resources/Cards/Aurites/PaladinBrotherhood/pal_01.png",
+   "artworkPath": "Resources/Cards/Aurites/PaladinBrotherhood/pal_01.png",
    "artPrompt": "dark fantasy trading card game illustration, knight paladin of a brotherhood with sun sigil: \"Рядовой Братства\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -13624,8 +13704,8 @@
     "tokens",
     "pal"
    ],
-   "art": "Resources/Cards/Aurites/pal_02.png",
-   "artworkPath": "Resources/Cards/Aurites/pal_02.png",
+   "art": "Resources/Cards/Aurites/PaladinBrotherhood/pal_02.png",
+   "artworkPath": "Resources/Cards/Aurites/PaladinBrotherhood/pal_02.png",
    "artPrompt": "dark fantasy trading card game illustration, knight paladin of a brotherhood with sun sigil: \"Оруженосец-наставник\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -13679,8 +13759,8 @@
     "tokens",
     "pal"
    ],
-   "art": "Resources/Cards/Aurites/pal_03.png",
-   "artworkPath": "Resources/Cards/Aurites/pal_03.png",
+   "art": "Resources/Cards/Aurites/PaladinBrotherhood/pal_03.png",
+   "artworkPath": "Resources/Cards/Aurites/PaladinBrotherhood/pal_03.png",
    "artPrompt": "dark fantasy trading card game illustration, knight paladin of a brotherhood with sun sigil: \"Капеллан ордена\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -13709,8 +13789,8 @@
     "tokens",
     "pal"
    ],
-   "art": "Resources/Cards/Aurites/pal_04.png",
-   "artworkPath": "Resources/Cards/Aurites/pal_04.png",
+   "art": "Resources/Cards/Aurites/PaladinBrotherhood/pal_04.png",
+   "artworkPath": "Resources/Cards/Aurites/PaladinBrotherhood/pal_04.png",
    "artPrompt": "dark fantasy trading card game illustration, knight paladin of a brotherhood with sun sigil: \"Щитоносец рассвета\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -13739,8 +13819,8 @@
     "tokens",
     "pal"
    ],
-   "art": "Resources/Cards/Aurites/pal_05.png",
-   "artworkPath": "Resources/Cards/Aurites/pal_05.png",
+   "art": "Resources/Cards/Aurites/PaladinBrotherhood/pal_05.png",
+   "artworkPath": "Resources/Cards/Aurites/PaladinBrotherhood/pal_05.png",
    "artPrompt": "dark fantasy trading card game illustration, knight paladin of a brotherhood with sun sigil: \"Сержант строя\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -13788,8 +13868,8 @@
     "tokens",
     "pal"
    ],
-   "art": "Resources/Cards/Aurites/pal_06.png",
-   "artworkPath": "Resources/Cards/Aurites/pal_06.png",
+   "art": "Resources/Cards/Aurites/PaladinBrotherhood/pal_06.png",
+   "artworkPath": "Resources/Cards/Aurites/PaladinBrotherhood/pal_06.png",
    "artPrompt": "dark fantasy trading card game illustration, knight paladin of a brotherhood with sun sigil: \"Молодой рекрут\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -13844,8 +13924,8 @@
     "tokens",
     "pal"
    ],
-   "art": "Resources/Cards/Aurites/pal_07.png",
-   "artworkPath": "Resources/Cards/Aurites/pal_07.png",
+   "art": "Resources/Cards/Aurites/PaladinBrotherhood/pal_07.png",
+   "artworkPath": "Resources/Cards/Aurites/PaladinBrotherhood/pal_07.png",
    "artPrompt": "dark fantasy trading card game illustration, knight paladin of a brotherhood with sun sigil: \"Знаменосец\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -13878,8 +13958,8 @@
     "tokens",
     "pal"
    ],
-   "art": "Resources/Cards/Aurites/pal_08.png",
-   "artworkPath": "Resources/Cards/Aurites/pal_08.png",
+   "art": "Resources/Cards/Aurites/PaladinBrotherhood/pal_08.png",
+   "artworkPath": "Resources/Cards/Aurites/PaladinBrotherhood/pal_08.png",
    "artPrompt": "dark fantasy trading card game illustration, knight paladin of a brotherhood with sun sigil: \"Командор щитов\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -13956,8 +14036,8 @@
     "tokens",
     "pal"
    ],
-   "art": "Resources/Cards/Aurites/pal_09.png",
-   "artworkPath": "Resources/Cards/Aurites/pal_09.png",
+   "art": "Resources/Cards/Aurites/PaladinBrotherhood/pal_09.png",
+   "artworkPath": "Resources/Cards/Aurites/PaladinBrotherhood/pal_09.png",
    "artPrompt": "dark fantasy trading card game illustration, knight paladin of a brotherhood with sun sigil: \"Маршал Братства\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -13987,8 +14067,8 @@
     "tokens",
     "pal"
    ],
-   "art": "Resources/Cards/Aurites/pal_10.png",
-   "artworkPath": "Resources/Cards/Aurites/pal_10.png",
+   "art": "Resources/Cards/Aurites/PaladinBrotherhood/pal_10.png",
+   "artworkPath": "Resources/Cards/Aurites/PaladinBrotherhood/pal_10.png",
    "artPrompt": "dark fantasy trading card game illustration, knight paladin of a brotherhood with sun sigil: \"Светозарный судья\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -14019,8 +14099,8 @@
     "tokens",
     "pal"
    ],
-   "art": "Resources/Cards/Aurites/pal_11.png",
-   "artworkPath": "Resources/Cards/Aurites/pal_11.png",
+   "art": "Resources/Cards/Aurites/PaladinBrotherhood/pal_11.png",
+   "artworkPath": "Resources/Cards/Aurites/PaladinBrotherhood/pal_11.png",
    "artPrompt": "dark fantasy trading card game illustration, knight paladin of a brotherhood with sun sigil: \"Благословение щитов\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -14120,8 +14200,8 @@
     "tokens",
     "pal"
    ],
-   "art": "Resources/Cards/Aurites/pal_12.png",
-   "artworkPath": "Resources/Cards/Aurites/pal_12.png",
+   "art": "Resources/Cards/Aurites/PaladinBrotherhood/pal_12.png",
+   "artworkPath": "Resources/Cards/Aurites/PaladinBrotherhood/pal_12.png",
    "artPrompt": "dark fantasy trading card game illustration, knight paladin of a brotherhood with sun sigil: \"Гроссмейстер Ордена\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -14159,8 +14239,8 @@
     "tokens",
     "pal"
    ],
-   "art": "Resources/Cards/Aurites/pal_13.png",
-   "artworkPath": "Resources/Cards/Aurites/pal_13.png",
+   "art": "Resources/Cards/Aurites/PaladinBrotherhood/pal_13.png",
+   "artworkPath": "Resources/Cards/Aurites/PaladinBrotherhood/pal_13.png",
    "artPrompt": "dark fantasy trading card game illustration, knight paladin of a brotherhood with sun sigil: \"Обет стойкости\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -14193,8 +14273,8 @@
     "tokens",
     "pal"
    ],
-   "art": "Resources/Cards/Aurites/pal_14.png",
-   "artworkPath": "Resources/Cards/Aurites/pal_14.png",
+   "art": "Resources/Cards/Aurites/PaladinBrotherhood/pal_14.png",
+   "artworkPath": "Resources/Cards/Aurites/PaladinBrotherhood/pal_14.png",
    "artPrompt": "dark fantasy trading card game illustration, knight paladin of a brotherhood with sun sigil: \"Молитва лазарета\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -14229,8 +14309,8 @@
     "tokens",
     "sbd"
    ],
-   "art": "Resources/Cards/Neutral/sbd_01.png",
-   "artworkPath": "Resources/Cards/Neutral/sbd_01.png",
+   "art": "Resources/Cards/Neutral/SacredBrotherhood/sbd_01.png",
+   "artworkPath": "Resources/Cards/Neutral/SacredBrotherhood/sbd_01.png",
    "artPrompt": "dark fantasy trading card game illustration, hooded monk of a sacred brotherhood with candle: \"Послушник свечи\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -14259,8 +14339,8 @@
     "tokens",
     "sbd"
    ],
-   "art": "Resources/Cards/Neutral/sbd_02.png",
-   "artworkPath": "Resources/Cards/Neutral/sbd_02.png",
+   "art": "Resources/Cards/Neutral/SacredBrotherhood/sbd_02.png",
+   "artworkPath": "Resources/Cards/Neutral/SacredBrotherhood/sbd_02.png",
    "artPrompt": "dark fantasy trading card game illustration, hooded monk of a sacred brotherhood with candle: \"Брат-привратник\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -14313,8 +14393,8 @@
     "tokens",
     "sbd"
    ],
-   "art": "Resources/Cards/Neutral/sbd_03.png",
-   "artworkPath": "Resources/Cards/Neutral/sbd_03.png",
+   "art": "Resources/Cards/Neutral/SacredBrotherhood/sbd_03.png",
+   "artworkPath": "Resources/Cards/Neutral/SacredBrotherhood/sbd_03.png",
    "artPrompt": "dark fantasy trading card game illustration, hooded monk of a sacred brotherhood with candle: \"Странствующий проповедник\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -14367,8 +14447,8 @@
     "tokens",
     "sbd"
    ],
-   "art": "Resources/Cards/Neutral/sbd_04.png",
-   "artworkPath": "Resources/Cards/Neutral/sbd_04.png",
+   "art": "Resources/Cards/Neutral/SacredBrotherhood/sbd_04.png",
+   "artworkPath": "Resources/Cards/Neutral/SacredBrotherhood/sbd_04.png",
    "artPrompt": "dark fantasy trading card game illustration, hooded monk of a sacred brotherhood with candle: \"Хоральный брат\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -14426,8 +14506,8 @@
     "tokens",
     "sbd"
    ],
-   "art": "Resources/Cards/Neutral/sbd_05.png",
-   "artworkPath": "Resources/Cards/Neutral/sbd_05.png",
+   "art": "Resources/Cards/Neutral/SacredBrotherhood/sbd_05.png",
+   "artworkPath": "Resources/Cards/Neutral/SacredBrotherhood/sbd_05.png",
    "artPrompt": "dark fantasy trading card game illustration, hooded monk of a sacred brotherhood with candle: \"Наставник новиция\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -14480,8 +14560,8 @@
     "tokens",
     "sbd"
    ],
-   "art": "Resources/Cards/Neutral/sbd_06.png",
-   "artworkPath": "Resources/Cards/Neutral/sbd_06.png",
+   "art": "Resources/Cards/Neutral/SacredBrotherhood/sbd_06.png",
+   "artworkPath": "Resources/Cards/Neutral/SacredBrotherhood/sbd_06.png",
    "artPrompt": "dark fantasy trading card game illustration, hooded monk of a sacred brotherhood with candle: \"Мученик веры\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -14515,8 +14595,8 @@
     "tokens",
     "sbd"
    ],
-   "art": "Resources/Cards/Neutral/sbd_07.png",
-   "artworkPath": "Resources/Cards/Neutral/sbd_07.png",
+   "art": "Resources/Cards/Neutral/SacredBrotherhood/sbd_07.png",
+   "artworkPath": "Resources/Cards/Neutral/SacredBrotherhood/sbd_07.png",
    "artPrompt": "dark fantasy trading card game illustration, hooded monk of a sacred brotherhood with candle: \"Целитель обители\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -14592,8 +14672,8 @@
     "tokens",
     "sbd"
    ],
-   "art": "Resources/Cards/Neutral/sbd_08.png",
-   "artworkPath": "Resources/Cards/Neutral/sbd_08.png",
+   "art": "Resources/Cards/Neutral/SacredBrotherhood/sbd_08.png",
+   "artworkPath": "Resources/Cards/Neutral/SacredBrotherhood/sbd_08.png",
    "artPrompt": "dark fantasy trading card game illustration, hooded monk of a sacred brotherhood with candle: \"Архимандрит\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -14630,8 +14710,8 @@
     "tokens",
     "sbd"
    ],
-   "art": "Resources/Cards/Neutral/sbd_09.png",
-   "artworkPath": "Resources/Cards/Neutral/sbd_09.png",
+   "art": "Resources/Cards/Neutral/SacredBrotherhood/sbd_09.png",
+   "artworkPath": "Resources/Cards/Neutral/SacredBrotherhood/sbd_09.png",
    "artPrompt": "dark fantasy trading card game illustration, hooded monk of a sacred brotherhood with candle: \"Светоч братства\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -14688,8 +14768,8 @@
     "tokens",
     "sbd"
    ],
-   "art": "Resources/Cards/Neutral/sbd_10.png",
-   "artworkPath": "Resources/Cards/Neutral/sbd_10.png",
+   "art": "Resources/Cards/Neutral/SacredBrotherhood/sbd_10.png",
+   "artworkPath": "Resources/Cards/Neutral/SacredBrotherhood/sbd_10.png",
    "artPrompt": "dark fantasy trading card game illustration, hooded monk of a sacred brotherhood with candle: \"Игумен процессий\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -14786,8 +14866,8 @@
     "tokens",
     "sbd"
    ],
-   "art": "Resources/Cards/Neutral/sbd_11.png",
-   "artworkPath": "Resources/Cards/Neutral/sbd_11.png",
+   "art": "Resources/Cards/Neutral/SacredBrotherhood/sbd_11.png",
+   "artworkPath": "Resources/Cards/Neutral/SacredBrotherhood/sbd_11.png",
    "artPrompt": "dark fantasy trading card game illustration, hooded monk of a sacred brotherhood with candle: \"Великая процессия\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -14868,8 +14948,8 @@
     "tokens",
     "sbd"
    ],
-   "art": "Resources/Cards/Neutral/sbd_12.png",
-   "artworkPath": "Resources/Cards/Neutral/sbd_12.png",
+   "art": "Resources/Cards/Neutral/SacredBrotherhood/sbd_12.png",
+   "artworkPath": "Resources/Cards/Neutral/SacredBrotherhood/sbd_12.png",
    "artPrompt": "dark fantasy trading card game illustration, hooded monk of a sacred brotherhood with candle: \"Патриарх Братства\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -14906,8 +14986,8 @@
     "tokens",
     "sbd"
    ],
-   "art": "Resources/Cards/Neutral/sbd_13.png",
-   "artworkPath": "Resources/Cards/Neutral/sbd_13.png",
+   "art": "Resources/Cards/Neutral/SacredBrotherhood/sbd_13.png",
+   "artworkPath": "Resources/Cards/Neutral/SacredBrotherhood/sbd_13.png",
    "artPrompt": "dark fantasy trading card game illustration, hooded monk of a sacred brotherhood with candle: \"Милостыня и молитва\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -14939,8 +15019,8 @@
     "tokens",
     "sbd"
    ],
-   "art": "Resources/Cards/Neutral/sbd_14.png",
-   "artworkPath": "Resources/Cards/Neutral/sbd_14.png",
+   "art": "Resources/Cards/Neutral/SacredBrotherhood/sbd_14.png",
+   "artworkPath": "Resources/Cards/Neutral/SacredBrotherhood/sbd_14.png",
    "artPrompt": "dark fantasy trading card game illustration, hooded monk of a sacred brotherhood with candle: \"Елеосвящение\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -14982,8 +15062,8 @@
     "poison",
     "wtc"
    ],
-   "art": "Resources/Cards/Necrus/wtc_01.png",
-   "artworkPath": "Resources/Cards/Necrus/wtc_01.png",
+   "art": "Resources/Cards/Necrus/Witches/wtc_01.png",
+   "artworkPath": "Resources/Cards/Necrus/Witches/wtc_01.png",
    "artPrompt": "dark fantasy trading card game illustration, hag witch with toadstool crown and green fumes: \"Ведьма-полуночница\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -15024,8 +15104,8 @@
     "poison",
     "wtc"
    ],
-   "art": "Resources/Cards/Necrus/wtc_02.png",
-   "artworkPath": "Resources/Cards/Necrus/wtc_02.png",
+   "art": "Resources/Cards/Necrus/Witches/wtc_02.png",
+   "artworkPath": "Resources/Cards/Necrus/Witches/wtc_02.png",
    "artPrompt": "dark fantasy trading card game illustration, hag witch with toadstool crown and green fumes: \"Травница котла\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -15062,8 +15142,8 @@
     "poison",
     "wtc"
    ],
-   "art": "Resources/Cards/Necrus/wtc_03.png",
-   "artworkPath": "Resources/Cards/Necrus/wtc_03.png",
+   "art": "Resources/Cards/Necrus/Witches/wtc_03.png",
+   "artworkPath": "Resources/Cards/Necrus/Witches/wtc_03.png",
    "artPrompt": "dark fantasy trading card game illustration, hag witch with toadstool crown and green fumes: \"Сглаз-шептунья\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -15111,8 +15191,8 @@
     "poison",
     "wtc"
    ],
-   "art": "Resources/Cards/Necrus/wtc_04.png",
-   "artworkPath": "Resources/Cards/Necrus/wtc_04.png",
+   "art": "Resources/Cards/Necrus/Witches/wtc_04.png",
+   "artworkPath": "Resources/Cards/Necrus/Witches/wtc_04.png",
    "artPrompt": "dark fantasy trading card game illustration, hag witch with toadstool crown and green fumes: \"Жаба-фамильяр\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -15153,8 +15233,8 @@
     "poison",
     "wtc"
    ],
-   "art": "Resources/Cards/Necrus/wtc_05.png",
-   "artworkPath": "Resources/Cards/Necrus/wtc_05.png",
+   "art": "Resources/Cards/Necrus/Witches/wtc_05.png",
+   "artworkPath": "Resources/Cards/Necrus/Witches/wtc_05.png",
    "artPrompt": "dark fantasy trading card game illustration, hag witch with toadstool crown and green fumes: \"Котельная бабка\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -15196,8 +15276,8 @@
     "poison",
     "wtc"
    ],
-   "art": "Resources/Cards/Necrus/wtc_06.png",
-   "artworkPath": "Resources/Cards/Necrus/wtc_06.png",
+   "art": "Resources/Cards/Necrus/Witches/wtc_06.png",
+   "artworkPath": "Resources/Cards/Necrus/Witches/wtc_06.png",
    "artPrompt": "dark fantasy trading card game illustration, hag witch with toadstool crown and green fumes: \"Гнилая повитуха\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -15232,8 +15312,8 @@
     "poison",
     "wtc"
    ],
-   "art": "Resources/Cards/Necrus/wtc_07.png",
-   "artworkPath": "Resources/Cards/Necrus/wtc_07.png",
+   "art": "Resources/Cards/Necrus/Witches/wtc_07.png",
+   "artworkPath": "Resources/Cards/Necrus/Witches/wtc_07.png",
    "artPrompt": "dark fantasy trading card game illustration, hag witch with toadstool crown and green fumes: \"Ведьма-сухорука\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -15274,8 +15354,8 @@
     "poison",
     "wtc"
    ],
-   "art": "Resources/Cards/Necrus/wtc_08.png",
-   "artworkPath": "Resources/Cards/Necrus/wtc_08.png",
+   "art": "Resources/Cards/Necrus/Witches/wtc_08.png",
+   "artworkPath": "Resources/Cards/Necrus/Witches/wtc_08.png",
    "artPrompt": "dark fantasy trading card game illustration, hag witch with toadstool crown and green fumes: \"Полынная знахарка\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -15313,8 +15393,8 @@
     "poison",
     "wtc"
    ],
-   "art": "Resources/Cards/Necrus/wtc_09.png",
-   "artworkPath": "Resources/Cards/Necrus/wtc_09.png",
+   "art": "Resources/Cards/Necrus/Witches/wtc_09.png",
+   "artworkPath": "Resources/Cards/Necrus/Witches/wtc_09.png",
    "artPrompt": "dark fantasy trading card game illustration, hag witch with toadstool crown and green fumes: \"Полуночная шептуха\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -15362,8 +15442,8 @@
     "poison",
     "wtc"
    ],
-   "art": "Resources/Cards/Necrus/wtc_10.png",
-   "artworkPath": "Resources/Cards/Necrus/wtc_10.png",
+   "art": "Resources/Cards/Necrus/Witches/wtc_10.png",
+   "artworkPath": "Resources/Cards/Necrus/Witches/wtc_10.png",
    "artPrompt": "dark fantasy trading card game illustration, hag witch with toadstool crown and green fumes: \"Мать жабьего котла\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -15398,8 +15478,8 @@
     "poison",
     "wtc"
    ],
-   "art": "Resources/Cards/Necrus/wtc_11.png",
-   "artworkPath": "Resources/Cards/Necrus/wtc_11.png",
+   "art": "Resources/Cards/Necrus/Witches/wtc_11.png",
+   "artworkPath": "Resources/Cards/Necrus/Witches/wtc_11.png",
    "artPrompt": "dark fantasy trading card game illustration, hag witch with toadstool crown and green fumes: \"Моровая заря\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -15441,8 +15521,8 @@
     "poison",
     "wtc"
    ],
-   "art": "Resources/Cards/Necrus/wtc_12.png",
-   "artworkPath": "Resources/Cards/Necrus/wtc_12.png",
+   "art": "Resources/Cards/Necrus/Witches/wtc_12.png",
+   "artworkPath": "Resources/Cards/Necrus/Witches/wtc_12.png",
    "artPrompt": "dark fantasy trading card game illustration, hag witch with toadstool crown and green fumes: \"Матерь Ковена\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -15477,8 +15557,8 @@
     "poison",
     "wtc"
    ],
-   "art": "Resources/Cards/Necrus/wtc_13.png",
-   "artworkPath": "Resources/Cards/Necrus/wtc_13.png",
+   "art": "Resources/Cards/Necrus/Witches/wtc_13.png",
+   "artworkPath": "Resources/Cards/Necrus/Witches/wtc_13.png",
    "artPrompt": "dark fantasy trading card game illustration, hag witch with toadstool crown and green fumes: \"Искра сглаза\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -15517,8 +15597,8 @@
     "poison",
     "wtc"
    ],
-   "art": "Resources/Cards/Necrus/wtc_14.png",
-   "artworkPath": "Resources/Cards/Necrus/wtc_14.png",
+   "art": "Resources/Cards/Necrus/Witches/wtc_14.png",
+   "artworkPath": "Resources/Cards/Necrus/Witches/wtc_14.png",
    "artPrompt": "dark fantasy trading card game illustration, hag witch with toadstool crown and green fumes: \"Ведьмин яд\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -15559,8 +15639,8 @@
     "poison",
     "asp"
    ],
-   "art": "Resources/Cards/Terramorph/asp_01.png",
-   "artworkPath": "Resources/Cards/Terramorph/asp_01.png",
+   "art": "Resources/Cards/Terramorph/Aspids/asp_01.png",
+   "artworkPath": "Resources/Cards/Terramorph/Aspids/asp_01.png",
    "artPrompt": "dark fantasy trading card game illustration, giant asp serpent with iridescent scales: \"Аспид-плут\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -15590,8 +15670,8 @@
     "poison",
     "asp"
    ],
-   "art": "Resources/Cards/Terramorph/asp_02.png",
-   "artworkPath": "Resources/Cards/Terramorph/asp_02.png",
+   "art": "Resources/Cards/Terramorph/Aspids/asp_02.png",
+   "artworkPath": "Resources/Cards/Terramorph/Aspids/asp_02.png",
    "artPrompt": "dark fantasy trading card game illustration, giant asp serpent with iridescent scales: \"Чешуйчатый ползун\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -15628,8 +15708,8 @@
     "poison",
     "asp"
    ],
-   "art": "Resources/Cards/Terramorph/asp_03.png",
-   "artworkPath": "Resources/Cards/Terramorph/asp_03.png",
+   "art": "Resources/Cards/Terramorph/Aspids/asp_03.png",
+   "artworkPath": "Resources/Cards/Terramorph/Aspids/asp_03.png",
    "artPrompt": "dark fantasy trading card game illustration, giant asp serpent with iridescent scales: \"Ядозуб\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -15671,8 +15751,8 @@
     "poison",
     "asp"
    ],
-   "art": "Resources/Cards/Terramorph/asp_04.png",
-   "artworkPath": "Resources/Cards/Terramorph/asp_04.png",
+   "art": "Resources/Cards/Terramorph/Aspids/asp_04.png",
+   "artworkPath": "Resources/Cards/Terramorph/Aspids/asp_04.png",
    "artPrompt": "dark fantasy trading card game illustration, giant asp serpent with iridescent scales: \"Ночная скользящая\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -15710,8 +15790,8 @@
     "poison",
     "asp"
    ],
-   "art": "Resources/Cards/Terramorph/asp_05.png",
-   "artworkPath": "Resources/Cards/Terramorph/asp_05.png",
+   "art": "Resources/Cards/Terramorph/Aspids/asp_05.png",
+   "artworkPath": "Resources/Cards/Terramorph/Aspids/asp_05.png",
    "artPrompt": "dark fantasy trading card game illustration, giant asp serpent with iridescent scales: \"Аспид-удав\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -15753,8 +15833,8 @@
     "poison",
     "asp"
    ],
-   "art": "Resources/Cards/Terramorph/asp_06.png",
-   "artworkPath": "Resources/Cards/Terramorph/asp_06.png",
+   "art": "Resources/Cards/Terramorph/Aspids/asp_06.png",
+   "artworkPath": "Resources/Cards/Terramorph/Aspids/asp_06.png",
    "artPrompt": "dark fantasy trading card game illustration, giant asp serpent with iridescent scales: \"Гадюка-мать\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -15783,8 +15863,8 @@
     "poison",
     "asp"
    ],
-   "art": "Resources/Cards/Terramorph/asp_07.png",
-   "artworkPath": "Resources/Cards/Terramorph/asp_07.png",
+   "art": "Resources/Cards/Terramorph/Aspids/asp_07.png",
+   "artworkPath": "Resources/Cards/Terramorph/Aspids/asp_07.png",
    "artPrompt": "dark fantasy trading card game illustration, giant asp serpent with iridescent scales: \"Королевская кобра\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -15827,8 +15907,8 @@
     "poison",
     "asp"
    ],
-   "art": "Resources/Cards/Terramorph/asp_08.png",
-   "artworkPath": "Resources/Cards/Terramorph/asp_08.png",
+   "art": "Resources/Cards/Terramorph/Aspids/asp_08.png",
+   "artworkPath": "Resources/Cards/Terramorph/Aspids/asp_08.png",
    "artPrompt": "dark fantasy trading card game illustration, giant asp serpent with iridescent scales: \"Полоз-каменщук\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -15866,8 +15946,8 @@
     "poison",
     "asp"
    ],
-   "art": "Resources/Cards/Terramorph/asp_09.png",
-   "artworkPath": "Resources/Cards/Terramorph/asp_09.png",
+   "art": "Resources/Cards/Terramorph/Aspids/asp_09.png",
+   "artworkPath": "Resources/Cards/Terramorph/Aspids/asp_09.png",
    "artPrompt": "dark fantasy trading card game illustration, giant asp serpent with iridescent scales: \"Стремительный клык\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -15905,8 +15985,8 @@
     "poison",
     "asp"
    ],
-   "art": "Resources/Cards/Terramorph/asp_10.png",
-   "artworkPath": "Resources/Cards/Terramorph/asp_10.png",
+   "art": "Resources/Cards/Terramorph/Aspids/asp_10.png",
+   "artworkPath": "Resources/Cards/Terramorph/Aspids/asp_10.png",
    "artPrompt": "dark fantasy trading card game illustration, giant asp serpent with iridescent scales: \"Радужный аспид\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -15950,8 +16030,8 @@
     "poison",
     "asp"
    ],
-   "art": "Resources/Cards/Terramorph/asp_11.png",
-   "artworkPath": "Resources/Cards/Terramorph/asp_11.png",
+   "art": "Resources/Cards/Terramorph/Aspids/asp_11.png",
+   "artworkPath": "Resources/Cards/Terramorph/Aspids/asp_11.png",
    "artPrompt": "dark fantasy trading card game illustration, giant asp serpent with iridescent scales: \"Двойной укус\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -15989,8 +16069,8 @@
     "poison",
     "asp"
    ],
-   "art": "Resources/Cards/Terramorph/asp_12.png",
-   "artworkPath": "Resources/Cards/Terramorph/asp_12.png",
+   "art": "Resources/Cards/Terramorph/Aspids/asp_12.png",
+   "artworkPath": "Resources/Cards/Terramorph/Aspids/asp_12.png",
    "artPrompt": "dark fantasy trading card game illustration, giant asp serpent with iridescent scales: \"Прародитель Змей\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -16030,8 +16110,8 @@
     "poison",
     "asp"
    ],
-   "art": "Resources/Cards/Terramorph/asp_13.png",
-   "artworkPath": "Resources/Cards/Terramorph/asp_13.png",
+   "art": "Resources/Cards/Terramorph/Aspids/asp_13.png",
+   "artworkPath": "Resources/Cards/Terramorph/Aspids/asp_13.png",
    "artPrompt": "dark fantasy trading card game illustration, giant asp serpent with iridescent scales: \"Укус и жал\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -16073,8 +16153,8 @@
     "poison",
     "asp"
    ],
-   "art": "Resources/Cards/Terramorph/asp_14.png",
-   "artworkPath": "Resources/Cards/Terramorph/asp_14.png",
+   "art": "Resources/Cards/Terramorph/Aspids/asp_14.png",
+   "artworkPath": "Resources/Cards/Terramorph/Aspids/asp_14.png",
    "artPrompt": "dark fantasy trading card game illustration, giant asp serpent with iridescent scales: \"Яд и лихорадка\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -16109,8 +16189,8 @@
     "poison",
     "wtd"
    ],
-   "art": "Resources/Cards/Neutral/wtd_01.png",
-   "artworkPath": "Resources/Cards/Neutral/wtd_01.png",
+   "art": "Resources/Cards/Neutral/Withered/wtd_01.png",
+   "artworkPath": "Resources/Cards/Neutral/Withered/wtd_01.png",
    "artPrompt": "dark fantasy trading card game illustration, withered cursed husk pilgrim in rags: \"Иссохший паломник\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -16146,8 +16226,8 @@
     "poison",
     "wtd"
    ],
-   "art": "Resources/Cards/Neutral/wtd_02.png",
-   "artworkPath": "Resources/Cards/Neutral/wtd_02.png",
+   "art": "Resources/Cards/Neutral/Withered/wtd_02.png",
+   "artworkPath": "Resources/Cards/Neutral/Withered/wtd_02.png",
    "artPrompt": "dark fantasy trading card game illustration, withered cursed husk pilgrim in rags: \"Носитель порчи\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -16182,8 +16262,8 @@
     "poison",
     "wtd"
    ],
-   "art": "Resources/Cards/Neutral/wtd_03.png",
-   "artworkPath": "Resources/Cards/Neutral/wtd_03.png",
+   "art": "Resources/Cards/Neutral/Withered/wtd_03.png",
+   "artworkPath": "Resources/Cards/Neutral/Withered/wtd_03.png",
    "artPrompt": "dark fantasy trading card game illustration, withered cursed husk pilgrim in rags: \"Проклятый землепашец\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -16222,8 +16302,8 @@
     "poison",
     "wtd"
    ],
-   "art": "Resources/Cards/Neutral/wtd_04.png",
-   "artworkPath": "Resources/Cards/Neutral/wtd_04.png",
+   "art": "Resources/Cards/Neutral/Withered/wtd_04.png",
+   "artworkPath": "Resources/Cards/Neutral/Withered/wtd_04.png",
    "artPrompt": "dark fantasy trading card game illustration, withered cursed husk pilgrim in rags: \"Иссохшая вдова\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -16264,8 +16344,8 @@
     "poison",
     "wtd"
    ],
-   "art": "Resources/Cards/Neutral/wtd_05.png",
-   "artworkPath": "Resources/Cards/Neutral/wtd_05.png",
+   "art": "Resources/Cards/Neutral/Withered/wtd_05.png",
+   "artworkPath": "Resources/Cards/Neutral/Withered/wtd_05.png",
    "artPrompt": "dark fantasy trading card game illustration, withered cursed husk pilgrim in rags: \"Могильный глашатай\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -16300,8 +16380,8 @@
     "poison",
     "wtd"
    ],
-   "art": "Resources/Cards/Neutral/wtd_06.png",
-   "artworkPath": "Resources/Cards/Neutral/wtd_06.png",
+   "art": "Resources/Cards/Neutral/Withered/wtd_06.png",
+   "artworkPath": "Resources/Cards/Neutral/Withered/wtd_06.png",
    "artPrompt": "dark fantasy trading card game illustration, withered cursed husk pilgrim in rags: \"Проклятый колосс\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -16337,8 +16417,8 @@
     "poison",
     "wtd"
    ],
-   "art": "Resources/Cards/Neutral/wtd_07.png",
-   "artworkPath": "Resources/Cards/Neutral/wtd_07.png",
+   "art": "Resources/Cards/Neutral/Withered/wtd_07.png",
+   "artworkPath": "Resources/Cards/Neutral/Withered/wtd_07.png",
    "artPrompt": "dark fantasy trading card game illustration, withered cursed husk pilgrim in rags: \"Иссохший хор\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -16373,8 +16453,8 @@
     "poison",
     "wtd"
    ],
-   "art": "Resources/Cards/Neutral/wtd_08.png",
-   "artworkPath": "Resources/Cards/Neutral/wtd_08.png",
+   "art": "Resources/Cards/Neutral/Withered/wtd_08.png",
+   "artworkPath": "Resources/Cards/Neutral/Withered/wtd_08.png",
    "artPrompt": "dark fantasy trading card game illustration, withered cursed husk pilgrim in rags: \"Сухорукий жнец\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -16414,8 +16494,8 @@
     "poison",
     "wtd"
    ],
-   "art": "Resources/Cards/Neutral/wtd_09.png",
-   "artworkPath": "Resources/Cards/Neutral/wtd_09.png",
+   "art": "Resources/Cards/Neutral/Withered/wtd_09.png",
+   "artworkPath": "Resources/Cards/Neutral/Withered/wtd_09.png",
    "artPrompt": "dark fantasy trading card game illustration, withered cursed husk pilgrim in rags: \"Пророк порчи\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -16451,8 +16531,8 @@
     "poison",
     "wtd"
    ],
-   "art": "Resources/Cards/Neutral/wtd_10.png",
-   "artworkPath": "Resources/Cards/Neutral/wtd_10.png",
+   "art": "Resources/Cards/Neutral/Withered/wtd_10.png",
+   "artworkPath": "Resources/Cards/Neutral/Withered/wtd_10.png",
    "artPrompt": "dark fantasy trading card game illustration, withered cursed husk pilgrim in rags: \"Иссохший исполин\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -16494,8 +16574,8 @@
     "poison",
     "wtd"
    ],
-   "art": "Resources/Cards/Neutral/wtd_11.png",
-   "artworkPath": "Resources/Cards/Neutral/wtd_11.png",
+   "art": "Resources/Cards/Neutral/Withered/wtd_11.png",
+   "artworkPath": "Resources/Cards/Neutral/Withered/wtd_11.png",
    "artPrompt": "dark fantasy trading card game illustration, withered cursed husk pilgrim in rags: \"Вестник проклятия\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -16528,8 +16608,8 @@
     "poison",
     "wtd"
    ],
-   "art": "Resources/Cards/Neutral/wtd_12.png",
-   "artworkPath": "Resources/Cards/Neutral/wtd_12.png",
+   "art": "Resources/Cards/Neutral/Withered/wtd_12.png",
+   "artworkPath": "Resources/Cards/Neutral/Withered/wtd_12.png",
    "artPrompt": "dark fantasy trading card game illustration, withered cursed husk pilgrim in rags: \"Великое проклятие\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -16569,8 +16649,8 @@
     "poison",
     "wtd"
    ],
-   "art": "Resources/Cards/Neutral/wtd_13.png",
-   "artworkPath": "Resources/Cards/Neutral/wtd_13.png",
+   "art": "Resources/Cards/Neutral/Withered/wtd_13.png",
+   "artworkPath": "Resources/Cards/Neutral/Withered/wtd_13.png",
    "artPrompt": "dark fantasy trading card game illustration, withered cursed husk pilgrim in rags: \"Патриарх Иссохших\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -16603,8 +16683,8 @@
     "poison",
     "wtd"
    ],
-   "art": "Resources/Cards/Neutral/wtd_14.png",
-   "artworkPath": "Resources/Cards/Neutral/wtd_14.png",
+   "art": "Resources/Cards/Neutral/Withered/wtd_14.png",
+   "artworkPath": "Resources/Cards/Neutral/Withered/wtd_14.png",
    "artPrompt": "dark fantasy trading card game illustration, withered cursed husk pilgrim in rags: \"Слабость\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -16633,8 +16713,8 @@
     "support",
     "nsu"
    ],
-   "art": "Resources/Cards/Neutral/nsu_01.png",
-   "artworkPath": "Resources/Cards/Neutral/nsu_01.png",
+   "art": "Resources/Cards/Neutral/Mercenaries/nsu_01.png",
+   "artworkPath": "Resources/Cards/Neutral/Mercenaries/nsu_01.png",
    "artPrompt": "dark fantasy trading card game illustration, wandering mercenary of the echo lands: \"Степной наездник\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -16663,8 +16743,8 @@
     "support",
     "nsu"
    ],
-   "art": "Resources/Cards/Neutral/nsu_02.png",
-   "artworkPath": "Resources/Cards/Neutral/nsu_02.png",
+   "art": "Resources/Cards/Neutral/Mercenaries/nsu_02.png",
+   "artworkPath": "Resources/Cards/Neutral/Mercenaries/nsu_02.png",
    "artPrompt": "dark fantasy trading card game illustration, wandering mercenary of the echo lands: \"Тенёк из подворотни\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -16693,8 +16773,8 @@
     "support",
     "nsu"
    ],
-   "art": "Resources/Cards/Neutral/nsu_03.png",
-   "artworkPath": "Resources/Cards/Neutral/nsu_03.png",
+   "art": "Resources/Cards/Neutral/Mercenaries/nsu_03.png",
+   "artworkPath": "Resources/Cards/Neutral/Mercenaries/nsu_03.png",
    "artPrompt": "dark fantasy trading card game illustration, wandering mercenary of the echo lands: \"Наёмный клинок\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -16721,8 +16801,8 @@
     "support",
     "nsu"
    ],
-   "art": "Resources/Cards/Neutral/nsu_04.png",
-   "artworkPath": "Resources/Cards/Neutral/nsu_04.png",
+   "art": "Resources/Cards/Neutral/Mercenaries/nsu_04.png",
+   "artworkPath": "Resources/Cards/Neutral/Mercenaries/nsu_04.png",
    "artPrompt": "dark fantasy trading card game illustration, wandering mercenary of the echo lands: \"Серый ветеран\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -16758,8 +16838,8 @@
     "support",
     "nsu"
    ],
-   "art": "Resources/Cards/Neutral/nsu_05.png",
-   "artworkPath": "Resources/Cards/Neutral/nsu_05.png",
+   "art": "Resources/Cards/Neutral/Mercenaries/nsu_05.png",
+   "artworkPath": "Resources/Cards/Neutral/Mercenaries/nsu_05.png",
    "artPrompt": "dark fantasy trading card game illustration, wandering mercenary of the echo lands: \"Разведчица дюн\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -16788,8 +16868,8 @@
     "support",
     "nsu"
    ],
-   "art": "Resources/Cards/Neutral/nsu_06.png",
-   "artworkPath": "Resources/Cards/Neutral/nsu_06.png",
+   "art": "Resources/Cards/Neutral/Mercenaries/nsu_06.png",
+   "artworkPath": "Resources/Cards/Neutral/Mercenaries/nsu_06.png",
    "artPrompt": "dark fantasy trading card game illustration, wandering mercenary of the echo lands: \"Копейщик авангарда\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -16822,8 +16902,8 @@
     "support",
     "nsu"
    ],
-   "art": "Resources/Cards/Neutral/nsu_07.png",
-   "artworkPath": "Resources/Cards/Neutral/nsu_07.png",
+   "art": "Resources/Cards/Neutral/Mercenaries/nsu_07.png",
+   "artworkPath": "Resources/Cards/Neutral/Mercenaries/nsu_07.png",
    "artPrompt": "dark fantasy trading card game illustration, wandering mercenary of the echo lands: \"Рывок вперёд\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -16856,8 +16936,8 @@
     "support",
     "nsu"
    ],
-   "art": "Resources/Cards/Neutral/nsu_08.png",
-   "artworkPath": "Resources/Cards/Neutral/nsu_08.png",
+   "art": "Resources/Cards/Neutral/Mercenaries/nsu_08.png",
+   "artworkPath": "Resources/Cards/Neutral/Mercenaries/nsu_08.png",
    "artPrompt": "dark fantasy trading card game illustration, wandering mercenary of the echo lands: \"Быстрый выпад\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -16886,8 +16966,8 @@
     "support",
     "nsu"
    ],
-   "art": "Resources/Cards/Neutral/nsu_09.png",
-   "artworkPath": "Resources/Cards/Neutral/nsu_09.png",
+   "art": "Resources/Cards/Neutral/Mercenaries/nsu_09.png",
+   "artworkPath": "Resources/Cards/Neutral/Mercenaries/nsu_09.png",
    "artPrompt": "dark fantasy trading card game illustration, wandering mercenary of the echo lands: \"Пиявка-кровосос\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -16916,8 +16996,8 @@
     "support",
     "nsu"
    ],
-   "art": "Resources/Cards/Neutral/nsu_10.png",
-   "artworkPath": "Resources/Cards/Neutral/nsu_10.png",
+   "art": "Resources/Cards/Neutral/Mercenaries/nsu_10.png",
+   "artworkPath": "Resources/Cards/Neutral/Mercenaries/nsu_10.png",
    "artPrompt": "dark fantasy trading card game illustration, wandering mercenary of the echo lands: \"Шакал-падальщик\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -16946,8 +17026,8 @@
     "support",
     "nsu"
    ],
-   "art": "Resources/Cards/Neutral/nsu_11.png",
-   "artworkPath": "Resources/Cards/Neutral/nsu_11.png",
+   "art": "Resources/Cards/Neutral/Mercenaries/nsu_11.png",
+   "artworkPath": "Resources/Cards/Neutral/Mercenaries/nsu_11.png",
    "artPrompt": "dark fantasy trading card game illustration, wandering mercenary of the echo lands: \"Вампир-отступник\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -16977,8 +17057,8 @@
     "support",
     "nsu"
    ],
-   "art": "Resources/Cards/Neutral/nsu_12.png",
-   "artworkPath": "Resources/Cards/Neutral/nsu_12.png",
+   "art": "Resources/Cards/Neutral/Mercenaries/nsu_12.png",
+   "artworkPath": "Resources/Cards/Neutral/Mercenaries/nsu_12.png",
    "artPrompt": "dark fantasy trading card game illustration, wandering mercenary of the echo lands: \"Монахиня-кровопийца\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -17007,8 +17087,8 @@
     "support",
     "nsu"
    ],
-   "art": "Resources/Cards/Neutral/nsu_13.png",
-   "artworkPath": "Resources/Cards/Neutral/nsu_13.png",
+   "art": "Resources/Cards/Neutral/Mercenaries/nsu_13.png",
+   "artworkPath": "Resources/Cards/Neutral/Mercenaries/nsu_13.png",
    "artPrompt": "dark fantasy trading card game illustration, wandering mercenary of the echo lands: \"Гуль-гурман\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -17046,8 +17126,8 @@
     "support",
     "nsu"
    ],
-   "art": "Resources/Cards/Neutral/nsu_14.png",
-   "artworkPath": "Resources/Cards/Neutral/nsu_14.png",
+   "art": "Resources/Cards/Neutral/Mercenaries/nsu_14.png",
+   "artworkPath": "Resources/Cards/Neutral/Mercenaries/nsu_14.png",
    "artPrompt": "dark fantasy trading card game illustration, wandering mercenary of the echo lands: \"Круг крови\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -17076,8 +17156,8 @@
     "support",
     "nsu"
    ],
-   "art": "Resources/Cards/Neutral/nsu_15.png",
-   "artworkPath": "Resources/Cards/Neutral/nsu_15.png",
+   "art": "Resources/Cards/Neutral/Mercenaries/nsu_15.png",
+   "artworkPath": "Resources/Cards/Neutral/Mercenaries/nsu_15.png",
    "artPrompt": "dark fantasy trading card game illustration, wandering mercenary of the echo lands: \"Химера-кровохлёб\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -17110,8 +17190,8 @@
     "support",
     "nsu"
    ],
-   "art": "Resources/Cards/Neutral/nsu_16.png",
-   "artworkPath": "Resources/Cards/Neutral/nsu_16.png",
+   "art": "Resources/Cards/Neutral/Mercenaries/nsu_16.png",
+   "artworkPath": "Resources/Cards/Neutral/Mercenaries/nsu_16.png",
    "artPrompt": "dark fantasy trading card game illustration, wandering mercenary of the echo lands: \"Живительный отвар\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -17164,8 +17244,8 @@
     "support",
     "nsu"
    ],
-   "art": "Resources/Cards/Neutral/nsu_17.png",
-   "artworkPath": "Resources/Cards/Neutral/nsu_17.png",
+   "art": "Resources/Cards/Neutral/Mercenaries/nsu_17.png",
+   "artworkPath": "Resources/Cards/Neutral/Mercenaries/nsu_17.png",
    "artPrompt": "dark fantasy trading card game illustration, wandering mercenary of the echo lands: \"Сержант новобранцев\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -17218,8 +17298,8 @@
     "support",
     "nsu"
    ],
-   "art": "Resources/Cards/Neutral/nsu_18.png",
-   "artworkPath": "Resources/Cards/Neutral/nsu_18.png",
+   "art": "Resources/Cards/Neutral/Mercenaries/nsu_18.png",
+   "artworkPath": "Resources/Cards/Neutral/Mercenaries/nsu_18.png",
    "artPrompt": "dark fantasy trading card game illustration, wandering mercenary of the echo lands: \"Знаменосец роты\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -17272,8 +17352,8 @@
     "support",
     "nsu"
    ],
-   "art": "Resources/Cards/Neutral/nsu_19.png",
-   "artworkPath": "Resources/Cards/Neutral/nsu_19.png",
+   "art": "Resources/Cards/Neutral/Mercenaries/nsu_19.png",
+   "artworkPath": "Resources/Cards/Neutral/Mercenaries/nsu_19.png",
    "artPrompt": "dark fantasy trading card game illustration, wandering mercenary of the echo lands: \"Капитан ополчения\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -17327,8 +17407,8 @@
     "support",
     "nsu"
    ],
-   "art": "Resources/Cards/Neutral/nsu_20.png",
-   "artworkPath": "Resources/Cards/Neutral/nsu_20.png",
+   "art": "Resources/Cards/Neutral/Mercenaries/nsu_20.png",
+   "artworkPath": "Resources/Cards/Neutral/Mercenaries/nsu_20.png",
    "artPrompt": "dark fantasy trading card game illustration, wandering mercenary of the echo lands: \"Комендант форта\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -17404,8 +17484,8 @@
     "support",
     "nsu"
    ],
-   "art": "Resources/Cards/Neutral/nsu_21.png",
-   "artworkPath": "Resources/Cards/Neutral/nsu_21.png",
+   "art": "Resources/Cards/Neutral/Mercenaries/nsu_21.png",
+   "artworkPath": "Resources/Cards/Neutral/Mercenaries/nsu_21.png",
    "artPrompt": "dark fantasy trading card game illustration, wandering mercenary of the echo lands: \"Генерал резерва\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -17479,8 +17559,8 @@
     "support",
     "nsu"
    ],
-   "art": "Resources/Cards/Neutral/nsu_22.png",
-   "artworkPath": "Resources/Cards/Neutral/nsu_22.png",
+   "art": "Resources/Cards/Neutral/Mercenaries/nsu_22.png",
+   "artworkPath": "Resources/Cards/Neutral/Mercenaries/nsu_22.png",
    "artPrompt": "dark fantasy trading card game illustration, wandering mercenary of the echo lands: \"Мобилизация\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -17579,8 +17659,8 @@
     "support",
     "nsu"
    ],
-   "art": "Resources/Cards/Neutral/nsu_23.png",
-   "artworkPath": "Resources/Cards/Neutral/nsu_23.png",
+   "art": "Resources/Cards/Neutral/Mercenaries/nsu_23.png",
+   "artworkPath": "Resources/Cards/Neutral/Mercenaries/nsu_23.png",
    "artPrompt": "dark fantasy trading card game illustration, wandering mercenary of the echo lands: \"Маршал легионов\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -17635,8 +17715,8 @@
     "support",
     "nsu"
    ],
-   "art": "Resources/Cards/Neutral/nsu_24.png",
-   "artworkPath": "Resources/Cards/Neutral/nsu_24.png",
+   "art": "Resources/Cards/Neutral/Mercenaries/nsu_24.png",
+   "artworkPath": "Resources/Cards/Neutral/Mercenaries/nsu_24.png",
    "artPrompt": "dark fantasy trading card game illustration, wandering mercenary of the echo lands: \"Ротный писарь\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -17671,8 +17751,8 @@
     "support",
     "nsu"
    ],
-   "art": "Resources/Cards/Neutral/nsu_25.png",
-   "artworkPath": "Resources/Cards/Neutral/nsu_25.png",
+   "art": "Resources/Cards/Neutral/Mercenaries/nsu_25.png",
+   "artworkPath": "Resources/Cards/Neutral/Mercenaries/nsu_25.png",
    "artPrompt": "dark fantasy trading card game illustration, wandering mercenary of the echo lands: \"Тлеющая порча\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -17713,8 +17793,8 @@
     "support",
     "nsu"
    ],
-   "art": "Resources/Cards/Neutral/nsu_26.png",
-   "artworkPath": "Resources/Cards/Neutral/nsu_26.png",
+   "art": "Resources/Cards/Neutral/Mercenaries/nsu_26.png",
+   "artworkPath": "Resources/Cards/Neutral/Mercenaries/nsu_26.png",
    "artPrompt": "dark fantasy trading card game illustration, wandering mercenary of the echo lands: \"Чумной крысолов\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -17749,8 +17829,8 @@
     "support",
     "nsu"
    ],
-   "art": "Resources/Cards/Neutral/nsu_27.png",
-   "artworkPath": "Resources/Cards/Neutral/nsu_27.png",
+   "art": "Resources/Cards/Neutral/Mercenaries/nsu_27.png",
+   "artworkPath": "Resources/Cards/Neutral/Mercenaries/nsu_27.png",
    "artPrompt": "dark fantasy trading card game illustration, wandering mercenary of the echo lands: \"Скверна\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -17786,8 +17866,8 @@
     "support",
     "nsu"
    ],
-   "art": "Resources/Cards/Neutral/nsu_28.png",
-   "artworkPath": "Resources/Cards/Neutral/nsu_28.png",
+   "art": "Resources/Cards/Neutral/Mercenaries/nsu_28.png",
+   "artworkPath": "Resources/Cards/Neutral/Mercenaries/nsu_28.png",
    "artPrompt": "dark fantasy trading card game illustration, wandering mercenary of the echo lands: \"Проклятый могильщик\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -17839,8 +17919,8 @@
     "support",
     "nsu"
    ],
-   "art": "Resources/Cards/Neutral/nsu_29.png",
-   "artworkPath": "Resources/Cards/Neutral/nsu_29.png",
+   "art": "Resources/Cards/Neutral/Mercenaries/nsu_29.png",
+   "artworkPath": "Resources/Cards/Neutral/Mercenaries/nsu_29.png",
    "artPrompt": "dark fantasy trading card game illustration, wandering mercenary of the echo lands: \"Знахарь-отравитель\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -17878,8 +17958,8 @@
     "support",
     "nsu"
    ],
-   "art": "Resources/Cards/Neutral/nsu_30.png",
-   "artworkPath": "Resources/Cards/Neutral/nsu_30.png",
+   "art": "Resources/Cards/Neutral/Mercenaries/nsu_30.png",
+   "artworkPath": "Resources/Cards/Neutral/Mercenaries/nsu_30.png",
    "artPrompt": "dark fantasy trading card game illustration, wandering mercenary of the echo lands: \"Порча и немощь\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -17916,8 +17996,8 @@
     "support",
     "nsu"
    ],
-   "art": "Resources/Cards/Neutral/nsu_31.png",
-   "artworkPath": "Resources/Cards/Neutral/nsu_31.png",
+   "art": "Resources/Cards/Neutral/Mercenaries/nsu_31.png",
+   "artworkPath": "Resources/Cards/Neutral/Mercenaries/nsu_31.png",
    "artPrompt": "dark fantasy trading card game illustration, wandering mercenary of the echo lands: \"Носитель чумы\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"
@@ -17967,8 +18047,8 @@
     "support",
     "nsu"
    ],
-   "art": "Resources/Cards/Neutral/nsu_32.png",
-   "artworkPath": "Resources/Cards/Neutral/nsu_32.png",
+   "art": "Resources/Cards/Neutral/Mercenaries/nsu_32.png",
+   "artworkPath": "Resources/Cards/Neutral/Mercenaries/nsu_32.png",
    "artPrompt": "dark fantasy trading card game illustration, wandering mercenary of the echo lands: \"Эпидемия\"",
    "negativePrompt": "text, letters, watermark, frame borders",
    "artSize": "512x720"

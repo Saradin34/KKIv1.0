@@ -256,12 +256,13 @@ Renderer Features: **Decal** (стол), **Render Objects** (слои VfxUnder/V
 
 ## 10. Арты карт: папки по фракциям и пайплайн (2026-09)
 
-Единая точка хранения артов — `unity/EchoCitadel/Assets/Resources/Cards/<Faction>/<id>.png`:
-`Aurites`, `Necrus`, `Terramorph`, `Pyromancer`, `Ethereal` (по 30), `Neutral` (6), `_Tokens` (7) —
-всего 163 файла. Имя файла = id карты из Cards.json, поле `artworkPath` указывает на этот же путь,
-поэтому Unity (`Resources.Load`) и прототип (`http://host:5173/art/<Faction>/<id>.png`, маунт в
-`tools/serve.js`) читают один и тот же файл. В каждой папке лежат `README.md` (спецификация)
-и `manifest.csv` (статус каждого файла + Midjourney-промпт; сводно — `docs/art_prompts.csv`).
+Единая точка хранения артов — `unity/EchoCitadel/Assets/Resources/Cards/<Faction>[/<Subfamily>]/<id>.png`.
+Карты ядра лежат прямо в папках пяти фракций; подфракции Расширения II разнесены по подпапкам
+(Механоиды, Гремлины, Спрайты, Вампиры, Каннибалы, Суккубы, Энты, Братство паладинов,
+Священное братство, Ведьмы, Аспиды, Иссохшие, Наёмники). Отдельно остаются `Neutral` и `_Tokens`.
+Полная карта расположения записана в `Cards.json → meta.artLayout.bySubfaction`; поле `artworkPath`
+указывает на файл. Unity и прототип используют один путь (`/art/<Faction>[/<Subfamily>]/<id>.png`),
+а `tools/generator/make_art_folders.py` создаёт в каждой папке README и manifest со статусом/prompts.
 
 Спецификация файла: 512×720 px, соотношение 5:7, PNG sRGB без альфы, без текста и рамок
 (рамку и текст рисует UI). Сброшенные арты любого размера приводит к ТЗ
@@ -472,8 +473,8 @@ fromSpell?: boolean;       // урон нанесён заклинанием, а
   ещё старый (сторону цикла брать из TurnStarted/Draw/Resource-снапшота); снапшот маны снимать на
   эмите Main (после doResourcePhase).
 - Эстетика MTG в нашей стилистике, арт ТОЛЬКО из папок (2026-09-04): процедурные затычки удалены —
-  cardArt/heroArt больше не вызываются (импорты сняты). Арт карты = <img src="/art/<Фракция>/<id>.png">
-  внутри .artBox (serve.js резолвит art_raw/<id>.png → Resources/Cards/<Фракция>/<id>.png); пока файл
+  cardArt/heroArt больше не вызываются (импорты сняты). Арт карты = <img src="/art/<Фракция>[/<Семейство>]/<id>.png">
+  внутри .artBox (serve.js резолвит flat art_raw/<id>.png → artworkPath в Resources/Cards); пока файл
   не дропнут — чистый фракционный радиальный фон с сигилом-глифом (CSS content:attr(data-sigil)),
   НЕ изображение-затычка; onerror вешает .miss (img скрыт). Портреты героев: /heroes/<Faction>,
   фолбэк — .sigFall (сигил на градиенте), svg-портретов больше нет.

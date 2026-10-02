@@ -4,12 +4,12 @@
    Арт карты собирается в двух слоях:
      1. ПРОЦЕДУРНАЯ ОСНОВА (всегда) — детерминированный SVG от id карты;
      2. НАСТОЯЩИЙ PNG поверх неё, если файл уже лежит в папке фракции
-        (unity/EchoCitadel/Assets/Resources/Cards/<Faction>/<id>.png).
+        (unity/EchoCitadel/Assets/Resources/Cards/<Faction>[/<Subfamily>]/<id>.png).
         Файла нет → браузер не загрузит <image>, останется слой 1.
         То есть арты можно докладывать постепенно, ничего не пересобирая.
 
-   Промпты для генерации — docs/art_prompts.csv и manifest.csv в каждой
-   папке фракции; размер 512×720 (ТЗ п.9).
+   Промпты — docs/art_prompts.csv и manifest.csv в папках фракций/семейств;
+   размер 512×720 (ТЗ п.9).
 
    Вместо абстрактных «звёздочек» арт собирается из:
      1. АТМОСФЕРЫ: градиент неба, лучи света, туман (feTurbulence),
@@ -43,19 +43,20 @@ export const PALETTES: Record<string, Palette> = {
 
 /**
  * URL настоящего арта карты для прототипа.
- * artworkPath в Cards.json хранится как `Resources/Cards/<Faction>/<id>.png`
- * (папки — по фракциям, токены в `_Tokens`), а сервер прототипа отдаёт
- * эту папку по префиксу `/art` (tools/serve.js). В Unity тот же путь
- * читается через Resources.Load — расхождений между клиентами нет.
+ * artworkPath в Cards.json хранится как `Resources/Cards/<Faction>[/<Subfamily>]/<id>.png`
+ * (карты ядра — прямо в папке фракции, семейства — во вложенных папках,
+ * токены — в `_Tokens`); сервер прототипа отдаёт тот же относительный путь
+ * через `/art` (tools/serve.js), Unity получает его из того же поля.
  */
 export function artUrlFor(card: CardData, base = '/art'): string | null {
-  const rel: string | undefined = (card as { artworkPath?: string }).artworkPath
-    ?? (card as { art?: string }).art;
+  const rel = card.artworkPath ?? card.art;
   if (!rel) return null;
-  const parts = rel.split('/');
+  const parts = rel.replace(/\\/g, '/').split('/').filter(Boolean);
   const i = parts.indexOf('Cards');
-  if (i < 0 || i + 2 >= parts.length) return null;
-  return `${base}/${parts.slice(i + 1).join('/')}`;
+  if (i < 0) return null;
+  const tail = parts.slice(i + 1);
+  if (tail.length < 2 || tail.some(part => part === '.' || part === '..')) return null;
+  return `${base}/${tail.map(encodeURIComponent).join('/')}`;
 }
 
 /** Редкость → цвет рамки/фойла (совпадает с RARITY_COLORS). */

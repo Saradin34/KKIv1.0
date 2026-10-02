@@ -76,7 +76,7 @@ VFX-слой и SVG-фильтры, классы редкости и слои `i
 |---|---|---|
 | `src/ui/vfx.ts` | тряска экрана с направлением и затуханием, hit-stop, кольца удара, искры, слэши, столпы света, наземные декали в перспективе, рябь, дым, полёт «души» по дуге, снаряды с трейлом, тепловое марево (`feTurbulence`+`feDisplacementMap`), растворение, глитч/хромаберрация, Canvas-ambient (70 частиц), параллакс, пост-слои (виньетка/грейн/грейдинг) | CameraRig + DOTween, VFX Graph, Decal Projector, URP Volume |
 | `src/ui/audio.ts` | 21 звук, синтезированный WebAudio — без единого файла; стихии заклинаний звучат по-разному, щит = стеклянный пинг, Эхо = призвук с задержкой; тумблер в верхней панели | список клипов для AudioSource |
-| `src/ui/art.ts` | процедурный арт: 17 тематических мотивов, выбор по тегам → ключевикам → стихии; атмосфера (небо, лучи, туман, искры фракции, силуэт земли), rim-light и контур «тушью»; портреты героев; 4 слоя фона; каменная поверхность стола | `Resources/Cards/<id>.png` по полю `art` в `Cards.json` |
+| `src/ui/art.ts` | процедурный арт: 17 тематических мотивов, выбор по тегам → ключевикам → стихии; атмосфера (небо, лучи, туман, искры фракции, силуэт земли), rim-light и контур «тушью»; портреты героев; 4 слоя фона; каменная поверхность стола | `Resources/Cards/<Faction>[/<Subfamily>]/<id>.png` по полю `artworkPath` в `Cards.json` |
 | `src/ui/prototype.css` | надстройка поверх базовых стилей: материал карты (внутренняя золочёная рамка с уголками, блик за курсором, **фойл по редкости**), состояния существ (щит-купол, ледяная корка, призрачное мерцание неуловимости, каменная окантовка Провокации, тень-пятно), «низкое HP» героя, пульс целей, sheen на кнопках | All In 1 Sprite Shader, True Shadow |
 
 Карта под курсором наклоняется в 3D (`rotateX/rotateY` от позиции мыши), а
@@ -91,7 +91,7 @@ All In 1 Sprite Shader. Уважается `prefers-reduced-motion`: вся ан
 
 - **Арты.** Вместо PNG 512×720 — процедурный SVG из `src/ui/art.ts` (детерминированный
   от id карты, поэтому все 150 карт выглядят по-разному). Путь к будущему арту уже лежит
-  в `Cards.json` (`art` / `artworkPath` = `Resources/Cards/<id>.png`), так что замена
+  в `Cards.json` (`art` / `artworkPath` = `Resources/Cards/<Faction>[/<Subfamily>]/<id>.png`), так что замена
   в Unity — это просто загрузка текстуры по этому пути.
 - **Звук** — синтезируется в браузере (`src/ui/audio.ts`); в ТЗ звук не заявлен, поэтому
   это необязательное расширение с тумблером. Финальные клипы для Unity — отдельная задача.
@@ -112,7 +112,7 @@ All In 1 Sprite Shader. Уважается `prefers-reduced-motion`: вся ан
 | `Battle.renderHand` (веер) | `HandView.cs` + DOTween (`DOFan`) |
 | `Battle.animateCombat` (очередь атак) | `CombatPresenter.cs`, читает `GameEngine.AttackQueue` |
 | `Battle.onEvent` (лог/числа/смерти) | `GameEventRouter.cs` → `LogView`, `FloatingText`, `DeathFx` |
-| `src/ui/art.ts` (процедурная заглушка) | `CardArtLoader.cs` → `Resources/Cards/<id>.png` |
+| `src/ui/art.ts` (процедурная заглушка) | `CardArtLoader.cs` → `Resources/Cards/<Faction>[/<Subfamily>]/<id>.png` |
 | `src/ui/vfx.ts` | `Visuals/VfxCatalog.cs` + префабы из `docs/VISUAL_STACK.md`, раздел 6 |
 | `src/ui/audio.ts` | `Visuals/AudioCatalog.cs` + клипы AudioSource |
 | `src/ui/prototype.css` | материалы URP: All In 1 Sprite Shader + True Shadow |

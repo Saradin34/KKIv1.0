@@ -130,6 +130,7 @@ namespace EchoCitadel.AI
             {
                 v += c.Attack * 1.5 + c.Health;
                 if (c.Keywords.Contains(Keyword.Taunt)) v += 1.0;
+                if (c.Keywords.Contains(Keyword.Vigilance)) v += 0.7;
                 if (c.Keywords.Contains(Keyword.Lifesteal)) v += 1.2;
                 if (c.Keywords.Contains(Keyword.Unblockable)) v += 1.5;
                 if (c.Keywords.Contains(Keyword.Windfury)) v += c.Attack * 0.8;
@@ -162,6 +163,7 @@ namespace EchoCitadel.AI
                     switch (kw)
                     {
                         case Keyword.Taunt: v += Profile.SelfPreservation * 1.5; break;
+                        case Keyword.Vigilance: v += Profile.SelfPreservation * 0.65; break;
                         case Keyword.Rush: v += Profile.Aggression * 1.8; break;
                         case Keyword.Lifesteal: v += me.Health < 15 ? 2.2 : 0.9; break;
                         case Keyword.Unblockable: v += Profile.Aggression * 1.6; break;

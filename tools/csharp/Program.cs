@@ -55,6 +55,8 @@ internal static class Program
                     VerifyDatabase(root);
                     VerifyDecks(root);
                     VerifyCoefficients(root);
+                    VerifyTappedMechanics(root);
+                    VerifyTargetRequiredEffects(root);
                     break;
                 case "parity":
                     RunParity(root, args);
@@ -346,6 +348,133 @@ internal static class Program
         {
             Check("solver_result.json на месте", false, "файл не найден");
         }
+    }
+
+    /// <summary>Поворот сохраняется между ходами; Vigilance и Windfury ведут себя как в TS.</summary>
+    private static void VerifyTappedMechanics(string root)
+    {
+        Console.WriteLine("\n[5] tap / Untap / Vigilance (движок боя)");
+        var cardsPath = Path.Combine(root, "unity/EchoCitadel/Assets/StreamingAssets/Cards.json");
+        var db = CardDatabase.FromJson(File.ReadAllText(cardsPath));
+        var vigilantData = db.GetCard("ent_04");
+        Check("ent_04 загружает Vigilance", vigilantData != null && vigilantData.Keywords.Contains(Keyword.Vigilance),
+            vigilantData == null ? "карта отсутствует" : string.Join(",", vigilantData.Keywords));
+        if (vigilantData == null || !vigilantData.Keywords.Contains(Keyword.Vigilance)) return;
+
+        var config = new GameConfig { CombatMode = "manual", StartingHand = 0, HeroHealth = 100, Seed = 17 };
+        var game = new GameEngine(db, Array.Empty<string>(), Array.Empty<string>(), config,
+            Faction.Pyromancer, Faction.Necrus, seed: 17);
+        game.Setup();
+        var plainData = new CardData
+        {
+            Id = "audit_tap_plain", Name = "Проверка поворота", Faction = Faction.Pyromancer,
+            Type = CardType.Creature, Rarity = Rarity.Common, Cost = 1, Attack = 2, Health = 10,
+            Element = Element.None, Target = TargetKind.None,
+        };
+        EntityCreature Unit(int uid, CardData data, IEnumerable<Keyword>? keywords = null) => new()
+        {
+            Uid = uid, CardId = data.Id, Owner = Side.Player, Name = data.Name, Faction = data.Faction,
+            Attack = data.Attack ?? 2, Health = data.Health ?? 10, MaxHealth = data.Health ?? 10,
+            Cost = data.Cost, Element = data.Element,
+            Keywords = keywords?.ToList() ?? data.Keywords.ToList(),
+            Data = data, JustPlayed = false, SummonedOnTurn = 0,
+        };
+        var plain = Unit(9001, plainData);
+        var vigilant = Unit(9002, vigilantData);
+        var windfury = Unit(9003, plainData, new[] { Keyword.Windfury });
+        var silencedVigilance = Unit(9004, vigilantData);
+        foreach (var c in new[] { plain, vigilant, windfury, silencedVigilance }) game.P(Side.Player).Creatures.Add(c);
+        game.ActiveSide = Side.Player;
+        game.Phase = Phase.Combat;
+        game.Silence(silencedVigilance);
+
+        bool wrongSideRejected = !game.ManualAttack(Side.Opponent, plain.Uid, targetHero: true);
+        bool plainAttack = game.ManualAttack(Side.Player, plain.Uid, targetHero: true);
+        bool vigilanceAttack = game.ManualAttack(Side.Player, vigilant.Uid, targetHero: true);
+        bool windFirst = game.ManualAttack(Side.Player, windfury.Uid, targetHero: true);
+        bool windSecond = game.ManualAttack(Side.Player, windfury.Uid, targetHero: true);
+        bool windThirdRejected = !game.ManualAttack(Side.Player, windfury.Uid, targetHero: true);
+        bool silenceAttack = game.ManualAttack(Side.Player, silencedVigilance.Uid, targetHero: true);
+        Check("атака поворачивает существо; Vigilance нет; немота отключает Vigilance",
+            wrongSideRejected && plainAttack && plain.Tapped && plain.AttacksThisTurn == 1
+            && vigilanceAttack && !vigilant.Tapped && vigilant.AttacksThisTurn == 1
+            && silenceAttack && silencedVigilance.Tapped,
+            $"wrong side={wrongSideRejected}, plain={plain.Tapped}, vigilance={vigilant.Tapped}, silenced={silencedVigilance.Tapped}");
+        Check("Windfury разрешает вторую атаку, но не третью, оставаясь tapped",
+            windFirst && windSecond && windThirdRejected && windfury.Tapped && windfury.AttacksThisTurn == 2);
+
+        game.Phase = Phase.Main;
+        game.FinishMainPhase();
+        bool afterOwnEnd = plain.Tapped && vigilant.AttacksThisTurn == 1 && !vigilant.Tapped;
+        game.RunTurn();
+        bool duringOpponent = game.ActiveSide == Side.Opponent && plain.Tapped && vigilant.AttacksThisTurn == 1;
+        game.FinishMainPhase();
+        bool beforeUntap = game.ActiveSide == Side.Player && plain.Tapped;
+        game.RunTurn();
+        bool ownerUntap = !plain.Tapped && plain.AttacksThisTurn == 0 && !vigilant.Tapped && vigilant.AttacksThisTurn == 0;
+        Check("tap держится свой End и ход противника; снимается в начале следующего хода владельца",
+            afterOwnEnd && duringOpponent && beforeUntap && ownerUntap,
+            $"own End={afterOwnEnd}, enemy turn={duringOpponent}, before Untap={beforeUntap}, Untap={ownerUntap}");
+    }
+
+    /// <summary>Обязательные одиночные цели эффектов; массовые/случайные и ETB исключения.</summary>
+    private static void VerifyTargetRequiredEffects(string root)
+    {
+        Console.WriteLine("\n[6] Цели заклинаний (effects[].to) и исключения");
+        var cardsPath = Path.Combine(root, "unity/EchoCitadel/Assets/StreamingAssets/Cards.json");
+        var db = CardDatabase.FromJson(File.ReadAllText(cardsPath));
+        var game = new GameEngine(db, Array.Empty<string>(), Array.Empty<string>(),
+            new GameConfig { StartingHand = 0, HeroHealth = 30, Seed = 29 },
+            Faction.Aurites, Faction.Necrus, seed: 29);
+        game.Setup();
+        game.ActiveSide = Side.Player;
+        game.Phase = Phase.Main;
+        var player = game.P(Side.Player);
+        player.Mana = 10;
+
+        PlayCheck CanPlayCard(string id)
+        {
+            int index = player.Hand.Count;
+            player.Hand.Add(id);
+            var check = game.CanPlay(Side.Player, index);
+            player.Hand.RemoveAt(index);
+            return check;
+        }
+
+        var enemyTargetMissing = CanPlayCard("nec_s04");
+        var anyTargetMissing = CanPlayCard("nec_s07");
+        var massWithoutUnits = CanPlayCard("nec_s09");
+        var randomWithoutUnits = CanPlayCard("eth_s09");
+        var battlecryWithoutTarget = CanPlayCard("eth_10");
+
+        int playIndex = player.Hand.Count;
+        player.Hand.Add("nec_s04");
+        int manaBefore = player.Mana;
+        bool directPlayRejected = !game.PlayCard(Side.Player, playIndex)
+            && player.Hand.Count == playIndex + 1 && player.Hand[playIndex] == "nec_s04"
+            && player.Mana == manaBefore;
+        player.Hand.RemoveAt(playIndex);
+
+        player.LastSpell = new LastSpellCast { CardId = "nec_s04" };
+        player.EchoPoints = 1;
+        var echoMissing = game.CanUseEcho(Side.Player);
+        bool echoCannotSpendWithoutTarget = !echoMissing.Ok && !game.UseEcho(Side.Player)
+            && player.EchoPoints == 1 && player.EchoUsedThisGame == 0;
+
+        var targetData = db.GetCard("aur_01");
+        var target = targetData == null ? null : game.Summon(Side.Opponent, targetData, fromHand: false);
+        var becomesPlayable = CanPlayCard("nec_s04").Ok;
+        var echoWithTarget = game.CanUseEcho(Side.Player).Ok;
+
+        Check("nec_s04 / nec_s07 блокируются без EnemyCreature / AnyCreature; нижний PlayCard тоже защищён",
+            !enemyTargetMissing.Ok && !anyTargetMissing.Ok && directPlayRejected,
+            $"Enemy={enemyTargetMissing.Ok}; Any={anyTargetMissing.Ok}; direct={directPlayRejected}");
+        Check("массовый эффект, случайное заклинание и существо с ETB не получают ложный запрет",
+            massWithoutUnits.Ok && randomWithoutUnits.Ok && battlecryWithoutTarget.Ok,
+            $"mass={massWithoutUnits.Ok}; random={randomWithoutUnits.Ok}; creature={battlecryWithoutTarget.Ok}");
+        Check("цель разрешает розыгрыш и Echo, а отсутствие цели блокирует Echo без траты ресурса",
+            target != null && becomesPlayable && echoCannotSpendWithoutTarget && echoWithTarget,
+            $"target={target != null}; spell={becomesPlayable}; echo blocked={echoCannotSpendWithoutTarget}; echo available={echoWithTarget}");
     }
 
     /* ------------------------- ПАРИТЕТ C# ↔ TYPESCRIPT ---------------------- */

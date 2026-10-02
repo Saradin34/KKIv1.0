@@ -62,6 +62,26 @@ export interface EngineNetState {
   phase: Phase; result: GameResult; stats: [MatchStats, MatchStats]; uidCounter: number; rng: [number, number];
 }
 
+/** Изменение HP героя, произошедшее внутри одного боевого действия. */
+export interface CombatHpEvent {
+  kind: 'damage' | 'heal'; side: Side; amount: number; source?: string; cue?: 'attack';
+}
+
+/** Состояние здоровья существ после удара и всех немедленных триггеров смерти. */
+export interface CombatUnitHpSnapshot { uid: number; hp: number }
+
+export interface CombatAttackRecord {
+  attackerUid: number; attackerSide: Side; attackerName: string;
+  defenderUid?: number; defenderName?: string; hitHero: boolean;
+  attackerBefore: { hp: number }; defenderBefore?: { hp: number };
+  heroDamage: number; defenderDamage: number; attackerDamage: number;
+  lifesteal: boolean; lifestealAmount: number;
+  attackerAfter: { hp: number }; defenderAfter?: { hp: number };
+  hpEvents: CombatHpEvent[];
+  unitsAfter: CombatUnitHpSnapshot[];
+  heroHpAfter: Record<number, number>;
+}
+
 export class GameEngine {
   readonly config: GameConfig;
   readonly db: CardDatabase;
@@ -83,6 +103,12 @@ export class GameEngine {
   private uidMap = new Map<number, EntityCreature>();
   /** Очередь смертей, резолвится после текущего эффекта (правило «state-based»). */
   private pendingDeaths: EntityCreature[] = [];
+  /** Не допускает вложенную обработку той же очереди из deathrattle/триггеров. */
+  private checkingDeaths = false;
+  /** Урон боя существам наносится одновременно; смерти проверяются после обеих сторон удара. */
+  private deathCheckSuspension = 0;
+  /** HP-события, принадлежащие текущей записи атаки (для последовательной UI-анимации). */
+  private activeCombatHpEvents: CombatHpEvent[] | null = null;
   private depth = 0;
 
   constructor(db: CardDatabase, decks: [string[], string[]], opts: {
@@ -168,13 +194,19 @@ export class GameEngine {
     this.uidCounter = s.uidCounter;
     this.rng.setState(s.rng);
     this.uidMap.clear();
-    for (const pl of this.players) for (const c of pl.creatures) this.uidMap.set(c.uid, c);
+    for (const pl of this.players) for (const c of pl.creatures) {
+      // Совместимость со снапшотами старого клиента без явного флага tap.
+      if (typeof c.tapped !== 'boolean') c.tapped = c.attacksThisTurn > 0
+        && (c.silenced || !c.keywords.includes(Keyword.Vigilance));
+      this.uidMap.set(c.uid, c);
+    }
     this.pendingDeaths = []; this.eventQueue = []; this.stack = []; this.instantWindow = null;
+    this.checkingDeaths = false; this.deathCheckSuspension = 0; this.activeCombatHpEvents = null;
   }
   /** Короткий отпечаток состояния (сверка клиентов, диагностика рассинхрона). */
   stateHash(): string {
     const p = this.players.map(pl => [pl.health, pl.hand.length, pl.deck.length, pl.mana,
-      pl.creatures.map(c => `${c.uid}:${c.attack}/${c.health}`).join(',')].join('|'));
+      pl.creatures.map(c => `${c.uid}:${c.attack}/${c.health}/${c.tapped ? 'T' : 'U'}/${c.attacksThisTurn}`).join(',')].join('|'));
     return `${this.turn}#${this.activeSide}#${p.join('~')}`;
   }
 
@@ -272,7 +304,7 @@ export class GameEngine {
 
   /* ----------------------------- УРОН / ЛЕЧЕНИЕ ---------------------------- */
 
-  damageHero(side: Side, amount: number, opts: { source?: string; ignoreReduction?: boolean; lifestealFor?: Side; sourceCardId?: string; fromSpell?: boolean } = {}): number {
+  damageHero(side: Side, amount: number, opts: { source?: string; ignoreReduction?: boolean; lifestealFor?: Side; sourceCardId?: string; fromSpell?: boolean; combatCue?: 'attack' } = {}): number {
     if (amount <= 0 || this.result !== GameResult.Ongoing) return 0;
     const pl = this.p(side);
     let dmg = amount;
@@ -285,6 +317,7 @@ export class GameEngine {
       return 0;
     }
     pl.health -= dmg;
+    this.activeCombatHpEvents?.push({ kind: 'damage', side, amount: dmg, source: opts.source, cue: opts.combatCue });
     this.emit({
       type: GameEventType.PlayerDamage, side, value: dmg, sourceCardId: opts.sourceCardId,
       sourceElement: this.elementOfCard(opts.sourceCardId), fromSpell: opts.fromSpell ?? !!this.spellSourceCard,
@@ -314,6 +347,7 @@ export class GameEngine {
     pl.health = Math.min(pl.maxHealth, pl.health + eff);
     const healed = pl.health - before;
     if (healed > 0) {
+      this.activeCombatHpEvents?.push({ kind: 'heal', side, amount: healed, source: opts.source });
       this.emit({ type: GameEventType.PlayerHeal, side, value: healed, sourceCardId: opts.sourceCardId, text: `${pl.name} восстанавливает ${healed} здоровья${opts.source ? ` (${opts.source})` : ''}` });
       this.stats[side].healingDone += healed;
     }
@@ -426,6 +460,7 @@ export class GameEngine {
       statuses: [],
       summonedOnTurn: this.turnsTaken[side],
       attacksThisTurn: 0,
+      tapped: false,
       canAttackThisTurn: false,
       silenced: false,
       frozen: false,
@@ -553,44 +588,78 @@ export class GameEngine {
     this.pendingDeaths.push(c);
   }
 
-  /** Проверка состояний: убираем мёртвых, триггерим предсмертные хрипы и пассивку Некрусов. */
+  /** Проверка состояний: одновременно убираем погибших, затем разрешаем все
+      deathrattle/триггеры. Вложенные checkDeaths оставляют новые смерти внешнему циклу. */
   checkDeaths(): void {
-    if (this.depth > 32) return; // защита от бесконечной рекурсии
+    if (this.checkingDeaths || this.deathCheckSuspension > 0 || this.depth > 32) return;
+    this.checkingDeaths = true;
     let guard = 0;
-    while (this.pendingDeaths.length > 0 && guard++ < 200) {
-      const dying = this.pendingDeaths.splice(0, this.pendingDeaths.length);
-      for (const c of dying) {
-        if (c.health > 0) continue;
-        const owner = this.p(c.owner);
-        const idx = owner.creatures.indexOf(c);
-        if (idx >= 0) owner.creatures.splice(idx, 1);
-        this.uidMap.delete(c.uid);
-        owner.graveyard.push(c.cardId);
-        this.stats[c.owner].losses++;
-        this.emit({ type: GameEventType.CreatureDeath, uid: c.uid, side: c.owner, cardId: c.cardId, cardName: c.name, text: `«${c.name}» погибает` });
-        this.say(`${owner.name}: «${c.name}» погибает`, c.owner);
+    try {
+      while (this.pendingDeaths.length > 0 && guard++ < 200) {
+        const pending = this.pendingDeaths.splice(0, this.pendingDeaths.length);
+        const seen = new Set<EntityCreature>();
+        const dying = pending.filter(c => {
+          if (seen.has(c)) return false;
+          seen.add(c);
+          return c.health <= 0 && this.uidMap.get(c.uid) === c;
+        });
+        if (dying.length === 0) continue;
 
-        // Предсмертный хрип
-        if (!c.silenced && c.data.onDeath && c.data.onDeath.length) {
-          this.depth++;
-          this.runEffects(c.data.onDeath, c.owner, { sourceUid: c.uid, sourceCard: c.data, isDeathrattle: true });
-          this.depth--;
+        const dyingSet = new Set(dying);
+        // Триггеры "когда умирает существо" фиксируются на момент смерти.
+        // Они не возникают задним числом у токенов, созданных deathrattle-ом.
+        const observers = this.allCreatures()
+          .filter(c => !dyingSet.has(c) && c.health > 0 && !c.silenced && c.data.onCreatureDies?.length)
+          .map(c => ({ owner: c.owner, uid: c.uid, card: c.data, effects: c.data.onCreatureDies! }));
+
+        // Все участники одновременной смерти покидают поле до любого триггера:
+        // deathrattle не может случайно спасти другое существо той же летальной пачки.
+        for (const c of dying) {
+          const owner = this.p(c.owner);
+          const idx = owner.creatures.indexOf(c);
+          if (idx >= 0) owner.creatures.splice(idx, 1);
+          this.uidMap.delete(c.uid);
+          owner.graveyard.push(c.cardId);
+          this.stats[c.owner].losses++;
+        }
+        for (const c of dying) {
+          const owner = this.p(c.owner);
+          this.emit({ type: GameEventType.CreatureDeath, uid: c.uid, side: c.owner, cardId: c.cardId, cardName: c.name, text: `«${c.name}» погибает` });
+          this.say(`${owner.name}: «${c.name}» погибает`, c.owner);
         }
 
-        // Пассивка Некрусов «Кровавая жатва»: смерть своего существа -> +1 карта, +2 здоровья
-        if (owner.faction === Faction.Necrus) {
-          const heal = this.pround(2 * this.passiveMul(Faction.Necrus));
-          // Пассивка Некрусов «Кровавая жатва» (редакция ТЗ п.2.5.2):
-          // +1 карта и +2 здоровья, но только за смерть существа стоимостью >= 2.
-          // Обоснование: без порога токены и «мелочь» дают бесконечный card advantage.
-          const drawsCard = c.cost >= 2;
-          if (drawsCard) this.draw(c.owner, { source: 'Кровавая жатва' });
-          if (heal > 0) this.healHero(c.owner, heal, { source: 'Кровавая жатва' });
-          this.say(`Кровавая жатва: ${owner.name} ${drawsCard ? 'берёт карту и ' : ''}восстанавливает ${heal} здоровья`, c.owner);
+        for (const c of dying) {
+          // Предсмертный хрип разрешается сразу после смерти существа.
+          if (!c.silenced && c.data.onDeath?.length) {
+            this.depth++;
+            try { this.runEffects(c.data.onDeath, c.owner, { sourceUid: c.uid, sourceCard: c.data, isDeathrattle: true }); }
+            finally { this.depth--; }
+          }
+
+          // Наблюдатели уже были зафиксированы до первого deathrattle; поэтому
+          // смерть/немота, вызванная другим триггером, не теряет событие этой пачки.
+          for (const watcher of observers) {
+            this.depth++;
+            try { this.runEffects(watcher.effects, watcher.owner, { sourceUid: watcher.uid, sourceCard: watcher.card }); }
+            finally { this.depth--; }
+          }
+
+          // Пассивка Некрусов «Кровавая жатва»: смерть своего существа -> карта/HP.
+          const owner = this.p(c.owner);
+          if (owner.faction === Faction.Necrus) {
+            const heal = this.pround(2 * this.passiveMul(Faction.Necrus));
+            const drawsCard = c.cost >= 2;
+            if (drawsCard) this.draw(c.owner, { source: 'Кровавая жатва' });
+            if (heal > 0) this.healHero(c.owner, heal, { source: 'Кровавая жатва' });
+            this.say(`Кровавая жатва: ${owner.name} ${drawsCard ? 'берёт карту и ' : ''}восстанавливает ${heal} здоровья`, c.owner);
+          }
         }
+
+        // Смерти, появившиеся от deathrattle/onCreatureDies, образуют следующую пачку.
+        for (const c of this.allCreatures()) if (c.health <= 0) this.markDeath(c);
       }
-      // смерти, порождённые хрипами
-      for (const c of this.allCreatures()) if (c.health <= 0) this.markDeath(c);
+    } finally {
+      this.checkingDeaths = false;
     }
   }
 
@@ -632,15 +701,21 @@ export class GameEngine {
   }
 
   canAttack(c: EntityCreature): boolean {
-    if (c.silenced) {
-      // немота отключает и рывок/бурю, но не базовую возможность атаки
-    }
     if (c.frozen) return false;
     if (c.attack <= 0) return false;
     const maxAttacks = c.keywords.includes(Keyword.Windfury) ? 2 : 1;
     if (c.attacksThisTurn >= maxAttacks) return false;
+    // Уже повёрнутое существо не начинает новую атаку; единственное исключение —
+    // следующая атака Бури в том же ходу (attacksThisTurn > 0).
+    if (c.tapped && c.attacksThisTurn === 0) return false;
     if (c.justPlayed && !c.keywords.includes(Keyword.Rush) && !c.statuses.some(s => s.type === StatusType.Fury)) return false;
     return true;
+  }
+
+  /** Фиксирует потраченную атаку и tap до следующего Untap владельца. */
+  private commitAttack(c: EntityCreature): void {
+    c.attacksThisTurn++;
+    if (c.silenced || !c.keywords.includes(Keyword.Vigilance)) c.tapped = true;
   }
 
   /* ----------------------------- РУНЫ / РИТУАЛЫ ---------------------------- */
@@ -748,6 +823,9 @@ export class GameEngine {
     }
     const needsTarget = this.targetRequiresChoice(card.target);
     if (needsTarget && !this.hasValidTarget(side, card)) return { ok: false, reason: 'Нет допустимой цели', card };
+    if (this.hasMissingRequiredCreatureEffectTarget(side, card)) {
+      return { ok: false, reason: 'Нет допустимой цели для эффекта', card };
+    }
     return { ok: true, card, needsTarget };
   }
 
@@ -769,6 +847,63 @@ export class GameEngine {
     return target === TargetKind.EnemyCreature || target === TargetKind.FriendlyCreature
       || target === TargetKind.AnyCreature || target === TargetKind.EnemyHero
       || target === TargetKind.FriendlyHero || target === TargetKind.AnyHero;
+  }
+
+  /**
+   * Some cards encode a mandatory single-creature effect in effects[].to rather
+   * than CardData.target. Check that at least one matching creature exists before
+   * a spell (or its Echo copy) is committed. Random and mass effects deliberately
+   * remain playable without candidates; creature ETB/battlecries are not checked.
+   * This check must not consume RNG because canPlay() is called repeatedly by UI/AI.
+   */
+  private hasMissingRequiredCreatureEffectTarget(side: Side, card: CardData): boolean {
+    if (card.type !== CardType.Spell) return false;
+
+    const singleCreature = (kind: TargetKind | undefined): boolean => kind === TargetKind.EnemyCreature
+      || kind === TargetKind.FriendlyCreature || kind === TargetKind.AnyCreature;
+
+    const effectTarget = (effect: CardEffect): TargetKind | undefined => {
+      if (effect.to !== undefined) return effect.to === TargetKind.None ? card.target : effect.to;
+      switch (effect.op) {
+        // These operations choose one creature automatically when `to` is omitted.
+        case 'destroyCreature': case 'silence': case 'returnToHand': case 'stealCreature':
+          return TargetKind.EnemyCreature;
+        case 'buffAttack': case 'buffHealth': case 'debuffAttack': case 'debuffHealth':
+        case 'setAttack': case 'applyStatus':
+          return TargetKind.AnyCreature;
+        case 'removeStatus': case 'restoreHealthByAttack':
+          return TargetKind.FriendlyCreature;
+        // damage/heal inherit the card target; with TargetKind.None they resolve to a hero.
+        case 'damage': case 'heal':
+          return card.target;
+        // sacrifice, random, token, hero and mass effects are automatic/non-targeting.
+        default:
+          return undefined;
+      }
+    };
+
+    const conditionCanRequireTarget = (cond: EffectCondition | undefined): boolean => {
+      if (!cond) return true;
+      // Probabilistic branches are optional. Never roll while merely checking legality.
+      if (cond.chance !== undefined && cond.chance < 1) return false;
+      return this.condOk({ ...cond, chance: undefined }, side);
+    };
+
+    const effectsNeedTarget = (effects: CardEffect[] | undefined): boolean => {
+      if (!effects) return false;
+      for (const effect of effects) {
+        if (!conditionCanRequireTarget(effect.if)) continue;
+        const kind = effectTarget(effect);
+        if (singleCreature(kind) && effect.filter?.random !== true) {
+          const available = this.resolveTarget(side, kind, effect.filter, { sourceCard: card });
+          if (available.creatures.length === 0) return true;
+        }
+        if (effect.then && effectsNeedTarget([effect.then])) return true;
+      }
+      return false;
+    };
+
+    return effectsNeedTarget(card.effects);
   }
 
   needsTarget(side: Side, card: CardData): boolean {
@@ -913,6 +1048,12 @@ export class GameEngine {
     const card = this.db.get(pl.lastSpellCast.cardId);
     if (!card) return { ok: false, reason: 'Повторяемое заклинание недоступно' };
     if (card.subtype === SpellSubtype.Ritual) return { ok: false, reason: 'Эхо не повторяет ритуалы' };
+    if (this.targetRequiresChoice(card.target) && !this.hasValidTarget(side, card)) {
+      return { ok: false, reason: 'Нет допустимой цели', card };
+    }
+    if (this.hasMissingRequiredCreatureEffectTarget(side, card)) {
+      return { ok: false, reason: 'Нет допустимой цели для эффекта', card };
+    }
     return { ok: true, card };
   }
 
@@ -950,7 +1091,8 @@ export class GameEngine {
 
     pl.spellsCastThisTurn = 0;
     pl.cardsPlayedThisTurn = 0;
-    for (const c of pl.creatures) { c.attacksThisTurn = 0; c.unblockableThisTurn = false; }
+    // Untap — только в начале собственного хода, не на его end-step.
+    for (const c of pl.creatures) { c.tapped = false; c.attacksThisTurn = 0; c.unblockableThisTurn = false; }
 
     this.setPhase(Phase.Start);    this.doStartPhase();
     if (this.result !== GameResult.Ongoing) return;
@@ -1060,8 +1202,12 @@ export class GameEngine {
 
     // 1.4 Статусы существ владельца (горение, яд-тик) и сброс болезни призыва
     for (const c of [...pl.creatures]) {
+      // Существа, погибшие от предыдущего горения/deathrattle в этой фазе,
+      // не должны получать ещё один start-триггер из заранее снятого списка.
+      if (!pl.creatures.includes(c)) continue;
       c.justPlayed = c.summonedOnTurn >= this.turnsTaken[side];
-      // Горение
+      // Горение — отдельный checkpoint: смерть и предсмертный хрип разрешаются
+      // до следующего существа/его onTurnStart, а не в конце всей фазы.
       const burn = c.statuses.find(s => s.type === StatusType.Burn);
       if (burn && !c.silenced) {
         this.damageCreature(c, burn.value, { source: 'Горение', pierceShield: true, sourceCardId: burn.sourceCardId });
@@ -1069,10 +1215,13 @@ export class GameEngine {
           burn.turnsLeft--;
           if (burn.turnsLeft <= 0) this.removeStatus(c, burn);
         }
+        this.checkDeaths();
+        if (!pl.creatures.includes(c)) continue;
       }
-      // Триггеры существ на начало хода
+      // Триггеры существ на начало хода также завершаются до следующего тела.
       if (!c.silenced && c.data.onTurnStart?.length) {
         this.runEffects(c.data.onTurnStart, side, { sourceUid: c.uid, sourceCard: c.data });
+        this.checkDeaths();
       }
     }
 
@@ -1186,20 +1335,11 @@ export class GameEngine {
   }
 
   /* --- Публичные обёртки для контроллеров/UI (движок остаётся источником истины). --- */
-  /**
-   * Очередь атак фазы «Битва». UI-контроллер читает её ПОСЛЕ синхронного
-   * исполнения боя и проигрывает анимации в правильном порядке (ТЗ п.6.2).
-   * Каждый элемент содержит состояние атакующего и защитника ДО удара —
-   * этого достаточно, чтобы корректно показать полёт, тряску и числа урона.
-   */
-  attackQueue: {
-    attackerUid: number; attackerSide: Side; attackerName: string;
-    defenderUid?: number; defenderName?: string; hitHero: boolean;
-    attackerBefore: { hp: number }; defenderBefore?: { hp: number };
-    heroDamage: number; defenderDamage: number; attackerDamage: number;
-    lifesteal: boolean; lifestealAmount: number;
-    attackerAfter: { hp: number }; defenderAfter?: { hp: number };
-  }[] = [];
+  /** True только во время синхронного применения одного удара и его триггеров. */
+  get isResolvingAttack(): boolean { return this.activeCombatHpEvents !== null; }
+  /** Очередь ударов: вместе с боевыми числами содержит HP-события триггеров
+      и снимок поля после немедленного разрешения смертей/предсмертных хрипов. */
+  attackQueue: CombatAttackRecord[] = [];
   /**
    * Хок проигрывания анимаций после фазы «Битва» (используется HTML-прототипом).
    * Движок остаётся синхронным и детерминированным: бой уже разрешён,
@@ -1251,9 +1391,8 @@ export class GameEngine {
       for (let i = 0; i < maxAttacks; i++) {
         if (!this.canAttack(atk) || !pl.creatures.includes(atk)) break;
         const target = this.chooseAutoTarget(side, atk);
+        this.commitAttack(atk);
         this.resolveAttack(atk, target.creature, target.hitHero ? en : undefined);
-        atk.attacksThisTurn++;
-        this.checkDeaths();
         if (this.result !== GameResult.Ongoing) return;
       }
     }
@@ -1277,94 +1416,120 @@ export class GameEngine {
   }
 
   resolveAttack(attacker: EntityCreature, defender?: EntityCreature, enemyHero?: PlayerState): void {
-    const rec = {
-      attackerUid: attacker.uid, attackerSide: attacker.owner, attackerName: attacker.name,
+    if (attacker.attack <= 0) return;
+    const ownerSide = attacker.owner;
+    const attackerBeforeHp = attacker.health;
+    const lifesteal = !attacker.silenced && attacker.keywords.includes(Keyword.Lifesteal);
+    const rec: CombatAttackRecord = {
+      attackerUid: attacker.uid, attackerSide: ownerSide, attackerName: attacker.name,
       defenderUid: defender?.uid, defenderName: defender?.name,
       hitHero: !!enemyHero,
       attackerBefore: { hp: attacker.health },
       defenderBefore: defender ? { hp: defender.health } : undefined,
       heroDamage: 0, defenderDamage: 0, attackerDamage: 0,
-      lifesteal: !attacker.silenced && attacker.keywords.includes(Keyword.Lifesteal), lifestealAmount: 0,
-      attackerAfter: { hp: 0 }, defenderAfter: defender ? { hp: 0 } : undefined,
+      lifesteal, lifestealAmount: 0,
+      attackerAfter: { hp: Math.max(0, attacker.health) },
+      defenderAfter: defender ? { hp: Math.max(0, defender.health) } : undefined,
+      hpEvents: [], unitsAfter: [],
+      heroHpAfter: { [Side.Player]: this.p(Side.Player).health, [Side.Opponent]: this.p(Side.Opponent).health },
     };
-    if (attacker.attack <= 0) return;
-    rec.attackerSide = attacker.owner;
-    const ownerSide = attacker.owner;
-    const attackerBeforeHp = attacker.health;
-    const lifesteal = !attacker.silenced && attacker.keywords.includes(Keyword.Lifesteal);
+    const previousHpEvents = this.activeCombatHpEvents;
+    this.activeCombatHpEvents = rec.hpEvents;
 
-    if (defender) {
-      this.emit({
-        type: GameEventType.CreatureAttacks, uid: attacker.uid, side: ownerSide, targetUid: defender.uid,
-        cardName: attacker.name, value: attacker.attack,
-        text: `«${attacker.name}» атакует «${defender.name}»`,
-      });
-      // Ответный урон
-      const counter = defender.attack;
-      const defHpBefore = defender.health;
-      const dealt = this.damageCreature(defender, attacker.attack, { source: attacker.name, sourceCardId: attacker.cardId });
-      const dealtToCreature = Math.min(dealt, Math.max(0, defHpBefore));
-      if (dealtToCreature > 0 && lifesteal) {
-        const hpBeforeHeal = this.p(ownerSide).health;
-        this.healHero(ownerSide, dealtToCreature, { source: 'Вампиризм' });
-        rec.lifestealAmount += Math.max(0, this.p(ownerSide).health - hpBeforeHeal);
-      }
-      // v2.12.2: Ядовитый / Ледяное касание — доп. статусы при успешном уроне
-      if (dealt > 0 && !attacker.silenced && defender.health > 0) {
-        if (attacker.keywords.includes(Keyword.Poisonous)) {
-          this.addStatus(defender, { type: StatusType.Poison, value: 1, turnsLeft: -1 });
-          this.say(`Ядовитый: «${defender.name}» отравлен «${attacker.name}»`, defender.owner);
-        }
-        if (attacker.keywords.includes(Keyword.Freezing)) {
-          this.addStatus(defender, { type: StatusType.Freeze, value: 1, turnsLeft: 1 });
-          defender.frozen = true;
-          this.say(`Ледяное касание: «${defender.name}» заморожен`, defender.owner);
-        }
-      }
-      if (counter > 0 && this.uidMap.has(attacker.uid)) {
-        this.damageCreature(attacker, counter, { source: defender.name, sourceCardId: defender.cardId });
-      }
-      if (dealt > 0) this.stats[ownerSide].kills += defender.health <= 0 ? 1 : 0;
-      // Прорыв: избыток урона над убитым блокёром уходит в героя защитника
-      if (dealt > 0 && defender.health <= 0 && !attacker.silenced
-          && attacker.keywords.includes(Keyword.Trample)) {
-        const excess = attacker.attack - Math.min(dealt, defHpBefore);
-        if (excess > 0) {
-          const hero = this.p(defender.owner);
-          const hpBeforeHeal = this.p(ownerSide).health;
-          const hd = this.damageHero(hero.side, excess, {
-            source: `${attacker.name} (Прорыв)`, sourceCardId: attacker.cardId,
-            lifestealFor: lifesteal ? ownerSide : undefined,
+    try {
+      // Боевой урон двух существ — единое действие: сначала обе стороны наносят
+      // урон, затем один state-based checkpoint обрабатывает все смерти разом.
+      this.deathCheckSuspension++;
+      try {
+        if (defender) {
+          this.emit({
+            type: GameEventType.CreatureAttacks, uid: attacker.uid, side: ownerSide, targetUid: defender.uid,
+            cardName: attacker.name, value: attacker.attack,
+            text: `«${attacker.name}» атакует «${defender.name}»`,
           });
-          if (lifesteal) rec.lifestealAmount += Math.max(0, this.p(ownerSide).health - hpBeforeHeal);
-          rec.heroDamage = hd;
-          rec.hitHero = hd > 0;
+          const counter = defender.attack;
+          const defHpBefore = defender.health;
+          const dealt = this.damageCreature(defender, attacker.attack, { source: attacker.name, sourceCardId: attacker.cardId });
+          const dealtToCreature = Math.min(dealt, Math.max(0, defHpBefore));
+          if (dealtToCreature > 0 && lifesteal) {
+            const hpBeforeHeal = this.p(ownerSide).health;
+            this.healHero(ownerSide, dealtToCreature, { source: 'Вампиризм' });
+            rec.lifestealAmount += Math.max(0, this.p(ownerSide).health - hpBeforeHeal);
+          }
+          // Ядовитый / Ледяное касание применяются после успешного урона,
+          // но до общего checkpoint смертей в конце боевого действия.
+          if (dealt > 0 && !attacker.silenced && defender.health > 0) {
+            if (attacker.keywords.includes(Keyword.Poisonous)) {
+              this.addStatus(defender, { type: StatusType.Poison, value: 1, turnsLeft: -1 });
+              this.say(`Ядовитый: «${defender.name}» отравлен «${attacker.name}»`, defender.owner);
+            }
+            if (attacker.keywords.includes(Keyword.Freezing)) {
+              this.addStatus(defender, { type: StatusType.Freeze, value: 1, turnsLeft: 1 });
+              defender.frozen = true;
+              this.say(`Ледяное касание: «${defender.name}» заморожен`, defender.owner);
+            }
+          }
+          if (counter > 0 && this.uidMap.has(attacker.uid)) {
+            this.damageCreature(attacker, counter, { source: defender.name, sourceCardId: defender.cardId });
+          }
+          if (dealt > 0) this.stats[ownerSide].kills += defender.health <= 0 ? 1 : 0;
+          // Прорыв: избыток урона над убитым блокёром уходит в героя защитника.
+          if (dealt > 0 && defender.health <= 0 && !attacker.silenced
+              && attacker.keywords.includes(Keyword.Trample)) {
+            const excess = attacker.attack - Math.min(dealt, defHpBefore);
+            if (excess > 0) {
+              const hero = this.p(defender.owner);
+              const hpBeforeHeal = this.p(ownerSide).health;
+              const hd = this.damageHero(hero.side, excess, {
+                source: `${attacker.name} (Прорыв)`, sourceCardId: attacker.cardId,
+                lifestealFor: lifesteal ? ownerSide : undefined, combatCue: 'attack',
+              });
+              if (lifesteal) rec.lifestealAmount += Math.max(0, this.p(ownerSide).health - hpBeforeHeal);
+              rec.heroDamage = hd;
+              rec.hitHero = hd > 0;
+            }
+          }
+          rec.defenderDamage = dealt;
+          rec.attackerDamage = Math.max(0, attackerBeforeHp - attacker.health);
+        } else if (enemyHero) {
+          const dmg = attacker.attack;
+          this.emit({
+            type: GameEventType.CreatureAttacks, uid: attacker.uid, side: ownerSide, cardName: attacker.name,
+            value: dmg, text: `«${attacker.name}» атакует героя ${enemyHero.name}`,
+          });
+          const hpBeforeHeal = this.p(ownerSide).health;
+          const dealt = this.damageHero(enemyHero.side, dmg, {
+            source: attacker.name, sourceCardId: attacker.cardId,
+            lifestealFor: lifesteal ? ownerSide : undefined, combatCue: 'attack',
+          });
+          if (lifesteal) rec.lifestealAmount = Math.max(0, this.p(ownerSide).health - hpBeforeHeal);
+          rec.heroDamage = dealt;
         }
+      } finally {
+        this.deathCheckSuspension--;
       }
-      rec.defenderDamage = dealt;
-      rec.attackerDamage = Math.max(0, attackerBeforeHp - attacker.health);
-      rec.defenderAfter = { hp: Math.max(0, defender.health) };
+
+      if (!defender && !enemyHero) return;
+      if (this.deathCheckSuspension === 0) this.checkDeaths();
+
+      // Смерти и их эффекты уже разрешены, поэтому следующий шаг боя видит
+      // точное состояние после предсмертных хрипов, а не только после удара.
       rec.attackerAfter = { hp: Math.max(0, attacker.health) };
+      if (defender) rec.defenderAfter = { hp: Math.max(0, defender.health) };
+      rec.unitsAfter = this.allCreatures().map(c => ({ uid: c.uid, hp: Math.max(0, c.health) }));
+      rec.heroHpAfter = {
+        [Side.Player]: this.p(Side.Player).health,
+        [Side.Opponent]: this.p(Side.Opponent).health,
+      };
       this.attackQueue.push(rec);
-    } else if (enemyHero) {
-      const dmg = attacker.attack;
-      this.emit({
-        type: GameEventType.CreatureAttacks, uid: attacker.uid, side: ownerSide, cardName: attacker.name,
-        value: dmg, text: `«${attacker.name}» атакует героя ${enemyHero.name}`,
-      });
-      const hpBeforeHeal = this.p(ownerSide).health;
-      const dealt = this.damageHero(enemyHero.side, dmg, { source: attacker.name, sourceCardId: attacker.cardId, lifestealFor: lifesteal ? ownerSide : undefined });
-      if (lifesteal) rec.lifestealAmount = Math.max(0, this.p(ownerSide).health - hpBeforeHeal);
-      // Прорыв не нужен при прямой атаке героя; урон уже нанесён
-      rec.heroDamage = dealt;
-      rec.attackerAfter = { hp: Math.max(0, attacker.health) };
-      this.attackQueue.push(rec);
+    } finally {
+      this.activeCombatHpEvents = previousHpEvents;
     }
   }
 
   /** Ручная атака (режим manual — для PvP/расширений). Правила: бить существо обязательно только если у противника есть Провокация (Taunt) или карта прямо указывает «обязана атаковать существо»; во всех остальных случаях можно бить героя. */
   manualAttack(side: Side, uid: number, targetUid?: number, targetHero = false): boolean {
-    if (this.config.combatMode !== 'manual') return false;
+    if (this.config.combatMode !== 'manual' || this.activeSide !== side || this.phase !== Phase.Combat) return false;
     const c = this.findCreature(uid);
     if (!c || c.owner !== side || !this.canAttack(c)) return false;
     const en = this.p(side === Side.Player ? Side.Opponent : Side.Player);
@@ -1374,14 +1539,14 @@ export class GameEngine {
     const mustHitCreature = !!(c.data as any).mustHitCreature;
     if (targetHero) {
       if (hasTaunt || mustHitCreature) return false;
-      this.resolveAttack(c, undefined, en); c.attacksThisTurn++; this.checkDeaths(); return true;
+      this.commitAttack(c); this.resolveAttack(c, undefined, en); return true;
     }
     const t = targetUid !== undefined ? this.findCreature(targetUid) : undefined;
     if (!t || t.owner === side) return false;
     if (hasTaunt && !taunts.includes(t)) return false;
     // Неуловимость: существо нельзя выбрать целью атаки
     if (t.unblockableThisTurn || (!t.silenced && t.keywords.includes(Keyword.Unblockable))) return false;
-    this.resolveAttack(c, t); c.attacksThisTurn++; this.checkDeaths();
+    this.commitAttack(c); this.resolveAttack(c, t);
     return true;
   }
 
@@ -1433,9 +1598,9 @@ export class GameEngine {
           }
         }
       }
-      // Заморозка снимается в конце хода владельца
+      // Заморозка и временная неуловимость обновляются на конце хода;
+      // число атак и tapped сохраняются до следующего собственного Untap.
       c.frozen = c.statuses.some(s => s.type === StatusType.Freeze);
-      c.attacksThisTurn = 0;
       c.unblockableThisTurn = false;
       // Эффекты «в конце хода»
       if (!c.silenced && c.data.onTurnEnd?.length) this.runEffects(c.data.onTurnEnd, side, { sourceUid: c.uid, sourceCard: c.data });

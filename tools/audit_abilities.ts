@@ -98,8 +98,8 @@ console.log('\n[2] Сценарии способностей');
   check('Вампиризм лечит героя на величину урона', e.p(Side.Player).health === Math.min(30, hp0 + u.attack),
     `${hp0}→${e.p(Side.Player).health} при атаке ${u.attack}`);
 }
-{ // Прорыв: избыточный урон уходит в героя
-  const e = freshEngine();
+{ // Прорыв: избыточный урон уходит в героя (без пассивки Некрусов, чтобы тест был изолирован)
+  const e = freshEngine(Faction.Pyromancer, Faction.Pyromancer);
   const tr = find(c => c.type === CardType.Creature && (c.keywords ?? []).includes(Keyword.Trample));
   const wall = find(c => c.type === CardType.Creature && (c.health ?? 99) <= 3);
   const a = e.summon(Side.Player, tr)!; (a as any).summonedTurn = -5;
@@ -563,7 +563,7 @@ console.log('\n[3] Exhaustive-аудит каталога и легальног�
   const creatureOnlyKeywords = new Set([
     Keyword.Taunt, Keyword.Lifesteal, Keyword.Deathrattle, Keyword.Battlecry, Keyword.Rush,
     Keyword.Windfury, Keyword.Unblockable, Keyword.Trample, Keyword.DivineShield,
-    Keyword.Poisonous, Keyword.Freezing,
+    Keyword.Poisonous, Keyword.Freezing, Keyword.Vigilance,
   ]);
   const misplacedCreatureFields = ALL.filter(c => c.type !== CardType.Creature
     && (c.attack != null || c.health != null || (c.keywords ?? []).some(k => creatureOnlyKeywords.has(k))));

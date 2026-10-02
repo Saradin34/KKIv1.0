@@ -190,6 +190,8 @@ namespace EchoCitadel.Core
 
             int maxAttacks = c.Keywords.Contains(Keyword.Windfury) ? 2 : 1;
             if (c.AttacksThisTurn >= maxAttacks) return false;
+            // A tapped creature cannot begin a new attack; Windfury may use its second attack.
+            if (c.Tapped && c.AttacksThisTurn == 0) return false;
 
             if (c.JustPlayed && !c.Keywords.Contains(Keyword.Rush) && !HasStatusType(c, StatusType.Fury))
                 return false;

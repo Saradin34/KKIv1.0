@@ -1,8 +1,8 @@
 /* =====================================================================
    Смоук-тест HTML-прототипа в jsdom (headless).
-   Проверяет: загрузку, меню, прогресс заданий, коллекцию 500×2 с постраничным DOM, экран правил,
-   муллиган, РОЗЫГРЫШ КАРТ игроком (клик → поле/цель), Эхо, анимированную
-   фазу «Битва», лог, экран конца игры, перезапуск и возврат в меню.
+   Проверяет: загрузку, меню и прогресс заданий (включая детерминированный сквозной розыгрыш руны),
+   коллекцию 500×2 с постраничным DOM, экран правил, муллиган, РОЗЫГРЫШ КАРТ игроком
+   (клик → поле/цель), Эхо, анимированную фазу «Битва», лог, экран конца игры, перезапуск и возврат в меню.
    Запуск: node tools/smoke_prototype.js [--turns 10] [--player Aurites] [--enemy Necrus]
    ===================================================================== */
 const fs = require('fs');
@@ -10,7 +10,16 @@ const path = require('path');
 const { JSDOM, VirtualConsole } = require('jsdom');
 
 const ROOT = path.resolve(__dirname, '..');
+const serverProfileSrc = fs.readFileSync(path.join(ROOT, 'server/meta_server.ts'), 'utf8');
+const onlineTestSrc = fs.readFileSync(path.join(ROOT, 'tools/online_test.js'), 'utf8');
 const cardsFixture = JSON.parse(fs.readFileSync(path.join(ROOT, 'unity/EchoCitadel/Assets/StreamingAssets/Cards.json'), 'utf8'));
+const cardArtUrlFor = id => {
+  const card = [...cardsFixture.cards, ...(cardsFixture.tokens || [])].find(c => c.id === id);
+  const rel = card?.artworkPath || card?.art || '';
+  const parts = rel.replaceAll(String.fromCharCode(92), '/').split('/');
+  const cardsAt = parts.indexOf('Cards');
+  return cardsAt < 0 ? '' : `/art/${parts.slice(cardsAt + 1).join('/')}`;
+};
 const deckFixture = JSON.parse(fs.readFileSync(path.join(ROOT, 'unity/EchoCitadel/Assets/StreamingAssets/Decks.json'), 'utf8'));
 const starterDeckFixtures = deckFixture.decks.filter(d => d.format === 'starter');
 const expectedStarterOwned = new Map();
@@ -84,8 +93,79 @@ const skip = (name, reason = 'не входит в текущий этап') => 
 
   console.log('\n=== СМОУК-ТЕСТ ПРОТОТИПА «ЭХО-ЦИТАДЕЛЬ» (jsdom) ===');
 
-  /* ---------- 1. меню ---------- */
-  console.log('\n[1] Меню');
+  /* ---------- 1. сюжетный вход + меню ---------- */
+  console.log('\n[1] Пролог нового игрока и меню');
+  const introStartsLocked = !$('introModal').classList.contains('hidden') && $('btnPlay').disabled && $('deckPick').disabled
+    && $('deckPick').options.length === 1 && /стартовые колоды откроются после вступительных испытаний/i.test($('deckPick').options[0]?.textContent || '')
+    && /разломе пяти стихий/.test($('introBody').textContent || '');
+  const practiceLockedAtStart = $('chkPractice').disabled;
+  click($('btnIntroNext'));
+  const factionCardsStart = $('introBody').querySelectorAll('[data-intro-faction]').length;
+  for (const fac of ['Aurites', 'Necrus', 'Terramorph', 'Pyromancer', 'Ethereal']) {
+    const card = $('introBody').querySelector(`[data-intro-faction="${fac}"]`);
+    if (card) click(card);
+  }
+  const factionsSeen = window.ecIntroSnapshot();
+  const factionIntrosDone = factionCardsStart === 5 && factionsSeen.seen.length === 5
+    && !$('introFoot').querySelector('#btnIntroNext').disabled;
+  click($('btnIntroNext'));
+  const mechanicsIntro = /мана/i.test($('introBody').textContent || '') && /приоритета/i.test($('introBody').textContent || '');
+  click($('btnIntroNext'));
+  const lessonGates = $('introBody').querySelectorAll('[data-intro-lesson]').length === 4
+    && !$('introBody').querySelector('[data-intro-lesson="1"]').disabled
+    && $('introBody').querySelector('[data-intro-lesson="2"]').disabled;
+  check('новичка встречает обязательный пролог; бой и выбор колод заблокированы', introStartsLocked,
+    `пролог ${introStartsLocked}, btnPlay disabled ${$('btnPlay').disabled}, deck picker ${$('deckPick').disabled}`);
+  check('пять фракций представлены интерактивно; требуется открыть каждую', factionIntrosDone,
+    `карточек ${factionCardsStart}, прочитано ${factionsSeen.seen.length}/5`);
+  check('сюжет объясняет ману, руны, атаки и окна приоритета до начала боя', mechanicsIntro);
+  check('в тренировочную цепочку входит четыре реальных урока; следующий открыт, остальные закрыты', lessonGates);
+  click($('introBody').querySelector('[data-intro-lesson="1"]'));
+  const realLessonStarted = await waitUntil(() => window.ecBattle?.launchMode === 'tut'
+    && window.ecBattle?.tutLesson === 1 && !!window.ecBattle?.engine && !$('battle').classList.contains('hidden'), 8000, 50);
+  const realLessonDeck = window.ecBattle?.playerDeckId === 'starter_aurites';
+  check('урок из пролога запускает настоящий бой с фиксированной учебной колодой', realLessonStarted && realLessonDeck,
+    `режим ${window.ecBattle?.launchMode}, урок ${window.ecBattle?.tutLesson}, колода ${window.ecBattle?.playerDeckId}`);
+  window.openHomeScreen();
+  const returnedToIntro = await waitUntil(() => !$('introModal').classList.contains('hidden')
+    && $('battle').classList.contains('hidden') && $('deckPick').disabled, 3000, 50);
+  check('выход из незавершённого урока возвращает в пролог без открытия колод', returnedToIntro
+    && window.ecIntroSnapshot().lessonStage === 0 && window.ecBattle.tutLesson === 0 && window.ecBattle.launchMode !== 'tut',
+    `прогресс ${window.ecIntroSnapshot().lessonStage}/4, режим ${window.ecBattle.launchMode}`);
+  for (let n = 2; n <= 4; n++) {
+    window.ecSetTut(n - 1, false); // моделируем завершённые предыдущие испытания, не подменяя запуск боя
+    window.openHomeScreen();
+    const lessonButton = $('introBody').querySelector(`[data-intro-lesson="${n}"]`);
+    const lessonAvailable = !!lessonButton && !lessonButton.disabled;
+    if (lessonButton) click(lessonButton);
+    const launched = await waitUntil(() => window.ecBattle?.launchMode === 'tut'
+      && window.ecBattle?.tutLesson === n && !!window.ecBattle?.engine && !$('battle').classList.contains('hidden'), 8000, 50);
+    const expectedHands = { 2: 1, 3: 3, 4: 4 }[n];
+    const realDeck = window.ecBattle?.playerDeckId === 'starter_aurites';
+    const scriptedHand = window.ecBattle?.tutInjected.length === expectedHands;
+    check(`учебный бой ${n}/4 запускает реальный сценарий и руку урока`,
+      lessonAvailable && launched && realDeck && scriptedHand,
+      `открыт ${lessonAvailable}, движок ${launched}, учебных карт ${window.ecBattle?.tutInjected.length}/${expectedHands}`);
+    if (n === 4 && launched) {
+      const shardsBeforeLessonReward = window.ecShards();
+      window.ecBattle.tutAllDone = true;
+      window.ecBattle.tutCheck(); // проверяем общий переход после сигнала «урок завершён» от движка
+      const finalStepReturned = await waitUntil(() => window.ecMeta().tutStage === 4
+        && !$('introModal').classList.contains('hidden') && $('battle').classList.contains('hidden'), 4000, 50);
+      const finalDeckPicker = $('introBody').querySelectorAll('[data-intro-deck]').length === 5
+        && $('deckPick').disabled && window.ecBattle.tutLesson === 0 && window.ecBattle.launchMode === 'menu';
+      check('после зачёта четвёртого боя пролог показывает выбор награды и сбрасывает tutorial-режим',
+        finalStepReturned && finalDeckPicker,
+        `этап ${window.ecMeta().tutStage}/4, 5 колод, режим ${window.ecBattle.launchMode}`);
+      window.ecSetShards(shardsBeforeLessonReward); // не переносим тестовую валюту в остальные сценарии
+    } else {
+      window.openHomeScreen();
+      await waitUntil(() => !$('introModal').classList.contains('hidden') && $('battle').classList.contains('hidden'), 3000, 50);
+    }
+  }
+  window.ecFinishIntroForTest(); // последующие широкие smoke-проверки работают в режиме уже открытого хаба
+  check('после вступления доступны стартовые колоды и главный бой', $('introModal').classList.contains('hidden')
+    && !$('deckPick').disabled && !$('btnPlay').disabled && $('deckPick').options.length === 10);
   check('5 фракций в выборе', $('playerFactions').children.length === 5, `${$('playerFactions').children.length}`);
   check('список колод заполнен без служебной Starter', $('deckPick').options.length === 10
     && !$('deckPick').querySelector('option[value="Starter"]'), `${$('deckPick').options.length} колод`);
@@ -100,9 +180,24 @@ const skip = (name, reason = 'не входит в текущий этап') => 
     `${window.ecShards()} монет · ${window.ecGems()} гемов · обычные ${initialMeta.freeOpens} · мифические ${initialMeta.premOpens}`);
   check('новому игроку выдаются только карты пяти 30-карточных стартовых колод', starterCollectionOk,
     `${starterDeckFixtures.length} starter-колод; карта вне starter: ${nonStarterBaseId} ×${nonStarterBaseId ? window.ecOwnedOf(nonStarterBaseId) : '—'}`);
+  const introFaction = window.localStorage.getItem('ec.pickedFaction') || 'Aurites';
   check('новый игрок сразу выбран на 30-карточную стартовую колоду своей фракции',
-    $('deckPick').value === 'starter_aurites' && [...$('deckPick').options].filter(o => o.value.startsWith('starter_')).length === 5,
-    `выбрана ${$('deckPick').value}`);
+    $('deckPick').value === `starter_${introFaction.toLowerCase()}` && [...$('deckPick').options].filter(o => o.value.startsWith('starter_')).length === 5,
+    `выбрана ${$('deckPick').value} / фракция ${introFaction}`);
+  const rewardFreeBefore = window.ecFreeOpens(); const rewardGemsBefore = window.ecGems();
+  window.ecPrepareIntroRewardForTest();
+  const finalPageReady = $('introBody').querySelectorAll('[data-intro-deck]').length === 5
+    && $('introFoot').querySelector('#btnIntroUnlock') && $('deckPick').disabled;
+  click($('introBody').querySelector('[data-intro-deck="Pyromancer"]'));
+  click($('btnIntroUnlock'));
+  const introRewardGranted = window.ecMeta().tutReward === 'Pyromancer' && window.ecMeta().starterDecksUnlocked
+    && window.ecFreeOpens() === rewardFreeBefore + 5 && window.ecGems() === rewardGemsBefore + 100
+    && $('deckPick').options.length === 10 && !$('deckPick').disabled
+    && /Все двери открыты/.test($('introTitle').textContent || '');
+  check('после четвёртого боя открываются все 5 колод; награда начисляется один раз',
+    finalPageReady && introRewardGranted,
+    `финальный выбор ${finalPageReady ? 'да' : 'нет'}, +${window.ecFreeOpens() - rewardFreeBefore} бустеров, +${window.ecGems() - rewardGemsBefore} 💎`);
+  click($('btnIntroEnter'));
   /* --- спека «1. Главное меню» (v2.4) --- */
   check('карусель фракций сверху (5 чипов)', $('menuHeroes').classList.contains('facCarousel') && $('menuHeroes').children.length === 5);
   const quickChips = [...$('menuHeroes').querySelectorAll('.heroChip')];
@@ -180,6 +275,13 @@ const skip = (name, reason = 'не входит в текущий этап') => 
     && firstCollectionPage.rendered === firstCollectionPage.pageSize && firstCollectionPage.total === 1000
     && /500 карт × 2 оформления/.test($('colCount').textContent),
     `первая страница ${firstCollectionPage.rendered}/${firstCollectionPage.total}; DOM ${collectionCards().length}`);
+  const quickNav = $('ecQuickNav');
+  check('переходы между разделами получают мягкую анимацию и обновляют активный маршрут для доступности',
+    $('collection').classList.contains('ecRouteEnter') && !!quickNav.querySelector('[data-route="collection"][aria-current="page"]')
+      && !quickNav.querySelector('[data-route="back"]').disabled
+      && $('ecRouteLive').textContent === 'Раздел открыт: Коллекция карт'
+      && $('ecRouteTransitionFx').classList.contains('playing'),
+    `route=${window.document.body.dataset.appRoute}; enter=${$('collection').classList.contains('ecRouteEnter')}; backDisabled=${quickNav.querySelector('[data-route="back"]').disabled}; fx=${$('ecRouteTransitionFx').classList.contains('playing')}; live=${$('ecRouteLive').textContent}`);
   $('colStyle').value = 'classic'; $('colStyle').dispatchEvent(new window.Event('change'));
   let collectionState = window.ecTestCollectionState();
   check('фильтр классики сохраняет полный набор при постраничном рендере', collectionCards().length === 40
@@ -210,15 +312,20 @@ const skip = (name, reason = 'не входит в текущий этап') => 
   check('шанс Borderless в бустере снижен до 0,1% с корректной границей', quantileHits === 10
     && rollPass(0) && rollPass(0.0009999) && !rollPass(0.001) && !rollPass(0.9999) && !rollPass(Number.NaN), `${quantileHits}/10000 роллов`);
 
-  const quickNav = $('ecQuickNav');
   check('контекстная навигация с кнопкой «Назад» видна на внутренних экранах', !quickNav.classList.contains('hidden')
     && quickNav.querySelectorAll('button[data-route]').length === 10 && !!quickNav.querySelector('[data-route="back"]'));
   click(quickNav.querySelector('[data-route="decks"]'));
   await wait(40);
-  check('быстрый переход в колоды открывает экран и скрывает коллекцию', !$('decksScreen').classList.contains('hidden') && $('collection').classList.contains('hidden'));
+  check('быстрый переход в колоды открывает экран и корректно обновляет маршрут/кнопку «Назад»',
+    !$('decksScreen').classList.contains('hidden') && $('collection').classList.contains('hidden')
+      && !!quickNav.querySelector('[data-route="decks"][aria-current="page"]')
+      && quickNav.querySelector('[data-route="back"]').title === 'Назад: Коллекция карт');
   click(quickNav.querySelector('[data-route="back"]'));
   await wait(40);
-  check('возврат из колод восстанавливает коллекцию', !$('collection').classList.contains('hidden') && $('decksScreen').classList.contains('hidden'));
+  check('возврат из колод восстанавливает коллекцию и предыдущий маршрут',
+    !$('collection').classList.contains('hidden') && $('decksScreen').classList.contains('hidden')
+      && !!quickNav.querySelector('[data-route="collection"][aria-current="page"]')
+      && quickNav.querySelector('[data-route="back"]').title === 'Назад: Главная');
 
   click(quickNav.querySelector('[data-route="events"]'));
   await wait(40);
@@ -332,6 +439,100 @@ const skip = (name, reason = 'не входит в текущий этап') => 
     `${$('mullCount').textContent} | метка: ${mull0.querySelector('.mark')?.textContent ?? 'нет'}`);
   click($('btnMullConfirm'));
   await wait(120);
+
+  /* Регрессия: одиночные цели из effects[].to тоже обязательны для заклинаний.
+     Массовые/случайные эффекты и боевые кличи существ при этом остаются легальными. */
+  console.log('\n[4б] Допустимые цели эффектов');
+  {
+    const e = b.engine;
+    const player = e.p(0), opponent = e.p(1);
+    const saved = {
+      activeSide: e.activeSide, phase: e.phase, instantWindow: e.instantWindow,
+      mana: player.mana, hand: player.hand.slice(), lastSpellCast: player.lastSpellCast,
+      echoPoints: player.echoPoints, echoUsedThisGame: player.echoUsedThisGame,
+      playerCreatures: player.creatures.slice(), opponentCreatures: opponent.creatures.slice(),
+    };
+    e.activeSide = 0; e.phase = 'Main'; e.instantWindow = null;
+    player.mana = 10;
+    player.creatures.splice(0); opponent.creatures.splice(0);
+    const tryCard = id => {
+      const index = player.hand.length;
+      player.hand.push(id);
+      const rngBefore = JSON.stringify(e.rng.getState());
+      const result = e.canPlay(0, index);
+      const rngStable = rngBefore === JSON.stringify(e.rng.getState());
+      player.hand.pop();
+      return { ...result, rngStable };
+    };
+    const enemyTargetMissing = tryCard('nec_s04');
+    const anyTargetMissing = tryCard('nec_s07');
+    const massWithoutUnits = tryCard('nec_s09');
+    const randomWithoutUnits = tryCard('eth_s09');
+    const battlecryWithoutTarget = tryCard('eth_10');
+    const syntheticId = 'smoke_target_default';
+    const targetTemplate = e.db.get('nec_s04');
+    e.db.set(syntheticId, { ...targetTemplate, id: syntheticId, name: 'Проверка цели по умолчанию',
+      cost: 0, type: 'Spell', target: 'None', effects: [{ op: 'destroyCreature' }] });
+    const defaultTargetMissing = tryCard(syntheticId);
+    e.db.delete(syntheticId);
+
+    const index = player.hand.length;
+    player.hand.push('nec_s04');
+    const beforeMana = player.mana;
+    const directPlayRejected = !e.playCard(0, index)
+      && player.hand[index] === 'nec_s04' && player.mana === beforeMana;
+    player.hand.pop();
+
+    const uiIndex = player.hand.length;
+    const uiManaBefore = player.mana;
+    player.hand.push('nec_s04'); player.mana = 10;
+    b.renderAll();
+    b.playHandIndex(uiIndex);
+    const uiPlayRejected = player.hand[uiIndex] === 'nec_s04';
+    player.hand.pop(); player.mana = uiManaBefore;
+
+    const lastSpellBeforeEcho = player.lastSpellCast;
+    const echoPointsBefore = player.echoPoints;
+    const echoUsedBefore = player.echoUsedThisGame;
+    player.lastSpellCast = { cardId: 'nec_s04' };
+    player.echoPoints = 1; player.echoUsedThisGame = 0;
+    const echoBlocked = !e.canUseEcho(0).ok && !e.useEcho(0)
+      && player.echoPoints === 1 && player.echoUsedThisGame === 0;
+
+    const targetData = e.db.get('aur_01');
+    const fakeTarget = {
+      uid: 900001, cardId: targetData.id, owner: 1, name: targetData.name,
+      faction: targetData.faction, attack: targetData.attack ?? 1, health: targetData.health ?? 2,
+      maxHealth: targetData.health ?? 2, cost: targetData.cost, element: targetData.element,
+      keywords: [...(targetData.keywords ?? [])], statuses: [], summonedOnTurn: 0,
+      attacksThisTurn: 0, tapped: false, canAttackThisTurn: false, justPlayed: false,
+      unblockableThisTurn: false, silenced: false, frozen: false, data: targetData,
+    };
+    opponent.creatures.push(fakeTarget);
+    const becomesPlayable = tryCard('nec_s04').ok;
+    const echoWithTarget = e.canUseEcho(0).ok;
+    opponent.creatures.pop();
+
+    player.lastSpellCast = lastSpellBeforeEcho;
+    player.echoPoints = echoPointsBefore; player.echoUsedThisGame = echoUsedBefore;
+    player.mana = saved.mana; player.hand = saved.hand;
+    player.creatures.splice(0, player.creatures.length, ...saved.playerCreatures);
+    opponent.creatures.splice(0, opponent.creatures.length, ...saved.opponentCreatures);
+    e.activeSide = saved.activeSide; e.phase = saved.phase; e.instantWindow = saved.instantWindow;
+    b.renderAll();
+
+    const targetBlocks = !enemyTargetMissing.ok && !anyTargetMissing.ok && !defaultTargetMissing.ok
+      && directPlayRejected && uiPlayRejected;
+    check('одиночные цели EnemyCreature/AnyCreature и цель по умолчанию блокируют розыгрыш без существ', targetBlocks,
+      `Enemy=${enemyTargetMissing.ok}; Any=${anyTargetMissing.ok}; default=${defaultTargetMissing.ok}; движок/UI отклонили=${directPlayRejected}/${uiPlayRejected}`);
+    check('массовые/случайные эффекты и боевой клич существа не получают ложный target-gate',
+      massWithoutUnits.ok && randomWithoutUnits.ok && battlecryWithoutTarget.ok,
+      `массовый=${massWithoutUnits.ok}; случайный=${randomWithoutUnits.ok}; существо=${battlecryWithoutTarget.ok}`);
+    check('при появлении допустимой цели заклинание и его Эхо снова доступны', becomesPlayable && echoBlocked && echoWithTarget,
+      `цель=${becomesPlayable}; Эхо без цели блокируется=${echoBlocked}; Эхо с целью=${echoWithTarget}`);
+    check('проверка легальности не расходует ГПСЧ', [enemyTargetMissing, anyTargetMissing, massWithoutUnits,
+      randomWithoutUnits, battlecryWithoutTarget, defaultTargetMissing].every(x => x.rngStable));
+  }
   // авто-ход: при пустой руке и нулевой мане ход передаётся сам
   {
     const e2 = b.engine;
@@ -369,6 +570,114 @@ const skip = (name, reason = 'не входит в текущий этап') => 
   b.renderAll();
   check('здоровье героев 30/30', $('playerHp').textContent === '30' && $('enemyHp').textContent === '30');
   check('мана 1-го хода = 1/1', $('playerMana').textContent === '1/1', $('playerMana').textContent);
+  // Во время хода ИИ (busy=true) приоритет игрока всё равно должен принимать instant из руки.
+  {
+    const e = b.engine;
+    const snap = e.exportState();
+    const instantId = 'aur_s01';
+    e.p(0).hand = [instantId];
+    e.p(0).mana = Math.max(3, e.p(0).mana);
+    e.p(0).health = Math.min(20, e.p(0).maxHealth);
+    b.setBusy(true);
+    const windowTask = b.responseWindow('smoke: ответ в ходе ИИ', true);
+    const interactiveDuringAi = !b.busy && e.instantWindow === 0;
+    b.playHandIndex(0); // должен успеть до ecAutoPass и попасть в стек через тот же UI-путь
+    const windowResult = await windowTask;
+    await b.waitForStack();
+    await waitUntil(() => !b.stackBusy, 4000, 20);
+    const instantPlayed = windowResult === 'acted' && e.p(0).hand.length === 0
+      && e.p(0).lastSpellCast?.cardId === instantId && e.stack.length === 0;
+    e.importState(snap, false);
+    b.setBusy(false);
+    b.renderAll();
+    check('мгновенное заклинание разыгрывается в окне приоритета во время хода ИИ',
+      interactiveDuringAi && instantPlayed,
+      `busy снят в окне ${interactiveDuringAi}, результат ${windowResult}, стек разрешён ${instantPlayed}`);
+  }
+
+  // Full Control намеренно удерживает пустое окно приоритета, даже если включён тестовый auto-pass.
+  console.log('\n[4б] Full Control: удержание окна без доступного мгновенного заклинания');
+  {
+    const e = b.engine;
+    const snap = e.exportState();
+    e.p(0).hand = [];
+    e.p(0).mana = 0;
+    $('setFullControl').checked = true;
+    $('setFullControl').dispatchEvent(new window.Event('change', { bubbles: true }));
+    const settingsControlWorks = $('btnFullControl').getAttribute('aria-pressed') === 'true'
+      && JSON.parse(window.localStorage.getItem('echo-citadel.settings.v1') || '{}').fullControl === true;
+    const priorityTask = b.responseWindow('smoke: Full Control без ответа', false);
+    const opened = await waitUntil(() => e.instantWindow === 0 && !$('instantDock').classList.contains('hidden'), 1500, 15);
+    await wait(40); // ecAutoPass=true: окно всё равно обязано остаться открытым
+    const held = e.instantWindow === 0;
+    const explainsStop = /Full Control|Полный контроль/.test($('instantSub').textContent || '');
+    click($('btnInstantPass'));
+    const result = await priorityTask;
+    click($('btnFullControl'));
+    const buttonControlWorks = $('btnFullControl').getAttribute('aria-pressed') === 'false' && !$('setFullControl').checked;
+    e.importState(snap, false);
+    b.renderAll();
+    check('Full Control сохраняется, удерживает пустое окно и ждёт ручной передачи приоритета',
+      settingsControlWorks && opened && held && explainsStop && result === 'passed' && buttonControlWorks,
+      `настройка ${settingsControlWorks}, открыто ${opened}, удержано ${held}, текст ${explainsStop}, результат ${result}, кнопка ${buttonControlWorks}`);
+  }
+
+  // Детерминированный сквозной сценарий: настоящая карта руны проходит через руку,
+  // клик игрока, Engine.playCard → RunePlayed → questBump → localStorage.
+  // Не зависит от случайного состава стартовой руки/ходов AI.
+  console.log('\n[4в] Сквозной розыгрыш руны и сохранение задания');
+  {
+    const e = b.engine;
+    const snapshot = e.exportState();
+    const player = e.p(0);
+    const runeCard = [...e.db.values()].find(c => c.type === 'Rune' && c.faction === player.faction
+      && !player.runes.some(r => r.cardId === c.id));
+    const metaBefore = JSON.parse(window.localStorage.getItem('ec_meta_v1') || '{}');
+    const dailyBefore = metaBefore.quests?.find(q => q.id === 'runes');
+    const weeklyBefore = metaBefore.wquests?.find(q => q.id === 'w_runes');
+    let didPlay = false;
+    let questSaved = false;
+    let runeUiShown = false;
+    let statsAdvanced = false;
+    const runeStatsBefore = e.stats[0].runesPlayed;
+
+    try {
+      if (runeCard && dailyBefore && weeklyBefore) {
+        player.hand = [runeCard.id];
+        player.maxMana = Math.max(player.maxMana, runeCard.cost);
+        player.mana = Math.max(player.mana, runeCard.cost);
+        b.renderAll();
+        const runeNode = [...$('hand').querySelectorAll('.card')]
+          .find(node => node.dataset.cardId === runeCard.id);
+        const playable = !!runeNode && !b.busy && e.canPlay(0, 0).ok;
+        if (playable) {
+          click(runeNode);
+          didPlay = await waitUntil(() => e.p(0).runes.some(r => r.cardId === runeCard.id)
+            && e.p(0).hand.length === 0, 3000, 20);
+          const metaAfter = JSON.parse(window.localStorage.getItem('ec_meta_v1') || '{}');
+          const dailyAfter = metaAfter.quests?.find(q => q.id === 'runes');
+          const weeklyAfter = metaAfter.wquests?.find(q => q.id === 'w_runes');
+          const dailyExpected = Math.min(dailyBefore.goal, dailyBefore.prog + 1);
+          const weeklyExpected = Math.min(weeklyBefore.goal, weeklyBefore.prog + 1);
+          questSaved = !!didPlay && dailyAfter?.prog === dailyExpected && weeklyAfter?.prog === weeklyExpected;
+          statsAdvanced = e.stats[0].runesPlayed === runeStatsBefore + 1;
+          runeUiShown = !!$('playerRunes').querySelector(`.runeChip[data-card-id="${runeCard.id}"]`);
+          check('реальный розыгрыш руны продвигает и сохраняет daily + weekly',
+            playable && didPlay && statsAdvanced && questSaved && runeUiShown,
+            `${runeCard.id}: руна на поле ${didPlay}, счётчик ${runeStatsBefore}→${e.stats[0].runesPlayed}, daily ${dailyBefore.prog}→${dailyAfter?.prog}, weekly ${weeklyBefore.prog}→${weeklyAfter?.prog}, UI ${runeUiShown}`);
+        } else {
+          check('реальный розыгрыш руны продвигает и сохраняет daily + weekly', false,
+            `${runeCard.id}: UI-карта найдена ${!!runeNode}, canPlay ${e.canPlay(0, 0).ok}`);
+        }
+      } else {
+        check('реальный розыгрыш руны продвигает и сохраняет daily + weekly', false,
+          `руна ${!!runeCard}, daily ${!!dailyBefore}, weekly ${!!weeklyBefore}`);
+      }
+    } finally {
+      e.importState(snapshot, false);
+      b.renderAll();
+    }
+  }
 
   /* ---------- 5. розыгрыш карт ---------- */
   console.log('\n[5] Розыгрыш карт игроком (клик по карте)');
@@ -380,7 +689,6 @@ const skip = (name, reason = 'не входит в текущий этап') => 
     runes: units('#playerRunes .runeChip'), echo: $('playerEcho').textContent, log: (window.logLines || []).length,
   });
 
-  let sawRune = false;
   for (let t = 0; t < TURNS; t++) {
     const gotTurn = await waitUntil(() => !$('gameover').classList.contains('hidden') || !$('btnEndTurn').disabled, 20000);
     if (!gotTurn) { check('игрок получил ход ' + (t + 1), false, 'таймаут ожидания'); break; }
@@ -438,7 +746,6 @@ const skip = (name, reason = 'не входит в текущий этап') => 
     }
 
     const mid = stat();
-    if ((mid.runes ?? 0) > 0) sawRune = true;
     click($('btnEndTurn'));
     await wait(700);
     if (t % 2 === 0) {
@@ -448,11 +755,9 @@ const skip = (name, reason = 'не входит в текущий этап') => 
 
   check('игрок разыграл хотя бы одну карту', playedCards > 0, `${playedCards} карт (существ ${playedCreatures}, заклинаний ${playedSpells})`);
   const questProgressAfterPlays = JSON.parse(window.localStorage.getItem('ec_meta_v1'));
-  check('игровые события продвигают цели «разыграйте существ» и «примените руны»',
-    (questProgressAfterPlays.wquests.find(q => q.id === 'w_creatures')?.prog ?? 0) > 0
-      && (!sawRune || ((questProgressAfterPlays.quests.find(q => q.id === 'runes')?.prog ?? 0) > 0
-      && (questProgressAfterPlays.wquests.find(q => q.id === 'w_runes')?.prog ?? 0) > 0)),
-    `существа ${questProgressAfterPlays.wquests.find(q => q.id === 'w_creatures')?.prog ?? 0}, руны ${questProgressAfterPlays.quests.find(q => q.id === 'runes')?.prog ?? 0}`);
+  check('игровые события продвигают еженедельную цель «разыграйте существ»',
+    (questProgressAfterPlays.wquests.find(q => q.id === 'w_creatures')?.prog ?? 0) > 0,
+    `существа ${questProgressAfterPlays.wquests.find(q => q.id === 'w_creatures')?.prog ?? 0}; руна проверена отдельным детерминированным сквозным сценарием`);
   check('существа появились на доске игрока', playedCreatures === 0 || units('#playerBoard .unit') >= 0);
   check('журнал боя копится в памяти (чат с экрана убран)', (window.logLines || []).length > 3,
     `${(window.logLines || []).length} записей в буфере`);
@@ -497,7 +802,7 @@ const skip = (name, reason = 'не входит в текущий этап') => 
     handCards.map(n => n.dataset.rarity).join('/'));
   check('у карт есть слои innerframe/spec/foil', handCards.length > 0 && handCards.every(n =>
     n.querySelector('.innerframe') && n.querySelector('.spec') && n.querySelector('.foil')));
-  check('арт карты тянется из папки (/art/<Фракция>/<id>.png), без затычек',
+  check('арт карты тянется из artworkPath (/art/<Фракция>[/<Семейство>]/<id>.png), без затычек',
     handCards.length > 0 && !!handCards[0].querySelector('.cart .artBox img')
     && (handCards[0].querySelector('.cart .artBox img').getAttribute('src') || '').includes('/art/'),
     handCards.length ? handCards[0].querySelector('.cart .artBox img')?.getAttribute('src') : 'нет карт');
@@ -531,7 +836,7 @@ const skip = (name, reason = 'не входит в текущий этап') => 
 
   /* ---------- 5в. арты по фракциям и юзабилити ---------- */
   console.log('\n[5в] Арты по фракциям и юзабилити');
-  // слой настоящего PNG: /art/<Faction>/<id>.png поверх процедурной основы
+  // слой настоящего PNG: /art/<Faction>[/<Subfamily>]/<id>.png поверх процедурной основы
   const artLayers = handCards.map(n => n.querySelector('.cart .artBox img')?.getAttribute('src') ?? '')
     .filter(Boolean);
   check('у карт руки есть слой настоящего арта /art/…', handCards.length > 0 &&
@@ -583,7 +888,7 @@ const skip = (name, reason = 'не входит в текущий этап') => 
     /#backdrop \.bgArt\{[^}]*board_arena\.(?:png|jpg)/.test(htmlBg)
     && htmlBg.includes('id="enemyCorner"') && htmlBg.includes('id="playerCorner"')
     && htmlBg.includes('id="turnPill"') && /class="rays/.test(htmlBg)
-    && /\.unit\.tapped \.ubody\{transform:rotate\(14deg\)/.test(htmlBg),
+    && /\.unit\.tapped \.ubody\{transform:rotate\(90deg\) scale\(\.72\)/.test(htmlBg),
     'стол board_arena.(png|jpg), углы/медальоны/пилюля хода/тап на месте');
   check('иконки героев укрупнены по MTG (медальон в бою и меню)',
     /--medal:clamp\(84px,11vh,120px\)/.test(htmlBg) && /\.heroChip\{[^}]*width:104px/.test(htmlBg)
@@ -634,13 +939,47 @@ const skip = (name, reason = 'не входит в текущий этап') => 
   const freeSide = b.engine.p(0).creatures.length < 7 ? 0 : (b.engine.p(1).creatures.length < 7 ? 1 : 0);
   const su = b.engine.summon(freeSide, plainC);
   b.renderAll();   // узел должен существовать, чтобы флоат взял координаты
+  const summonSigil = $('vfxLayer').querySelector('.vfx-summon-sigil.go');
+  const summonReveal = window.document.querySelector(`.unit[data-uid="${su.uid}"].summoning`);
+  check('призыв: проявляющийся сигил и анимация выхода существа', !!summonSigil && !!summonReveal,
+    `сигил ${!!summonSigil}, проявление ${!!summonReveal}`);
+  const savedKeywords = [...su.keywords];
+  su.keywords = [...su.keywords, 'Unblockable'];
+  b.renderAll();
+  const stealthVeil = window.document.querySelector(`.unit[data-uid="${su.uid}"] .stealthVeil`);
+  check('Неуловимость получает отдельный бирюзовый слой-маскировку', !!stealthVeil
+    && stealthVeil.getAttribute('aria-label') === 'Неуловимость', !!stealthVeil);
+  su.keywords = savedKeywords;
+  b.renderAll();
   b.engine.addStatus(su, { type: 'Shield', value: 1, turnsLeft: -1 });
+  b.renderAll();
+  const shieldBubble = window.document.querySelector(`.unit[data-uid="${su.uid}"] .shieldBubble`);
+  const bubbleLabel = shieldBubble?.getAttribute('aria-label') || '';
+  const shieldSigil = shieldBubble?.querySelector('i')?.textContent.trim() || '';
+  const shieldCount = shieldBubble?.querySelector('b')?.textContent.trim() || '';
   const hpS = su.health;
   const dealtS = b.engine.damageCreature(su, 5, { source: 'тест щита' });
   const shieldFloat = [...fl.children].some(n => (n.textContent || '').includes('🛡'));
-  check('щит поглощает удар целиком: на поле «🛡 0», hp существа не изменился',
-    dealtS === 0 && su.health === hpS && shieldFloat,
-    `урон ${dealtS}, hp ${hpS}→${su.health}, 🛡 ${shieldFloat ? 'показан' : 'НЕТ'}`);
+  check('щит: стеклянный купол, сигил и число зарядов; урон поглощается',
+    dealtS === 0 && su.health === hpS && shieldFloat && bubbleLabel.includes('зарядов: 1')
+      && shieldSigil === '⛨' && shieldCount === '1',
+    `урон ${dealtS}, hp ${hpS}→${su.health}, купол ${shieldSigil}/${shieldCount || 'НЕТ'}`);
+  const runeCard = [...b.engine.db.values()].find(c => c.type === 'Rune');
+  if (runeCard) {
+    const savedRunes = b.engine.p(0).runes;
+    b.engine.p(0).runes = [...savedRunes, {
+      uid: 999999, cardId: runeCard.id, owner: 0, name: runeCard.name, faction: runeCard.faction,
+      element: runeCard.element, turnsLeft: 2, data: runeCard, silenced: false,
+    }];
+    b.renderAll();
+    const runeChip = $('playerRunes').querySelector('.runeChip');
+    const runeVisible = !!runeChip?.querySelector('.runeSigil') && !!runeChip.querySelector('.runeClock')
+      && !!runeChip.querySelector('.runeCopy small');
+    check('руна: цветной сигил, длительность и подпись видны на поле', runeVisible,
+      runeChip?.getAttribute('aria-label') || 'чип руны отсутствует');
+    b.engine.p(0).runes = savedRunes;
+    b.renderAll();
+  } else check('руна: цветной сигил, длительность и подпись видны на поле', false, 'карта-руна не найдена');
   // урон заклинанием вне боя: число на слое + hp-бейдж обновлён после renderAll
   const freeSide2 = b.engine.p(1).creatures.length < 7 ? 1 : (b.engine.p(0).creatures.length < 7 ? 0 : 1);
   const su2 = b.engine.summon(freeSide2, plainC);
@@ -717,6 +1056,14 @@ const skip = (name, reason = 'не входит в текущий этап') => 
     htmlSrc.includes('id="deckArtPickerModal"') && htmlSrc.includes('id="btnDbAvatarGallery"')
       && jsSrc.includes('openSavedDeckArtPicker') && jsSrc.includes('openEditorDeckArtPicker'),
     'можно выбрать любую карту состава и сохранить её как обложку');
+  const deckHeroArtRoot = pathMod.resolve(__dirname, '..', 'art_raw', 'deck_heroes');
+  const deckHeroFolders = fsMod.readdirSync(deckHeroArtRoot).filter(name => fsMod.statSync(pathMod.join(deckHeroArtRoot, name)).isDirectory());
+  const deckHeroServeSource = fsMod.readFileSync(pathMod.resolve(__dirname, '..', 'tools', 'serve.js'), 'utf8');
+  const deckHeroProcessorSource = fsMod.readFileSync(pathMod.resolve(__dirname, '..', 'tools', 'process_art.py'), 'utf8');
+  check('15 каталогов портретов и отдельные маршруты/пайплайн готовы без предсоздания артов',
+    deckHeroFolders.length === 15 && deckHeroServeSource.includes('/deck-heroes/')
+      && deckHeroProcessorSource.includes("'Resources', 'DeckHeroes'") && deckHeroProcessorSource.includes('deck_heroes'),
+    `${deckHeroFolders.length} папок; файлы изображений добавляются вручную`);
   // Обычная карта возвращает рамку и нижнее текстовое поле; отдельный Borderless-слой не меняется.
   check('обычная карта: внутренняя рамка и нижний блок текста; Borderless без изменений',
     /\.card:not\(\.borderless\)\{[^}]*border:2px solid/.test(cssSrc)
@@ -727,7 +1074,7 @@ const skip = (name, reason = 'не входит в текущий этап') => 
     && /\.card\.borderless \.ctext[^\{]*\{[^}]*background:transparent!important/.test(cssSrc),
     'обычная версия — рамка, внутренний кант и нижняя панель правил; полноформатный Borderless неизменен');
   check('скин стола имеет приоритет над фоном фракции и кадрируется одинаково',
-    /const tableUrl = \[`\/cosm\/tables\//.test(jsSrc) && /applyBattleBg\(picked\)/.test(jsSrc)
+    /const tableUrl = \[`\/cosm\/tables\//.test(jsSrc) && /applyBattleBg\((?:picked|battle\.playerFaction)\)/.test(jsSrc)
     && /#backdrop img#battleBgImg\{object-fit:cover!important;object-position:center center!important\}/.test(cssSrc)
     && /#backdrop \.bgArt\{background-position:center center!important;background-size:cover!important/.test(cssSrc),
     'выбранный /cosm/tables/<skin> пробуется первым, image и CSS-фон используют center/cover');
@@ -769,6 +1116,7 @@ const skip = (name, reason = 'не входит в текущий этап') => 
       && /\.card:not\(\.borderless\) \.ctext\{[\s\S]*?background:linear-gradient\(180deg,#e9dab6,#d3bf92\)!important/.test(protoCss)
       && /\.card\.r-rare:hover/.test(protoCss) && /\.card\.r-epic:hover/.test(protoCss)
       && /\.card\.r-legendary:hover/.test(protoCss)
+      && /shieldBubble i/.test(protoCss) && /shieldBubblePulse/.test(protoCss)
       && /@media\(prefers-reduced-motion:reduce\)/.test(protoCss)
       && /\.card\.t-spell \.ctype\{/.test(htmlSrc) && /\.unit\.ready \.ubody\{/.test(htmlSrc)
       && /classList\.add\(["']ready["']\)/.test(jsBundle) && /t-\$\{/.test(jsBundle),
@@ -777,8 +1125,10 @@ const skip = (name, reason = 'не входит в текущий этап') => 
     check('кладбище зоной на поле + ландшафт фона + ПКМ-обработчик',
       /id="playerGraveZone"/.test(htmlSrc) && /id="enemyGraveZone"/.test(htmlSrc)
       && /\.graveRow\{/.test(htmlSrc) && /class="bgArt"/.test(htmlSrc)
+      && /--pile-card-w:calc\(var\(--uw\) \* 1\.05\)/.test(protoCss)
+      && /#battle \.corner \.pbacks,#battle \.corner \.graveRow/.test(protoCss)
       && /contextmenu/.test(jsBundle) && /renderGraveZone/.test(jsBundle),
-      'зоны кладбища рубашками вверх по обе стороны центральной линии, ландшафт 1600×900, ПКМ-отмена');
+      'кладбище и колода одинаково крупные (.84 размера существа после масштаба), рядом без наложения');
     check('таргетинг/кладбище/рубашки/зум-синк в интерфейсе',
       /id="enemyBacks"/.test(htmlSrc) && /id="aimLayer"/.test(htmlSrc) && /id="graveModal"/.test(htmlSrc)
       && /\.cardback\{/.test(htmlSrc) && /openGrave/.test(jsBundle) && /aimStart/.test(jsBundle)
@@ -813,6 +1163,11 @@ const skip = (name, reason = 'не входит в текущий этап') => 
     && /--hand-w:clamp\(150px,12\.5vw,196px\)/.test(htmlSrc)
     && /@media \(max-width:920px\)/.test(htmlSrc) && /@media \(max-height:740px\)/.test(htmlSrc),
     'коллекция/рука/модалка/док масштабируются от экрана; брейкпоинты 1180/920/740');
+  check('навигация: мягкий вход экранов, учёт reduced motion и удобная горизонтальная прокрутка на телефоне',
+    /@keyframes ecRouteArrival/.test(cssSrc) && /@keyframes ecSubpanelArrival/.test(cssSrc)
+    && /@media\(prefers-reduced-motion:reduce\)/.test(cssSrc)
+    && /\.ecQuickNav\{scroll-behavior:smooth;scroll-snap-type:x proximity\}/.test(cssSrc)
+    && /@media\(max-width:760px\)\{\.ecQuickNav button\{min-height:40px\}/.test(cssSrc));
   // модалка: клик по карте коллекции открывает описание
   click($('btnCollection'));
   await wait(40);
@@ -840,9 +1195,10 @@ const skip = (name, reason = 'не входит в текущий этап') => 
   // конструктор колод
   click($('tabBuilder'));
   await wait(60);
-  check('вкладка «Конструктор колод» открывает редактор с выбором обложки', !$('dbMain').classList.contains('hidden')
-    && $('dbPoolGrid').children.length > 20 && !!$('dbAvatarCard') && !!$('dbAvatarPreview') && !!$('btnDbAvatarGallery'),
-    `пул: ${$('dbPoolGrid').children.length} карт · список + визуальная галерея`);
+  check('редактор разделяет выбор карточной обложки и визуального героя колоды', !$('dbMain').classList.contains('hidden')
+    && $('dbPoolGrid').children.length > 20 && !!$('dbAvatarCard') && !!$('dbAvatarPreview') && !!$('btnDbAvatarGallery')
+    && !!$('dbHeroPreview') && !!$('btnDbHeroPicker'),
+    `пул: ${$('dbPoolGrid').children.length} карт · галереи обложки и героя раздельны`);
   const poolCard = [...$('dbPoolGrid').children].find(n => n.classList.contains('card'));
   click(poolCard);
   await wait(30);
@@ -929,6 +1285,46 @@ const skip = (name, reason = 'не входит в текущий этап') => 
   check('пользовательская колода на 60 карт и выбранная обложка сохраняются для боя',
     !!resolved && resolved.cards.length === 60 && resolved.avatarCardId === custom[0] && D.list().length >= 1,
     resolved ? `${resolved.name}, ${resolved.cards.length} карт · avatar ${resolved.avatarCardId ?? '—'}` : 'нет');
+
+  // Arena-подобный goldfish тест: 5 карт, одна пересдача, статистика без изменения колоды.
+  click($('tabBuilder'));
+  $('dbMyDecks').value = 'custom-smoke';
+  $('dbMyDecks').dispatchEvent(new window.Event('change'));
+  await wait(30);
+  const dbCountBeforeHandTest = $('dbCount').textContent;
+  const realRandom = window.Math.random;
+  let handTesterOpen = false, handTesterMulligan = false, handTesterReset = false, handTesterSafe = false;
+  try {
+    window.Math.random = () => 0;
+    click($('btnDbHandTest'));
+    const firstHand = [...$('dbHandCards').querySelectorAll('.card')];
+    handTesterOpen = !$('dbHandModal').classList.contains('hidden') && firstHand.length === 5
+      && $('dbHandDeckStats').querySelectorAll('.dbHandMetric').length === 5
+      && $('dbHandDeckStats').textContent.includes('60');
+    if (firstHand[0]) click(firstHand[0]);
+    const markedForSwap = !!$('dbHandCards').querySelector('.card.isMulliganSelected')
+      && !$('btnDbHandMulligan').disabled;
+    click($('btnDbHandMulligan'));
+    handTesterMulligan = markedForSwap && $('dbHandCards').querySelectorAll('.card').length === 5
+      && /Муллиган выполнен/.test($('dbHandStatus').textContent)
+      && $('btnDbHandMulligan').disabled && !$('dbHandCards').querySelector('.isMulliganSelected');
+    click($('btnDbHandDeal'));
+    handTesterReset = $('dbHandCards').querySelectorAll('.card').length === 5
+      && $('btnDbHandMulligan').disabled && /Отметьте неподходящие/.test($('dbHandStatus').textContent);
+    handTesterSafe = $('dbCount').textContent === dbCountBeforeHandTest
+      && D.resolve('custom-smoke')?.cards.length === 60;
+    key('Escape');
+  } finally {
+    window.Math.random = realRandom;
+    if (!$('dbHandModal').classList.contains('hidden')) click($('btnDbHandDone'));
+  }
+  check('редактор показывает 5-карточную пробную руку и краткую статистику колоды', handTesterOpen,
+    `рука ${$('dbHandCards').querySelectorAll('.card').length}, метрик ${$('dbHandDeckStats').querySelectorAll('.dbHandMetric').length}`);
+  check('муллиган заменяет отмеченные карты один раз и новая раздача сбрасывает его', handTesterMulligan && handTesterReset,
+    `пересдача ${handTesterMulligan}, сброс ${handTesterReset}`);
+  check('симулятор не меняет состав сохранённой колоды и закрывается по Esc',
+    handTesterSafe && $('dbHandModal').classList.contains('hidden'),
+    `колода ${$('dbCount').textContent}; модалка закрыта=${$('dbHandModal').classList.contains('hidden')}`);
   D.remove('custom-smoke');
   click($('tabCollection'));
   await wait(30);
@@ -946,6 +1342,49 @@ const skip = (name, reason = 'не входит в текущий этап') => 
   const fin = stat();
   check('партия завершилась', !$('gameover').classList.contains('hidden'), `ход ${fin.turn}, HP ${fin.hp}`);
   check('экран конца игры показывает статистику', $('goStats').children.length === 8, `${$('goStats').children.length} блоков`);
+  const savedReplay = window.ecMeta().replays?.[0];
+  click($('btnGoRecap'));
+  await wait(40);
+  const recapOpened = !$('replayModal').classList.contains('hidden')
+    && !!$('replaySummary').querySelector('.rpMatchup')
+    && $('replaySummary').querySelectorAll('.rpStat').length >= 8
+    && $('replayBody').querySelectorAll('.rpLine').length > 0;
+  check('результат матча открывает сводку и хронологию реплея', recapOpened
+    && !!savedReplay?.stats?.player && Array.isArray(savedReplay?.lines),
+    `статистика сохранена=${!!savedReplay?.stats?.player}, событий ${$('replayBody').querySelectorAll('.rpLine').length}`);
+  const firstReplayEvent = $('replayBody').querySelector('.rpLine');
+  const firstReplayKind = firstReplayEvent?.dataset.kind || 'all';
+  $('replayKind').value = firstReplayKind;
+  $('replayKind').dispatchEvent(new window.Event('change', { bubbles: true }));
+  const kindFiltered = $('replayBody').querySelectorAll('.rpLine').length > 0
+    && [...$('replayBody').querySelectorAll('.rpLine')].every(line => line.dataset.kind === firstReplayKind);
+  const filteredTurn = $('replayBody').querySelector('.rpLine')?.dataset.turn || 'all';
+  $('replayTurn').value = filteredTurn;
+  $('replayTurn').dispatchEvent(new window.Event('change', { bubbles: true }));
+  const turnFiltered = [...$('replayBody').querySelectorAll('.rpLine')].every(line => line.dataset.turn === filteredTurn);
+  const searchTarget = [...$('replayBody').querySelectorAll('.rpEventText')]
+    .map(line => line.textContent?.trim() || '').find(Boolean) || '';
+  const replayNeedle = searchTarget.slice(0, Math.min(10, searchTarget.length));
+  $('replaySearch').value = replayNeedle;
+  $('replaySearch').dispatchEvent(new window.Event('input', { bubbles: true }));
+  const searchFiltered = !!replayNeedle && $('replayBody').querySelectorAll('.rpLine').length > 0
+    && [...$('replayBody').querySelectorAll('.rpEventText')]
+      .every(line => (line.textContent || '').toLocaleLowerCase().includes(replayNeedle.toLocaleLowerCase()));
+  click($('btnReplayReset'));
+  const resetCount = $('replayBody').querySelectorAll('.rpLine').length;
+  click($('btnReplayPlay'));
+  const playbackStarted = $('btnReplayPlay').getAttribute('aria-pressed') === 'true'
+    && !!$('replayBody').querySelector('.rpLine.replayNow');
+  $('replaySpeed').value = '1.6';
+  $('replaySpeed').dispatchEvent(new window.Event('change', { bubbles: true }));
+  click($('btnReplayPlay'));
+  const playbackPaused = $('btnReplayPlay').getAttribute('aria-pressed') === 'false';
+  click($('btnReplayClose'));
+  await wait(20);
+  check('реплей: поиск, фильтры по типу/ходу, сброс и управление воспроизведением',
+    kindFiltered && turnFiltered && searchFiltered && resetCount > 0 && playbackStarted && playbackPaused
+      && $('replayModal').classList.contains('hidden'),
+    `тип ${kindFiltered}, ход ${turnFiltered}, поиск ${searchFiltered}, play/pause ${playbackStarted}/${playbackPaused}`);
   // ручная атака стрелкой: свежая партия, стадия боя с окном объявления атак
   {
     click($('btnAgain'));
@@ -966,12 +1405,26 @@ const skip = (name, reason = 'не входит в текущий этап') => 
       && !$('btnAutoBattle').classList.contains('hidden'), `фаза ${e2.phase}, win ${b.inCombatWindow}`);
     const pn = doc.querySelector(`.unit[data-uid="${u1.uid}"]`);
     const en = doc.querySelector(`.unit[data-uid="${u2.uid}"]`);
+    // Убийство защитника вызывает мгновенный урон герою: HP должно идти
+    // вместе с атакой, а не оставаться на старом снимке до конца хода.
+    const heroHpBeforeDeathrattle = e2.p(0).health;
+    u1.attack = Math.max(5, u1.attack);
+    u2.health = 1;
+    u2.statuses = u2.statuses.filter(s => s.type !== 'Shield');
+    u2.data = { ...u2.data, onDeath: [{ op: 'damage', to: 'EnemyHero', value: 3 }] };
     click(pn);
     const aimShown = $('aimLayer').classList.contains('show') && !!en && en.classList.contains('targetable');
+    const targetForecast = en?.querySelector('.combatForecast');
+    const targetForecastOk = !!targetForecast && /УБЬЁТ/.test(targetForecast.textContent)
+      && /Ответ/.test(targetForecast.textContent)
+      && (targetForecast.classList.contains('lethal') || targetForecast.classList.contains('trade'));
+    check('MTG Arena: цель до атаки показывает летальность и ответный удар', targetForecastOk,
+      targetForecast?.textContent.trim() ?? 'прогноза нет');
     // ПКМ отменяет выбор атакующего (как в MTG)
     doc.dispatchEvent(new window.MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
-    const rmbOk = !$('aimLayer').classList.contains('show') && b.pendingAttack === null;
-    check('ПКМ отменяет стрелку/выбор цели (как в MTG)', rmbOk);
+    const rmbOk = !$('aimLayer').classList.contains('show') && b.pendingAttack === null
+      && !doc.querySelector('.combatForecast,.heroCombatForecast');
+    check('ПКМ отменяет стрелку, прогноз и выбор цели (как в MTG)', rmbOk);
     click(pn);   // снова берём стрелку
     const hpBefore = u2.health;
     click(en);
@@ -981,18 +1434,30 @@ const skip = (name, reason = 'не входит в текущий этап') => 
     check('атака стрелкой: своё существо бьёт существо противника',
       aimShown && q > 0 && (alive === undefined || alive.health < hpBefore),
       `стрелка: ${aimShown ? 'да' : 'нет'}, очередь ${q}, hp ${hpBefore}→${alive ? alive.health : 'мертв'}`);
+    const triggerHpVisible = await waitUntil(() => e2.p(0).health === heroHpBeforeDeathrattle - 3
+      && Number($('playerHp').textContent) === e2.p(0).health, 3500);
+    check('урон героя от deathrattle виден в бою сразу после смерти существа',
+      triggerHpVisible && b.inCombatWindow,
+      `герой ${heroHpBeforeDeathrattle}→${e2.p(0).health}, UI ${$('playerHp').textContent}, фаза боя ${b.inCombatWindow}`);
     // тап: третье существо бьёт героя и остаётся повёрнутым на 90°
     const u3 = e2.summon(0, plain); u3.justPlayed = false; u3.summonedOnTurn = -9;
     u3.keywords = [...u3.keywords, 'Windfury']; // проверяем состояние после первой из двух атак
     b.renderAll();
     const p3 = doc.querySelector(`.unit[data-uid="${u3.uid}"]`);
     click(p3);
+    const heroForecast = $('enemyHero').querySelector('.heroCombatForecast');
+    const heroForecastOk = !!heroForecast && heroForecast.textContent.includes(`−${u3.attack} HP`);
+    check('прямой удар заранее показывает ожидаемый урон герою', heroForecastOk, heroForecast?.textContent ?? 'прогноза нет');
     click($('enemyHero'));
+    const tapMotionCss = fs.readFileSync(path.join(ROOT, 'src/ui/prototype.css'), 'utf8');
+    const trueQuarterTurn = html.includes('rotate(90deg) scale(.72)')
+      && tapMotionCss.includes('@keyframes unitTapTurn') && tapMotionCss.includes('@keyframes unitUntapTurn');
     const tappedOk = await waitUntil(() => {
       const n = doc.querySelector(`.unit[data-uid="${u3.uid}"]`);
-      return !!n && n.classList.contains('tapped');
+      return !!n && n.dataset.tapped === 'true' && n.classList.contains('tapped');
     }, 5000);
-    check('атаковавшее существо тапнуто (повёрнуто на 90°, как в MTG)', tappedOk);
+    check('атаковавшее существо повёрнуто на 90° с tap-анимацией', tappedOk && trueQuarterTurn,
+      `DOM tap ${tappedOk}, CSS 90° + tap/untap ${trueQuarterTurn}`);
     const repeatedAttackOk = await waitUntil(() => {
       const n = doc.querySelector(`.unit[data-uid="${u3.uid}"]`);
       const mark = n?.querySelector('.attackReadyMark');
@@ -1009,6 +1474,18 @@ const skip = (name, reason = 'не входит в текущий этап') => 
       return u3.attacksThisTurn === 2 && !b.engine.canAttack(u3) && !n?.querySelector('.attackReadyMark');
     }, 5000);
     check('после второй атаки метка повторной атаки снимается', secondAttackOk);
+    const vigilanceCard = [...e2.db.values()].find(c => c.type === 'Creature' && (c.keywords || []).includes('Vigilance'));
+    const vanguard = vigilanceCard ? e2.summon(0, vigilanceCard) : null;
+    if (vanguard) { vanguard.justPlayed = false; vanguard.summonedOnTurn = -5; b.renderAll(); }
+    const vigilanceAttack = !!vanguard && e2.manualAttack(0, vanguard.uid, undefined, true);
+    if (vanguard) b.renderAll();
+    const vigilanceNode = vanguard && doc.querySelector(`.unit[data-uid="${vanguard.uid}"]`);
+    const vigilancePip = vigilanceNode?.querySelector('.pip[title="Бдительность"]');
+    const vigilanceUiOk = !!vanguard && vigilanceAttack && !vanguard.tapped && vanguard.attacksThisTurn === 1
+      && !e2.canAttack(vanguard) && !!vigilanceNode?.classList.contains('vigilant')
+      && !vigilanceNode?.classList.contains('tapped') && !!vigilancePip;
+    check('Бдительность: UI показывает ключевое слово, существо после атаки не повёрнуто', vigilanceUiOk,
+      `attack=${vigilanceAttack}, tapped=${vanguard?.tapped}, badge=${!!vigilancePip}`);
     const closedOk = await waitUntil(() => !b.inCombatWindow, 9000);
     check('окно атак закрылось после доигрывания', closedOk);
     b.manualCombat = false;
@@ -1092,9 +1569,8 @@ const skip = (name, reason = 'не входит в текущий этап') => 
   const stockAfterOpen = Number((stockNode()?.textContent || '×0').replace(/[^0-9]/g, ''));
   const paid = shardsAfterBuy === shards0 - 300;
   const consumedOne = selectionDidNotSpend && stockAfterOpen === stockBefore;
-  const cannotSwitchAfterReveal = $('packStage').classList.contains('hasResults')
-    && $('boosterInventory').querySelectorAll('.boosterInvCard:not(:disabled)').length === 0
-    && $('boosterInventory').querySelector('.boosterInvCard[data-pack="standard"]')?.classList.contains('selected');
+  const canSwitchAfterReveal = $('packStage').classList.contains('hasResults')
+    && $('boosterInventory').querySelectorAll('.boosterInvCard:not(:disabled)').length > 0;
   const flipAll = $('btnPackFlip');
   if (flipAll && !flipAll.disabled) click(flipAll);
   await wait(800); // пять карт плюс шестая только если выпал редкий Borderless-бонус
@@ -1110,6 +1586,18 @@ const skip = (name, reason = 'не входит в текущий этап') => 
   const tpack = window.ecTestPack('aur_31');
   const capOk = tpack.ownedCap === 4 && tpack.converted >= 1 &&
     tpack.shardsAfter === tpack.shardsBefore + tpack.converted;
+  const premiumStockBeforeNext = Number(($('boosterInventory')?.querySelector('[data-pack="premium"] .boosterInvCount')?.textContent || '×0').replace(/[^0-9]/g, ''));
+  const premiumAfterReveal = $('boosterInventory').querySelector('.boosterInvCard[data-pack="premium"]:not(:disabled)');
+  if (premiumAfterReveal) click(premiumAfterReveal);
+  await wait(50);
+  const switchedAfterReveal = canSwitchAfterReveal && premiumStockBeforeNext > 0
+    && $('packTypeSubtitle').textContent.includes('Премиум-бустер')
+    && !$('packSealed').classList.contains('hidden');
+  if (switchedAfterReveal) click($('packSealed'));
+  await wait(700);
+  const premiumStockAfterNext = Number(($('boosterInventory')?.querySelector('[data-pack="premium"] .boosterInvCount')?.textContent || '×0').replace(/[^0-9]/g, ''));
+  const nextPackOpened = switchedAfterReveal && $('packStage').classList.contains('hasResults')
+    && premiumStockAfterNext === premiumStockBeforeNext - 1;
   click($('btnPackClose'));
   await wait(40);
   const focusRestored = window.document.activeElement === $('btnBoosters');
@@ -1118,8 +1606,9 @@ const skip = (name, reason = 'не входит в текущий этап') => 
     `начальный фокус ${focusAtOpen}, Tab ${tabWrapForward}/${tabWrapBackward}, возврат ${focusRestored}`);
   check('бустер: 5 карт + возможный отдельный Borderless-бонус, флип и лимит копий',
     storeOpened && addedAsSealedPack && sealedShown && switchedToPremium && selectionDidNotSpend
-      && regularPackSlots.length === 5 && borderlessPackSlots.length <= 1 && paid && consumedOne && flipOk && capOk && cannotSwitchAfterReveal,
-    `магазин ${storeOpened ? 'да' : 'нет'}, переключение ${switchedToPremium ? 'да' : 'нет'}, запас ${stockBefore}→${stockAfterBuy}→${stockAfterSelect}→${stockAfterOpen}, после вскрытия заблокировано ${cannotSwitchAfterReveal}, ◈ ${shards0}→${shardsAfterBuy}, слотов ${packSlots} (базовых ${regularPackSlots.length}, Borderless ${borderlessPackSlots.length}), флип ${flipOk ? 'да' : 'нет'}, cap ${tpack.ownedCap}, конверт ◈${tpack.converted}`);
+      && regularPackSlots.length === 5 && borderlessPackSlots.length <= 1 && paid && consumedOne && flipOk && capOk
+      && canSwitchAfterReveal && switchedAfterReveal && nextPackOpened,
+    `магазин ${storeOpened ? 'да' : 'нет'}, переключение до/после вскрытия ${switchedToPremium}/${switchedAfterReveal}, запас ${stockBefore}→${stockAfterBuy}→${stockAfterSelect}→${stockAfterOpen}, следующий пак ${nextPackOpened ? 'открыт' : 'нет'}, ◈ ${shards0}→${shardsAfterBuy}, слотов ${packSlots} (базовых ${regularPackSlots.length}, Borderless ${borderlessPackSlots.length}), флип ${flipOk ? 'да' : 'нет'}, cap ${tpack.ownedCap}, конверт ◈${tpack.converted}`);
   check('бустер открывает карты базового набора вне starter и карты расширения',
     starterCollectionOk && baseUnlockedFromBooster && window.ecOwnedOf('aur_31') === 4
       && window.ecIsExp('aur_31') && !window.ecIsExp(nonStarterBaseId) && packPoolOk
@@ -1160,6 +1649,32 @@ const skip = (name, reason = 'не входит в текущий этап') => 
   await wait(50);
   check('вкладка «Фракции»: клик по строке → винрейт против каждой фракции',
     !!window.document.querySelector('#profBody .facDetail') && /винрейт против фракций/.test($('profBody').textContent));
+  const legacyTs = Date.now() - 424242;
+  const profileMeta = window.ecMeta();
+  profileMeta.history.unshift({ ts: legacyTs, win: false, fac: 'Aurites', turns: 3, foe: 'Архивный соперник', efac: 'Necrus' });
+  profileMeta.replays.unshift({ ts: legacyTs, win: false, fac: 'Aurites', turns: 3, foe: 'Архивный соперник',
+    lines: [[1, 'Игрок разыгрывает карту «Пробный дозор»'], [2, 'Соперник наносит 3 урона герою']] });
+  profileMeta.replays = profileMeta.replays.slice(0, 3);
+  click(window.document.querySelector('[data-ptab="hist"]'));
+  await wait(40);
+  const legacyButton = window.document.querySelector(`.replayBtn[data-ts="${legacyTs}"]`);
+  if (legacyButton) click(legacyButton);
+  await wait(40);
+  const legacyOpen = !$('replayModal').classList.contains('hidden')
+    && !!$('replaySummary').querySelector('.rpLegacyNote') && $('replayBody').querySelectorAll('.rpLine').length === 2;
+  $('replayKind').value = 'play';
+  $('replayKind').dispatchEvent(new window.Event('change', { bubbles: true }));
+  const legacyKindOk = $('replayBody').querySelectorAll('.rpLine').length === 1
+    && $('replayBody').querySelector('.rpLine')?.dataset.turn === '1';
+  $('replayKind').value = 'all';
+  $('replayTurn').value = '2';
+  $('replayTurn').dispatchEvent(new window.Event('change', { bubbles: true }));
+  const legacyTurnOk = $('replayBody').querySelectorAll('.rpLine').length === 1
+    && $('replayBody').querySelector('.rpLine')?.dataset.turn === '2';
+  click($('btnReplayClose'));
+  check('старые tuple-реплеи открываются без статистики и остаются фильтруемыми',
+    !!legacyButton && legacyOpen && legacyKindOk && legacyTurnOk,
+    `открыт ${legacyOpen}, фильтр типа ${legacyKindOk}, хода ${legacyTurnOk}`);
   click($('btnProfileClose'));
   await wait(30);
   check('Level Up + частицы, тост достижений, серверная синхронизация профиля',
@@ -1265,26 +1780,28 @@ const skip = (name, reason = 'не входит в текущий этап') => 
     && /"aur_09", "aur_01", "aur_03", "aur_s01"/.test(jsSrc), 'муллиган в уроках пропущен, рука заскриптована');
   check('обучение v3: гейты уроков — L1 руна/заклинание/существо (spellsCast), конец хода только на шагах «Завершите ход»',
     /tutStat\(["']spellsCast["']\) >= 1/.test(jsSrc) && /tutAllDone/.test(jsSrc) && /allow\.includes\(["']#btnEndTurn["']\)/.test(jsSrc), 'endTurnNow не пускает без выполнения');
-  const prac0 = window.document.getElementById('chkPractice').disabled;
   window.ecSetTut(4, true);
   const prac1 = window.document.getElementById('chkPractice').disabled;
   check('обучение v2.5.1: гейт тренировки (спека 6.3) — до обучения выключена, после включена',
-    prac0 === true && prac1 === false && /cp\.disabled = !meta\.tutDone/.test(jsSrc) && /после 🎓 обучения/.test(htmlBg),
-    `chkPractice.disabled ${prac0}→${prac1}`);
+    practiceLockedAtStart === true && prac1 === false && /cp\.disabled = !meta\.tutDone/.test(jsSrc) && /после 🎓 обучения/.test(htmlBg),
+    `chkPractice.disabled ${practiceLockedAtStart}→${prac1}`);
   const fo0 = window.ecFreeOpens(); const gm0 = window.ecGems();
   click($('btnTour'));   // кнопка меню «🎓 Обучение» открывает хаб уроков (openTut)
   await wait(50);
   const starts = $('tutBody').querySelectorAll('.tutStart').length;
   const picks = $('tutBody').querySelectorAll('.tutPick').length;
-  const pick0 = $('tutBody').querySelector('.tutPick');
-  if (pick0) click(pick0);
-  await wait(60);
-  const rewOk = window.ecFreeOpens() === fo0 + 5 && window.ecGems() === gm0 + 100;
+  const rewardReceipt = /Награда получена/.test($('tutBody').textContent || '');
+  const rewardNotDuplicated = window.ecFreeOpens() === fo0 && window.ecGems() === gm0;
   click($('btnTutClose'));
   await wait(30);
-  check('обучение v2.5.1: награда (спека 6.2) — 4 урока, выбор фракции → колода + 5 бустеров + 💎100',
-    starts === 4 && picks === 5 && rewOk,
-    `уроков ${starts}, фракций ${picks}, freeOpens ${fo0}→${window.ecFreeOpens()}, 💎 ${gm0}→${window.ecGems()}`);
+  check('обучение v2.5.1: награда +5 бустеров и 💎100 выдаётся один раз и видна в хабе',
+    starts === 4 && picks === 0 && rewardReceipt && rewardNotDuplicated && introRewardGranted,
+    `уроков ${starts}, повторных кнопок выбора ${picks}, квитанция ${rewardReceipt ? 'да' : 'нет'}, валюта ${fo0}/${gm0} сохранена`);
+  check('прогресс пролога синхронизируется между устройствами без ранней разблокировки',
+    /introComplete: !!meta\.introComplete/.test(protoUiSrc) && /introFactionsSeen: meta\.introFactionsSeen/.test(protoUiSrc)
+    && /introFactionsSeen: string\[\]/.test(serverProfileSrc) && /starterDecksUnlocked: boolean/.test(serverProfileSrc)
+    && /сервер сохраняет пролог между устройствами, не открывая колоды до выбора награды/.test(onlineTestSrc),
+    'локальный профиль, API /api/profile и повторное чтение стартовой синхронизации');
   check('v2.3 пропуск: 50 уровней, премиум-ветка, «Забрать всё», таймер сезона',
     /BP_LEVELS = 50/.test(jsSrc) && /bpClaimedP/.test(jsSrc) && /bpClaimAll/.test(jsSrc) && /seasonDaysLeft/.test(jsSrc),
     'две ветки наград и сезон 30 дней');
@@ -1432,19 +1949,85 @@ const skip = (name, reason = 'не входит в текущий этап') => 
   const coverPersisted = playApi.list().find(deck => deck.id === 'custom-e2e-flow');
   window.openHomeScreen();
   const homeDeckCard = window.document.querySelector('#playerFactions .customDeckCard[data-deck-id="custom-e2e-flow"]');
+  const expectedPlayArtUrl = cardArtUrlFor(playIds[7]);
   const homeDeckTextAndArt = !!homeDeckCard
     && homeDeckCard.querySelector('.fname')?.textContent === 'Проверка обложки'
     && homeDeckCard.querySelector('.fclass')?.textContent.includes('Constructed')
-    && (homeDeckCard.querySelector('.fcardArtImg')?.getAttribute('src') || '').includes(`/art/Aurites/${playIds[7]}.png`);
+    && (homeDeckCard.querySelector('.fcardArtImg')?.getAttribute('src') || '') === expectedPlayArtUrl;
   check('моя колода появляется под архетипами с именем игрока и выбранным артом', homeDeckTextAndArt,
     `плитка ${homeDeckCard?.querySelector('.fname')?.textContent ?? 'не найдена'}; art ${homeDeckCard?.querySelector('.fcardArtImg')?.getAttribute('src') ?? '—'}`);
   window.openDecksScreen();
-  const playBox = window.document.querySelector('#deckGrid [data-deck-id="custom-e2e-flow"]');
+  let playBox = window.document.querySelector('#deckGrid [data-deck-id="custom-e2e-flow"]');
+  const heroApi = window.__deckHeroes;
+  const heroCatalog = heroApi?.catalog ?? [];
+  const heroCatalogOk = heroCatalog.length === 15
+    && ['standard', 'coin', 'donation'].every(tier => heroCatalog.filter(hero => hero.tier === tier).length === 5)
+    && new Set(heroCatalog.map(hero => hero.id)).size === 15;
+  check('каталог визуальных героев включает 5 стандартных, 5 монетных и 5 донатных', heroCatalogOk,
+    `${heroCatalog.length} героев`);
+  window.ecSetShards(5000);
+  if (playBox) click(playBox);
+  const heroPickerButton = $('btnDecksHero');
+  if (!heroPickerButton.disabled) click(heroPickerButton);
+  const heroOptions = [...$('deckHeroPickerGrid').querySelectorAll('.deckHeroOption[data-hero-id]')];
+  const factionHeroOptions = !$('deckHeroPickerModal').classList.contains('hidden') && heroOptions.length === 3
+    && heroOptions.every(option => heroCatalog.find(hero => hero.id === option.dataset.heroId)?.faction === 'Aurites')
+    && heroOptions.every(option => option.querySelector('.deckHeroOptionArt')?.getAttribute('src') === `/deck-heroes/${option.dataset.heroId}`);
+  const coinHeroAction = heroOptions.find(option => option.dataset.heroId === 'aurites-veteran')?.querySelector('[data-hero-action]');
+  const donationHeroAction = heroOptions.find(option => option.dataset.heroId === 'aurites-ascendant')?.querySelector('[data-hero-action]');
+  const donationIsShowcase = !!donationHeroAction && donationHeroAction.disabled
+    && /скоро|донат/i.test(donationHeroAction.textContent || '')
+    && /платёжный провайдер/i.test(heroOptions.find(option => option.dataset.heroId === 'aurites-ascendant')?.textContent || '');
+  const shardsBeforeDonationAttempt = window.ecShards();
+  const gemsBeforeDonationAttempt = window.ecMeta().gems;
+  if (donationHeroAction) click(donationHeroAction); // проверка: даже принудительный DOM-клик не запускает оплату
+  const donationNoCharge = window.ecShards() === shardsBeforeDonationAttempt
+    && window.ecMeta().gems === gemsBeforeDonationAttempt;
+  const shardsBeforeHeroPurchase = window.ecShards();
+  if (coinHeroAction && !coinHeroAction.disabled) click(coinHeroAction);
+  const selectedHeroForDeck = heroApi?.forDeck('custom-e2e-flow', 'Aurites');
+  const storedHeroMeta = JSON.parse(window.localStorage.getItem('ec_meta_v1') || '{}');
+  const heroPurchaseOk = selectedHeroForDeck === 'aurites-veteran'
+    && window.ecShards() === shardsBeforeHeroPurchase - 2000
+    && window.ecMeta().deckHeroesOwned.includes('aurites-veteran')
+    && storedHeroMeta.deckHeroesOwned?.includes('aurites-veteran')
+    && storedHeroMeta.deckHeroes?.['custom-e2e-flow'] === 'aurites-veteran'
+    && heroApi.forDeck('starter_necrus', 'Necrus') === 'Necrus'
+    && $('deckHeroPickerModal').classList.contains('hidden')
+    && playApi.list().find(deck => deck.id === 'custom-e2e-flow')?.avatarCardId === playIds[7];
+  check('для колоды показаны только герои её фракции; донат виден, но не списывает монеты или гемы',
+    factionHeroOptions && donationIsShowcase && donationNoCharge,
+    `вариантов ${heroOptions.length}, донат недоступен ${!!donationHeroAction?.disabled}`);
+  check('монетный герой покупается за 2000 и назначается только этой колоде отдельно от обложки', heroPurchaseOk,
+    `герой ${selectedHeroForDeck ?? '—'}, монеты ${shardsBeforeHeroPurchase}→${window.ecShards()}`);
+  window.openHomeScreen();
+  playBox = window.document.querySelector('#playerFactions .customDeckCard[data-deck-id="custom-e2e-flow"]');
+  const homeCustomCoverStillSeparate = (playBox?.querySelector('.fcardArtImg')?.getAttribute('src') || '') === expectedPlayArtUrl
+    && !playBox?.querySelector('.menuDeckHeroBadge');
+  check('у пользовательской колоды сохранена карточная обложка без значка героя поверх арта', homeCustomCoverStillSeparate,
+    `обложка ${playBox?.querySelector('.fcardArtImg')?.getAttribute('src') ?? '—'}`);
+  window.openDecksScreen();
+  const starterHeroBox = window.document.querySelector('#deckGrid [data-deck-id="starter_aurites"]');
+  if (starterHeroBox) click(starterHeroBox);
+  const starterHeroButton = $('btnDecksHero');
+  if (!starterHeroButton.disabled) click(starterHeroButton);
+  const starterCoinAction = $('deckHeroPickerGrid').querySelector('[data-hero-id="aurites-veteran"] [data-hero-action]');
+  if (starterCoinAction && !starterCoinAction.disabled) click(starterCoinAction);
+  window.openHomeScreen();
+  const factionHeroCard = window.document.querySelector('#playerFactions .fcard[data-f="Aurites"]:not(.customDeckCard)');
+  const factionArtNowUsesHero = factionHeroCard?.querySelector('.fcardArtImg')?.getAttribute('src') === '/deck-heroes/aurites-veteran'
+    && factionHeroCard?.querySelector('.fname')?.textContent === 'Капитан Рассвета';
+  const noHeroBadgesOverCardArt = !window.document.querySelector('.fcardDeckHero,.menuDeckHeroBadge,.deckHeroBadge,.alDeckHero');
+  check('выбранный монетный арт заменяет фракционный арт целиком — без кружка поверх карточки',
+    factionArtNowUsesHero && noHeroBadgesOverCardArt,
+    `арт ${factionHeroCard?.querySelector('.fcardArtImg')?.getAttribute('src') ?? '—'}; значки отсутствуют ${noHeroBadgesOverCardArt}`);
+  window.openDecksScreen();
+  playBox = window.document.querySelector('#deckGrid [data-deck-id="custom-e2e-flow"]');
   const coverVisible = !!playBox && playBox.dataset.avatarCardId === playIds[7]
     && !!playBox.querySelector('.deckAvatarImg') && !!playBox.querySelector('.deckArtGear') && !playBox.querySelector('.deckColors');
   const deckTileTextOk = !!playBox && playBox.querySelector('.deckName')?.textContent === 'Проверка обложки'
     && !!playBox.querySelector('.deckMeta .deckCount')?.textContent.includes('60')
-    && (playBox.querySelector('.deckAvatarImg')?.getAttribute('src') || '').includes(`/art/Aurites/${playIds[7]}.png`)
+    && (playBox.querySelector('.deckAvatarImg')?.getAttribute('src') || '') === expectedPlayArtUrl
     && cssSrc.includes('-webkit-line-clamp:2!important') && cssSrc.includes('object-fit:contain!important');
   check('в плитке списка колод читаются имя, размер и обложка без обрезки', deckTileTextOk,
     `имя ${playBox?.querySelector('.deckName')?.textContent ?? '—'}, размер ${playBox?.querySelector('.deckMeta .deckCount')?.textContent ?? '—'}`);
@@ -1483,6 +2066,11 @@ const skip = (name, reason = 'не входит в текущий этап') => 
     playValidation.ok && launcherEnabled && launched && battleVisible
       && actualDeck === 'custom-e2e-flow' && actualFaction === 'Aurites',
     `валидна: ${playValidation.ok}; кнопка: ${launcherEnabled}; ID: ${actualDeck}; фракция: ${actualFaction}; 60 карт: ${launched}`);
+  const battleHeroImage = $('playerPortrait').querySelector('img')?.getAttribute('src') || '';
+  const battleHeroOk = window.__battle.playerHeroId === 'aurites-veteran'
+    && battleHeroImage === '/deck-heroes/aurites-veteran';
+  check('в медальоне боя отображается выбранный герой колоды, а не профильный аватар', battleHeroOk,
+    `id ${window.__battle.playerHeroId}; портрет ${battleHeroImage || 'fallback'}`);
   window.__battle.stop();
 
   /* ---------- итог ---------- */

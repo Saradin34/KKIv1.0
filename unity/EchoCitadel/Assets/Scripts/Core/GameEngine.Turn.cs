@@ -113,6 +113,8 @@ namespace EchoCitadel.Core
             bool needsTarget = NeedsTarget(side, card);
             if (needsTarget && !HasValidTarget(side, card))
                 return new PlayCheck { Reason = "Нет допустимой цели", Card = card };
+            if (HasMissingRequiredCreatureEffectTarget(side, card))
+                return new PlayCheck { Reason = "Нет допустимой цели для эффекта", Card = card };
 
             return new PlayCheck { Ok = true, Card = card, NeedsTarget = needsTarget };
         }
@@ -149,6 +151,90 @@ namespace EchoCitadel.Core
         }
 
         public bool HasValidTarget(Side side, CardData card) => ValidTargets(side, card).Count > 0;
+
+        /// <summary>
+        /// Проверяет одиночные цели внутри effects[].to (и стандартные цели операций),
+        /// которые могут быть пропущены при CardData.target = None. Случайные и
+        /// массовые эффекты остаются разыгрываемыми без целей; боевые кличи существ
+        /// не блокируются. Проверка не должна расходовать ГПСЧ.
+        /// </summary>
+        private bool HasMissingRequiredCreatureEffectTarget(Side side, CardData card)
+        {
+            if (card.Type != CardType.Spell) return false;
+            return HasMissingRequiredCreatureEffectTarget(side, card, card.Effects);
+        }
+
+        private bool HasMissingRequiredCreatureEffectTarget(Side side, CardData card, List<CardEffect>? effects)
+        {
+            if (effects == null) return false;
+            foreach (var effect in effects)
+            {
+                if (!TargetGateConditionApplies(effect.If, side)) continue;
+                TargetKind? kind = EffectTargetKind(card, effect);
+                bool singleCreature = kind == TargetKind.EnemyCreature
+                    || kind == TargetKind.FriendlyCreature || kind == TargetKind.AnyCreature;
+                if (singleCreature && effect.Filter?.Random != true)
+                {
+                    var resolved = ResolveTarget(side, kind, effect.Filter, new EffectContext { SourceCard = card });
+                    if (resolved.Creatures.Count == 0) return true;
+                }
+                if (effect.Then != null && HasMissingRequiredCreatureEffectTarget(side, card, new List<CardEffect> { effect.Then }))
+                    return true;
+            }
+            return false;
+        }
+
+        private static TargetKind? EffectTargetKind(CardData card, CardEffect effect)
+        {
+            if (effect.To.HasValue)
+                return effect.To.Value == TargetKind.None ? card.Target : effect.To.Value;
+
+            // Эквивалент defaults в GameEngine.Effects.cs. sacrifice намеренно
+            // исключён: это автоматический эффект, а не обязательная цель карты.
+            switch (effect.Op)
+            {
+                case EffectOp.destroyCreature:
+                case EffectOp.silence:
+                case EffectOp.returnToHand:
+                case EffectOp.stealCreature:
+                    return TargetKind.EnemyCreature;
+                case EffectOp.buffAttack:
+                case EffectOp.buffHealth:
+                case EffectOp.debuffAttack:
+                case EffectOp.debuffHealth:
+                case EffectOp.setAttack:
+                case EffectOp.applyStatus:
+                    return TargetKind.AnyCreature;
+                case EffectOp.removeStatus:
+                case EffectOp.restoreHealthByAttack:
+                    return TargetKind.FriendlyCreature;
+                case EffectOp.damage:
+                case EffectOp.heal:
+                    return card.Target;
+                default:
+                    return null;
+            }
+        }
+
+        private bool TargetGateConditionApplies(EffectCondition? cond, Side side)
+        {
+            if (cond == null) return true;
+            if (cond.Chance.HasValue && cond.Chance.Value < 1.0) return false;
+            // Передаём в CondOk копию без Chance, иначе проверка легальности
+            // изменила бы состояние ГПСЧ просто от наведения/проверки карты.
+            return CondOk(new EffectCondition
+            {
+                HeroHealthAtMost = cond.HeroHealthAtMost,
+                HeroHealthAtLeast = cond.HeroHealthAtLeast,
+                EnemyCreaturesAtLeast = cond.EnemyCreaturesAtLeast,
+                FriendlyCreaturesAtLeast = cond.FriendlyCreaturesAtLeast,
+                HandSizeAtMost = cond.HandSizeAtMost,
+                HandSizeAtLeast = cond.HandSizeAtLeast,
+                TurnAtLeast = cond.TurnAtLeast,
+                HasRune = cond.HasRune,
+                EnemyHasRune = cond.EnemyHasRune,
+            }, side);
+        }
 
         /// <summary>Список допустимых целей карты — его рисует UI и по нему целится ИИ.</summary>
         public List<TargetOption> ValidTargets(Side side, CardData card)
@@ -382,6 +468,10 @@ namespace EchoCitadel.Core
             var card = Db.Get(pl.LastSpell.CardId);
             if (card == null) return new EchoCheck { Reason = "Повторяемое заклинание недоступно" };
             if (card.Subtype == SpellSubtype.Ritual) return new EchoCheck { Reason = "Эхо не повторяет ритуалы" };
+            if (NeedsTarget(side, card) && !HasValidTarget(side, card))
+                return new EchoCheck { Reason = "Нет допустимой цели", Card = card };
+            if (HasMissingRequiredCreatureEffectTarget(side, card))
+                return new EchoCheck { Reason = "Нет допустимой цели для эффекта", Card = card };
 
             return new EchoCheck { Ok = true, Card = card };
         }
@@ -506,7 +596,8 @@ namespace EchoCitadel.Core
 
             pl.SpellsCastThisTurn = 0;
             pl.CardsPlayedThisTurn = 0;
-            foreach (var c in pl.Creatures) { c.AttacksThisTurn = 0; c.UnblockableThisTurn = false; }
+            // Untap happens at the beginning of the owner's turn, never at end-step.
+            foreach (var c in pl.Creatures) { c.Tapped = false; c.AttacksThisTurn = 0; c.UnblockableThisTurn = false; }
 
             SetPhase(Phase.Start);
             DoStartPhase();
@@ -842,12 +933,19 @@ namespace EchoCitadel.Core
                     if (!CanAttack(atk) || !pl.Creatures.Contains(atk)) break;
 
                     var target = ChooseAutoTarget(side, atk);
+                    CommitAttack(atk);
                     ResolveAttack(atk, target.Creature, target.HitHero ? en : null);
-                    atk.AttacksThisTurn++;
                     CheckDeaths();
                     if (Result != GameResult.Ongoing) return;
                 }
             }
+        }
+
+        /// <summary>Consume one attack and tap until the creature's next Untap, unless it has Vigilance.</summary>
+        private void CommitAttack(EntityCreature attacker)
+        {
+            attacker.AttacksThisTurn++;
+            if (!attacker.HasKeyword(Keyword.Vigilance)) attacker.Tapped = true;
         }
 
         /// <summary>
@@ -1018,7 +1116,7 @@ namespace EchoCitadel.Core
         /// <summary>Ручная атака (режим manual — для PvP и расширений).</summary>
         public bool ManualAttack(Side side, int uid, int? targetUid = null, bool targetHero = false)
         {
-            if (Config.CombatMode != "manual") return false;
+            if (Config.CombatMode != "manual" || ActiveSide != side || Phase != Phase.Combat) return false;
 
             var c = FindCreature(uid);
             if (c == null || c.Owner != side || !CanAttack(c)) return false;
@@ -1026,8 +1124,8 @@ namespace EchoCitadel.Core
             var en = P(side.Other());
             if (targetHero)
             {
+                CommitAttack(c);
                 ResolveAttack(c, null, en);
-                c.AttacksThisTurn++;
                 CheckDeaths();
                 return true;
             }
@@ -1035,8 +1133,8 @@ namespace EchoCitadel.Core
             var t = targetUid.HasValue ? FindCreature(targetUid.Value) : null;
             if (t == null || t.Owner == side) return false;
 
+            CommitAttack(c);
             ResolveAttack(c, t, null);
-            c.AttacksThisTurn++;
             CheckDeaths();
             return true;
         }
@@ -1117,10 +1215,10 @@ namespace EchoCitadel.Core
                     });
                 }
 
-                // заморозка снимается в конце хода владельца
+                // заморозка и временная неуловимость обновляются в end-step;
+                // число атак и tapped сохраняются до следующего Untap владельца.
                 c.Frozen = false;
                 foreach (var s in c.Statuses) if (s.Type == StatusType.Freeze) { c.Frozen = true; break; }
-                c.AttacksThisTurn = 0;
                 c.UnblockableThisTurn = false;
 
                 if (!c.Silenced && c.Data.OnTurnEnd is { Count: > 0 } ote)

@@ -152,6 +152,12 @@
       this.uidMap = /* @__PURE__ */ new Map();
       /** Очередь смертей, резолвится после текущего эффекта (правило «state-based»). */
       this.pendingDeaths = [];
+      /** Не допускает вложенную обработку той же очереди из deathrattle/триггеров. */
+      this.checkingDeaths = false;
+      /** Урон боя существам наносится одновременно; смерти проверяются после обеих сторон удара. */
+      this.deathCheckSuspension = 0;
+      /** HP-события, принадлежащие текущей записи атаки (для последовательной UI-анимации). */
+      this.activeCombatHpEvents = null;
       this.depth = 0;
       /** Карта-заклинание, чей урон сейчас разрешается (для VFX: «урон от заклинания»). */
       this.spellSourceCard = null;
@@ -161,13 +167,8 @@
       /** Интерактивный стек: true в бою с UI-окнами; false в симах (авто-резолв). */
       this.interactiveStack = false;
       this.stack = [];
-      /* --- Публичные обёртки для контроллеров/UI (движок остаётся источником истины). --- */
-      /**
-       * Очередь атак фазы «Битва». UI-контроллер читает её ПОСЛЕ синхронного
-       * исполнения боя и проигрывает анимации в правильном порядке (ТЗ п.6.2).
-       * Каждый элемент содержит состояние атакующего и защитника ДО удара —
-       * этого достаточно, чтобы корректно показать полёт, тряску и числа урона.
-       */
+      /** Очередь ударов: вместе с боевыми числами содержит HP-события триггеров
+          и снимок поля после немедленного разрешения смертей/предсмертных хрипов. */
       this.attackQueue = [];
       /**
        * Хок проигрывания анимаций после фазы «Битва» (используется HTML-прототипом).
@@ -263,11 +264,17 @@
       this.uidCounter = s.uidCounter;
       this.rng.setState(s.rng);
       this.uidMap.clear();
-      for (const pl of this.players) for (const c of pl.creatures) this.uidMap.set(c.uid, c);
+      for (const pl of this.players) for (const c of pl.creatures) {
+        if (typeof c.tapped !== "boolean") c.tapped = c.attacksThisTurn > 0 && (c.silenced || !c.keywords.includes("Vigilance" /* Vigilance */));
+        this.uidMap.set(c.uid, c);
+      }
       this.pendingDeaths = [];
       this.eventQueue = [];
       this.stack = [];
       this.instantWindow = null;
+      this.checkingDeaths = false;
+      this.deathCheckSuspension = 0;
+      this.activeCombatHpEvents = null;
     }
     /** Короткий отпечаток состояния (сверка клиентов, диагностика рассинхрона). */
     stateHash() {
@@ -276,7 +283,7 @@
         pl.hand.length,
         pl.deck.length,
         pl.mana,
-        pl.creatures.map((c) => `${c.uid}:${c.attack}/${c.health}`).join(",")
+        pl.creatures.map((c) => `${c.uid}:${c.attack}/${c.health}/${c.tapped ? "T" : "U"}/${c.attacksThisTurn}`).join(",")
       ].join("|"));
       return `${this.turn}#${this.activeSide}#${p.join("~")}`;
     }
@@ -382,6 +389,7 @@
         return 0;
       }
       pl.health -= dmg;
+      this.activeCombatHpEvents?.push({ kind: "damage", side, amount: dmg, source: opts.source, cue: opts.combatCue });
       this.emit({
         type: "PlayerDamage" /* PlayerDamage */,
         side,
@@ -412,6 +420,7 @@
       pl.health = Math.min(pl.maxHealth, pl.health + eff);
       const healed = pl.health - before;
       if (healed > 0) {
+        this.activeCombatHpEvents?.push({ kind: "heal", side, amount: healed, source: opts.source });
         this.emit({ type: "PlayerHeal" /* PlayerHeal */, side, value: healed, sourceCardId: opts.sourceCardId, text: `${pl.name} \u0432\u043E\u0441\u0441\u0442\u0430\u043D\u0430\u0432\u043B\u0438\u0432\u0430\u0435\u0442 ${healed} \u0437\u0434\u043E\u0440\u043E\u0432\u044C\u044F${opts.source ? ` (${opts.source})` : ""}` });
         this.stats[side].healingDone += healed;
       }
@@ -513,6 +522,7 @@
         statuses: [],
         summonedOnTurn: this.turnsTaken[side],
         attacksThisTurn: 0,
+        tapped: false,
         canAttackThisTurn: false,
         silenced: false,
         frozen: false,
@@ -633,36 +643,67 @@
       if (this.pendingDeaths.includes(c)) return;
       this.pendingDeaths.push(c);
     }
-    /** Проверка состояний: убираем мёртвых, триггерим предсмертные хрипы и пассивку Некрусов. */
+    /** Проверка состояний: одновременно убираем погибших, затем разрешаем все
+        deathrattle/триггеры. Вложенные checkDeaths оставляют новые смерти внешнему циклу. */
     checkDeaths() {
-      if (this.depth > 32) return;
+      if (this.checkingDeaths || this.deathCheckSuspension > 0 || this.depth > 32) return;
+      this.checkingDeaths = true;
       let guard = 0;
-      while (this.pendingDeaths.length > 0 && guard++ < 200) {
-        const dying = this.pendingDeaths.splice(0, this.pendingDeaths.length);
-        for (const c of dying) {
-          if (c.health > 0) continue;
-          const owner = this.p(c.owner);
-          const idx = owner.creatures.indexOf(c);
-          if (idx >= 0) owner.creatures.splice(idx, 1);
-          this.uidMap.delete(c.uid);
-          owner.graveyard.push(c.cardId);
-          this.stats[c.owner].losses++;
-          this.emit({ type: "CreatureDeath" /* CreatureDeath */, uid: c.uid, side: c.owner, cardId: c.cardId, cardName: c.name, text: `\xAB${c.name}\xBB \u043F\u043E\u0433\u0438\u0431\u0430\u0435\u0442` });
-          this.say(`${owner.name}: \xAB${c.name}\xBB \u043F\u043E\u0433\u0438\u0431\u0430\u0435\u0442`, c.owner);
-          if (!c.silenced && c.data.onDeath && c.data.onDeath.length) {
-            this.depth++;
-            this.runEffects(c.data.onDeath, c.owner, { sourceUid: c.uid, sourceCard: c.data, isDeathrattle: true });
-            this.depth--;
+      try {
+        while (this.pendingDeaths.length > 0 && guard++ < 200) {
+          const pending = this.pendingDeaths.splice(0, this.pendingDeaths.length);
+          const seen = /* @__PURE__ */ new Set();
+          const dying = pending.filter((c) => {
+            if (seen.has(c)) return false;
+            seen.add(c);
+            return c.health <= 0 && this.uidMap.get(c.uid) === c;
+          });
+          if (dying.length === 0) continue;
+          const dyingSet = new Set(dying);
+          const observers = this.allCreatures().filter((c) => !dyingSet.has(c) && c.health > 0 && !c.silenced && c.data.onCreatureDies?.length).map((c) => ({ owner: c.owner, uid: c.uid, card: c.data, effects: c.data.onCreatureDies }));
+          for (const c of dying) {
+            const owner = this.p(c.owner);
+            const idx = owner.creatures.indexOf(c);
+            if (idx >= 0) owner.creatures.splice(idx, 1);
+            this.uidMap.delete(c.uid);
+            owner.graveyard.push(c.cardId);
+            this.stats[c.owner].losses++;
           }
-          if (owner.faction === "Necrus" /* Necrus */) {
-            const heal = this.pround(2 * this.passiveMul("Necrus" /* Necrus */));
-            const drawsCard = c.cost >= 2;
-            if (drawsCard) this.draw(c.owner, { source: "\u041A\u0440\u043E\u0432\u0430\u0432\u0430\u044F \u0436\u0430\u0442\u0432\u0430" });
-            if (heal > 0) this.healHero(c.owner, heal, { source: "\u041A\u0440\u043E\u0432\u0430\u0432\u0430\u044F \u0436\u0430\u0442\u0432\u0430" });
-            this.say(`\u041A\u0440\u043E\u0432\u0430\u0432\u0430\u044F \u0436\u0430\u0442\u0432\u0430: ${owner.name} ${drawsCard ? "\u0431\u0435\u0440\u0451\u0442 \u043A\u0430\u0440\u0442\u0443 \u0438 " : ""}\u0432\u043E\u0441\u0441\u0442\u0430\u043D\u0430\u0432\u043B\u0438\u0432\u0430\u0435\u0442 ${heal} \u0437\u0434\u043E\u0440\u043E\u0432\u044C\u044F`, c.owner);
+          for (const c of dying) {
+            const owner = this.p(c.owner);
+            this.emit({ type: "CreatureDeath" /* CreatureDeath */, uid: c.uid, side: c.owner, cardId: c.cardId, cardName: c.name, text: `\xAB${c.name}\xBB \u043F\u043E\u0433\u0438\u0431\u0430\u0435\u0442` });
+            this.say(`${owner.name}: \xAB${c.name}\xBB \u043F\u043E\u0433\u0438\u0431\u0430\u0435\u0442`, c.owner);
           }
+          for (const c of dying) {
+            if (!c.silenced && c.data.onDeath?.length) {
+              this.depth++;
+              try {
+                this.runEffects(c.data.onDeath, c.owner, { sourceUid: c.uid, sourceCard: c.data, isDeathrattle: true });
+              } finally {
+                this.depth--;
+              }
+            }
+            for (const watcher of observers) {
+              this.depth++;
+              try {
+                this.runEffects(watcher.effects, watcher.owner, { sourceUid: watcher.uid, sourceCard: watcher.card });
+              } finally {
+                this.depth--;
+              }
+            }
+            const owner = this.p(c.owner);
+            if (owner.faction === "Necrus" /* Necrus */) {
+              const heal = this.pround(2 * this.passiveMul("Necrus" /* Necrus */));
+              const drawsCard = c.cost >= 2;
+              if (drawsCard) this.draw(c.owner, { source: "\u041A\u0440\u043E\u0432\u0430\u0432\u0430\u044F \u0436\u0430\u0442\u0432\u0430" });
+              if (heal > 0) this.healHero(c.owner, heal, { source: "\u041A\u0440\u043E\u0432\u0430\u0432\u0430\u044F \u0436\u0430\u0442\u0432\u0430" });
+              this.say(`\u041A\u0440\u043E\u0432\u0430\u0432\u0430\u044F \u0436\u0430\u0442\u0432\u0430: ${owner.name} ${drawsCard ? "\u0431\u0435\u0440\u0451\u0442 \u043A\u0430\u0440\u0442\u0443 \u0438 " : ""}\u0432\u043E\u0441\u0441\u0442\u0430\u043D\u0430\u0432\u043B\u0438\u0432\u0430\u0435\u0442 ${heal} \u0437\u0434\u043E\u0440\u043E\u0432\u044C\u044F`, c.owner);
+            }
+          }
+          for (const c of this.allCreatures()) if (c.health <= 0) this.markDeath(c);
         }
-        for (const c of this.allCreatures()) if (c.health <= 0) this.markDeath(c);
+      } finally {
+        this.checkingDeaths = false;
       }
     }
     addStatus(c, s) {
@@ -703,14 +744,18 @@
       this.addStatus(c, { type: "Silence" /* Silence */, value: 1, turnsLeft: -1 });
     }
     canAttack(c) {
-      if (c.silenced) {
-      }
       if (c.frozen) return false;
       if (c.attack <= 0) return false;
       const maxAttacks = c.keywords.includes("Windfury" /* Windfury */) ? 2 : 1;
       if (c.attacksThisTurn >= maxAttacks) return false;
+      if (c.tapped && c.attacksThisTurn === 0) return false;
       if (c.justPlayed && !c.keywords.includes("Rush" /* Rush */) && !c.statuses.some((s) => s.type === "Fury" /* Fury */)) return false;
       return true;
+    }
+    /** Фиксирует потраченную атаку и tap до следующего Untap владельца. */
+    commitAttack(c) {
+      c.attacksThisTurn++;
+      if (c.silenced || !c.keywords.includes("Vigilance" /* Vigilance */)) c.tapped = true;
     }
     /* ----------------------------- РУНЫ / РИТУАЛЫ ---------------------------- */
     playRune(side, card) {
@@ -825,6 +870,9 @@
       }
       const needsTarget = this.targetRequiresChoice(card.target);
       if (needsTarget && !this.hasValidTarget(side, card)) return { ok: false, reason: "\u041D\u0435\u0442 \u0434\u043E\u043F\u0443\u0441\u0442\u0438\u043C\u043E\u0439 \u0446\u0435\u043B\u0438", card };
+      if (this.hasMissingRequiredCreatureEffectTarget(side, card)) {
+        return { ok: false, reason: "\u041D\u0435\u0442 \u0434\u043E\u043F\u0443\u0441\u0442\u0438\u043C\u043E\u0439 \u0446\u0435\u043B\u0438 \u0434\u043B\u044F \u044D\u0444\u0444\u0435\u043A\u0442\u0430", card };
+      }
       return { ok: true, card, needsTarget };
     }
     availableMana(side) {
@@ -841,6 +889,64 @@
     }
     targetRequiresChoice(target) {
       return target === "EnemyCreature" /* EnemyCreature */ || target === "FriendlyCreature" /* FriendlyCreature */ || target === "AnyCreature" /* AnyCreature */ || target === "EnemyHero" /* EnemyHero */ || target === "FriendlyHero" /* FriendlyHero */ || target === "AnyHero" /* AnyHero */;
+    }
+    /**
+     * Some cards encode a mandatory single-creature effect in effects[].to rather
+     * than CardData.target. Check that at least one matching creature exists before
+     * a spell (or its Echo copy) is committed. Random and mass effects deliberately
+     * remain playable without candidates; creature ETB/battlecries are not checked.
+     * This check must not consume RNG because canPlay() is called repeatedly by UI/AI.
+     */
+    hasMissingRequiredCreatureEffectTarget(side, card) {
+      if (card.type !== "Spell" /* Spell */) return false;
+      const singleCreature = (kind) => kind === "EnemyCreature" /* EnemyCreature */ || kind === "FriendlyCreature" /* FriendlyCreature */ || kind === "AnyCreature" /* AnyCreature */;
+      const effectTarget = (effect) => {
+        if (effect.to !== void 0) return effect.to === "None" /* None */ ? card.target : effect.to;
+        switch (effect.op) {
+          // These operations choose one creature automatically when `to` is omitted.
+          case "destroyCreature":
+          case "silence":
+          case "returnToHand":
+          case "stealCreature":
+            return "EnemyCreature" /* EnemyCreature */;
+          case "buffAttack":
+          case "buffHealth":
+          case "debuffAttack":
+          case "debuffHealth":
+          case "setAttack":
+          case "applyStatus":
+            return "AnyCreature" /* AnyCreature */;
+          case "removeStatus":
+          case "restoreHealthByAttack":
+            return "FriendlyCreature" /* FriendlyCreature */;
+          // damage/heal inherit the card target; with TargetKind.None they resolve to a hero.
+          case "damage":
+          case "heal":
+            return card.target;
+          // sacrifice, random, token, hero and mass effects are automatic/non-targeting.
+          default:
+            return void 0;
+        }
+      };
+      const conditionCanRequireTarget = (cond) => {
+        if (!cond) return true;
+        if (cond.chance !== void 0 && cond.chance < 1) return false;
+        return this.condOk({ ...cond, chance: void 0 }, side);
+      };
+      const effectsNeedTarget = (effects) => {
+        if (!effects) return false;
+        for (const effect of effects) {
+          if (!conditionCanRequireTarget(effect.if)) continue;
+          const kind = effectTarget(effect);
+          if (singleCreature(kind) && effect.filter?.random !== true) {
+            const available = this.resolveTarget(side, kind, effect.filter, { sourceCard: card });
+            if (available.creatures.length === 0) return true;
+          }
+          if (effect.then && effectsNeedTarget([effect.then])) return true;
+        }
+        return false;
+      };
+      return effectsNeedTarget(card.effects);
     }
     needsTarget(side, card) {
       return this.targetRequiresChoice(card.target) && this.hasValidTarget(side, card);
@@ -986,6 +1092,12 @@
       const card = this.db.get(pl.lastSpellCast.cardId);
       if (!card) return { ok: false, reason: "\u041F\u043E\u0432\u0442\u043E\u0440\u044F\u0435\u043C\u043E\u0435 \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0435 \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u043D\u043E" };
       if (card.subtype === "Ritual" /* Ritual */) return { ok: false, reason: "\u042D\u0445\u043E \u043D\u0435 \u043F\u043E\u0432\u0442\u043E\u0440\u044F\u0435\u0442 \u0440\u0438\u0442\u0443\u0430\u043B\u044B" };
+      if (this.targetRequiresChoice(card.target) && !this.hasValidTarget(side, card)) {
+        return { ok: false, reason: "\u041D\u0435\u0442 \u0434\u043E\u043F\u0443\u0441\u0442\u0438\u043C\u043E\u0439 \u0446\u0435\u043B\u0438", card };
+      }
+      if (this.hasMissingRequiredCreatureEffectTarget(side, card)) {
+        return { ok: false, reason: "\u041D\u0435\u0442 \u0434\u043E\u043F\u0443\u0441\u0442\u0438\u043C\u043E\u0439 \u0446\u0435\u043B\u0438 \u0434\u043B\u044F \u044D\u0444\u0444\u0435\u043A\u0442\u0430", card };
+      }
       return { ok: true, card };
     }
     useEcho(side, targetUid, targetSide) {
@@ -1025,6 +1137,7 @@
       pl.spellsCastThisTurn = 0;
       pl.cardsPlayedThisTurn = 0;
       for (const c of pl.creatures) {
+        c.tapped = false;
         c.attacksThisTurn = 0;
         c.unblockableThisTurn = false;
       }
@@ -1119,6 +1232,7 @@
         }
       }
       for (const c of [...pl.creatures]) {
+        if (!pl.creatures.includes(c)) continue;
         c.justPlayed = c.summonedOnTurn >= this.turnsTaken[side];
         const burn = c.statuses.find((s) => s.type === "Burn" /* Burn */);
         if (burn && !c.silenced) {
@@ -1127,9 +1241,12 @@
             burn.turnsLeft--;
             if (burn.turnsLeft <= 0) this.removeStatus(c, burn);
           }
+          this.checkDeaths();
+          if (!pl.creatures.includes(c)) continue;
         }
         if (!c.silenced && c.data.onTurnStart?.length) {
           this.runEffects(c.data.onTurnStart, side, { sourceUid: c.uid, sourceCard: c.data });
+          this.checkDeaths();
         }
       }
       for (const rt of [...pl.rituals]) {
@@ -1216,6 +1333,11 @@
       this.activeSide = this.opponentSide;
       this.emit({ type: "TurnStarted" /* TurnStarted */, side: this.activeSide, turn: this.turn + 1 });
     }
+    /* --- Публичные обёртки для контроллеров/UI (движок остаётся источником истины). --- */
+    /** True только во время синхронного применения одного удара и его триггеров. */
+    get isResolvingAttack() {
+      return this.activeCombatHpEvents !== null;
+    }
     runCombatAnimations() {
       if (!this.onBeforeCombatEnd) return null;
       const q = this.attackQueue;
@@ -1256,9 +1378,8 @@
         for (let i = 0; i < maxAttacks; i++) {
           if (!this.canAttack(atk) || !pl.creatures.includes(atk)) break;
           const target = this.chooseAutoTarget(side, atk);
+          this.commitAttack(atk);
           this.resolveAttack(atk, target.creature, target.hitHero ? en : void 0);
-          atk.attacksThisTurn++;
-          this.checkDeaths();
           if (this.result !== "Ongoing" /* Ongoing */) return;
         }
       }
@@ -1279,9 +1400,13 @@
       return { creature: pool[0], hitHero: false };
     }
     resolveAttack(attacker, defender, enemyHero) {
+      if (attacker.attack <= 0) return;
+      const ownerSide = attacker.owner;
+      const attackerBeforeHp = attacker.health;
+      const lifesteal = !attacker.silenced && attacker.keywords.includes("Lifesteal" /* Lifesteal */);
       const rec = {
         attackerUid: attacker.uid,
-        attackerSide: attacker.owner,
+        attackerSide: ownerSide,
         attackerName: attacker.name,
         defenderUid: defender?.uid,
         defenderName: defender?.name,
@@ -1291,91 +1416,111 @@
         heroDamage: 0,
         defenderDamage: 0,
         attackerDamage: 0,
-        lifesteal: !attacker.silenced && attacker.keywords.includes("Lifesteal" /* Lifesteal */),
+        lifesteal,
         lifestealAmount: 0,
-        attackerAfter: { hp: 0 },
-        defenderAfter: defender ? { hp: 0 } : void 0
+        attackerAfter: { hp: Math.max(0, attacker.health) },
+        defenderAfter: defender ? { hp: Math.max(0, defender.health) } : void 0,
+        hpEvents: [],
+        unitsAfter: [],
+        heroHpAfter: { [0 /* Player */]: this.p(0 /* Player */).health, [1 /* Opponent */]: this.p(1 /* Opponent */).health }
       };
-      if (attacker.attack <= 0) return;
-      rec.attackerSide = attacker.owner;
-      const ownerSide = attacker.owner;
-      const attackerBeforeHp = attacker.health;
-      const lifesteal = !attacker.silenced && attacker.keywords.includes("Lifesteal" /* Lifesteal */);
-      if (defender) {
-        this.emit({
-          type: "CreatureAttacks" /* CreatureAttacks */,
-          uid: attacker.uid,
-          side: ownerSide,
-          targetUid: defender.uid,
-          cardName: attacker.name,
-          value: attacker.attack,
-          text: `\xAB${attacker.name}\xBB \u0430\u0442\u0430\u043A\u0443\u0435\u0442 \xAB${defender.name}\xBB`
-        });
-        const counter = defender.attack;
-        const defHpBefore = defender.health;
-        const dealt = this.damageCreature(defender, attacker.attack, { source: attacker.name, sourceCardId: attacker.cardId });
-        const dealtToCreature = Math.min(dealt, Math.max(0, defHpBefore));
-        if (dealtToCreature > 0 && lifesteal) {
-          const hpBeforeHeal = this.p(ownerSide).health;
-          this.healHero(ownerSide, dealtToCreature, { source: "\u0412\u0430\u043C\u043F\u0438\u0440\u0438\u0437\u043C" });
-          rec.lifestealAmount += Math.max(0, this.p(ownerSide).health - hpBeforeHeal);
-        }
-        if (dealt > 0 && !attacker.silenced && defender.health > 0) {
-          if (attacker.keywords.includes("Poisonous" /* Poisonous */)) {
-            this.addStatus(defender, { type: "Poison" /* Poison */, value: 1, turnsLeft: -1 });
-            this.say(`\u042F\u0434\u043E\u0432\u0438\u0442\u044B\u0439: \xAB${defender.name}\xBB \u043E\u0442\u0440\u0430\u0432\u043B\u0435\u043D \xAB${attacker.name}\xBB`, defender.owner);
-          }
-          if (attacker.keywords.includes("Freezing" /* Freezing */)) {
-            this.addStatus(defender, { type: "Freeze" /* Freeze */, value: 1, turnsLeft: 1 });
-            defender.frozen = true;
-            this.say(`\u041B\u0435\u0434\u044F\u043D\u043E\u0435 \u043A\u0430\u0441\u0430\u043D\u0438\u0435: \xAB${defender.name}\xBB \u0437\u0430\u043C\u043E\u0440\u043E\u0436\u0435\u043D`, defender.owner);
-          }
-        }
-        if (counter > 0 && this.uidMap.has(attacker.uid)) {
-          this.damageCreature(attacker, counter, { source: defender.name, sourceCardId: defender.cardId });
-        }
-        if (dealt > 0) this.stats[ownerSide].kills += defender.health <= 0 ? 1 : 0;
-        if (dealt > 0 && defender.health <= 0 && !attacker.silenced && attacker.keywords.includes("Trample" /* Trample */)) {
-          const excess = attacker.attack - Math.min(dealt, defHpBefore);
-          if (excess > 0) {
-            const hero = this.p(defender.owner);
-            const hpBeforeHeal = this.p(ownerSide).health;
-            const hd = this.damageHero(hero.side, excess, {
-              source: `${attacker.name} (\u041F\u0440\u043E\u0440\u044B\u0432)`,
-              sourceCardId: attacker.cardId,
-              lifestealFor: lifesteal ? ownerSide : void 0
+      const previousHpEvents = this.activeCombatHpEvents;
+      this.activeCombatHpEvents = rec.hpEvents;
+      try {
+        this.deathCheckSuspension++;
+        try {
+          if (defender) {
+            this.emit({
+              type: "CreatureAttacks" /* CreatureAttacks */,
+              uid: attacker.uid,
+              side: ownerSide,
+              targetUid: defender.uid,
+              cardName: attacker.name,
+              value: attacker.attack,
+              text: `\xAB${attacker.name}\xBB \u0430\u0442\u0430\u043A\u0443\u0435\u0442 \xAB${defender.name}\xBB`
             });
-            if (lifesteal) rec.lifestealAmount += Math.max(0, this.p(ownerSide).health - hpBeforeHeal);
-            rec.heroDamage = hd;
-            rec.hitHero = hd > 0;
+            const counter = defender.attack;
+            const defHpBefore = defender.health;
+            const dealt = this.damageCreature(defender, attacker.attack, { source: attacker.name, sourceCardId: attacker.cardId });
+            const dealtToCreature = Math.min(dealt, Math.max(0, defHpBefore));
+            if (dealtToCreature > 0 && lifesteal) {
+              const hpBeforeHeal = this.p(ownerSide).health;
+              this.healHero(ownerSide, dealtToCreature, { source: "\u0412\u0430\u043C\u043F\u0438\u0440\u0438\u0437\u043C" });
+              rec.lifestealAmount += Math.max(0, this.p(ownerSide).health - hpBeforeHeal);
+            }
+            if (dealt > 0 && !attacker.silenced && defender.health > 0) {
+              if (attacker.keywords.includes("Poisonous" /* Poisonous */)) {
+                this.addStatus(defender, { type: "Poison" /* Poison */, value: 1, turnsLeft: -1 });
+                this.say(`\u042F\u0434\u043E\u0432\u0438\u0442\u044B\u0439: \xAB${defender.name}\xBB \u043E\u0442\u0440\u0430\u0432\u043B\u0435\u043D \xAB${attacker.name}\xBB`, defender.owner);
+              }
+              if (attacker.keywords.includes("Freezing" /* Freezing */)) {
+                this.addStatus(defender, { type: "Freeze" /* Freeze */, value: 1, turnsLeft: 1 });
+                defender.frozen = true;
+                this.say(`\u041B\u0435\u0434\u044F\u043D\u043E\u0435 \u043A\u0430\u0441\u0430\u043D\u0438\u0435: \xAB${defender.name}\xBB \u0437\u0430\u043C\u043E\u0440\u043E\u0436\u0435\u043D`, defender.owner);
+              }
+            }
+            if (counter > 0 && this.uidMap.has(attacker.uid)) {
+              this.damageCreature(attacker, counter, { source: defender.name, sourceCardId: defender.cardId });
+            }
+            if (dealt > 0) this.stats[ownerSide].kills += defender.health <= 0 ? 1 : 0;
+            if (dealt > 0 && defender.health <= 0 && !attacker.silenced && attacker.keywords.includes("Trample" /* Trample */)) {
+              const excess = attacker.attack - Math.min(dealt, defHpBefore);
+              if (excess > 0) {
+                const hero = this.p(defender.owner);
+                const hpBeforeHeal = this.p(ownerSide).health;
+                const hd = this.damageHero(hero.side, excess, {
+                  source: `${attacker.name} (\u041F\u0440\u043E\u0440\u044B\u0432)`,
+                  sourceCardId: attacker.cardId,
+                  lifestealFor: lifesteal ? ownerSide : void 0,
+                  combatCue: "attack"
+                });
+                if (lifesteal) rec.lifestealAmount += Math.max(0, this.p(ownerSide).health - hpBeforeHeal);
+                rec.heroDamage = hd;
+                rec.hitHero = hd > 0;
+              }
+            }
+            rec.defenderDamage = dealt;
+            rec.attackerDamage = Math.max(0, attackerBeforeHp - attacker.health);
+          } else if (enemyHero) {
+            const dmg = attacker.attack;
+            this.emit({
+              type: "CreatureAttacks" /* CreatureAttacks */,
+              uid: attacker.uid,
+              side: ownerSide,
+              cardName: attacker.name,
+              value: dmg,
+              text: `\xAB${attacker.name}\xBB \u0430\u0442\u0430\u043A\u0443\u0435\u0442 \u0433\u0435\u0440\u043E\u044F ${enemyHero.name}`
+            });
+            const hpBeforeHeal = this.p(ownerSide).health;
+            const dealt = this.damageHero(enemyHero.side, dmg, {
+              source: attacker.name,
+              sourceCardId: attacker.cardId,
+              lifestealFor: lifesteal ? ownerSide : void 0,
+              combatCue: "attack"
+            });
+            if (lifesteal) rec.lifestealAmount = Math.max(0, this.p(ownerSide).health - hpBeforeHeal);
+            rec.heroDamage = dealt;
           }
+        } finally {
+          this.deathCheckSuspension--;
         }
-        rec.defenderDamage = dealt;
-        rec.attackerDamage = Math.max(0, attackerBeforeHp - attacker.health);
-        rec.defenderAfter = { hp: Math.max(0, defender.health) };
+        if (!defender && !enemyHero) return;
+        if (this.deathCheckSuspension === 0) this.checkDeaths();
         rec.attackerAfter = { hp: Math.max(0, attacker.health) };
+        if (defender) rec.defenderAfter = { hp: Math.max(0, defender.health) };
+        rec.unitsAfter = this.allCreatures().map((c) => ({ uid: c.uid, hp: Math.max(0, c.health) }));
+        rec.heroHpAfter = {
+          [0 /* Player */]: this.p(0 /* Player */).health,
+          [1 /* Opponent */]: this.p(1 /* Opponent */).health
+        };
         this.attackQueue.push(rec);
-      } else if (enemyHero) {
-        const dmg = attacker.attack;
-        this.emit({
-          type: "CreatureAttacks" /* CreatureAttacks */,
-          uid: attacker.uid,
-          side: ownerSide,
-          cardName: attacker.name,
-          value: dmg,
-          text: `\xAB${attacker.name}\xBB \u0430\u0442\u0430\u043A\u0443\u0435\u0442 \u0433\u0435\u0440\u043E\u044F ${enemyHero.name}`
-        });
-        const hpBeforeHeal = this.p(ownerSide).health;
-        const dealt = this.damageHero(enemyHero.side, dmg, { source: attacker.name, sourceCardId: attacker.cardId, lifestealFor: lifesteal ? ownerSide : void 0 });
-        if (lifesteal) rec.lifestealAmount = Math.max(0, this.p(ownerSide).health - hpBeforeHeal);
-        rec.heroDamage = dealt;
-        rec.attackerAfter = { hp: Math.max(0, attacker.health) };
-        this.attackQueue.push(rec);
+      } finally {
+        this.activeCombatHpEvents = previousHpEvents;
       }
     }
     /** Ручная атака (режим manual — для PvP/расширений). Правила: бить существо обязательно только если у противника есть Провокация (Taunt) или карта прямо указывает «обязана атаковать существо»; во всех остальных случаях можно бить героя. */
     manualAttack(side, uid, targetUid, targetHero = false) {
-      if (this.config.combatMode !== "manual") return false;
+      if (this.config.combatMode !== "manual" || this.activeSide !== side || this.phase !== "Combat" /* Combat */) return false;
       const c = this.findCreature(uid);
       if (!c || c.owner !== side || !this.canAttack(c)) return false;
       const en = this.p(side === 0 /* Player */ ? 1 /* Opponent */ : 0 /* Player */);
@@ -1384,18 +1529,16 @@
       const mustHitCreature = !!c.data.mustHitCreature;
       if (targetHero) {
         if (hasTaunt || mustHitCreature) return false;
+        this.commitAttack(c);
         this.resolveAttack(c, void 0, en);
-        c.attacksThisTurn++;
-        this.checkDeaths();
         return true;
       }
       const t = targetUid !== void 0 ? this.findCreature(targetUid) : void 0;
       if (!t || t.owner === side) return false;
       if (hasTaunt && !taunts.includes(t)) return false;
       if (t.unblockableThisTurn || !t.silenced && t.keywords.includes("Unblockable" /* Unblockable */)) return false;
+      this.commitAttack(c);
       this.resolveAttack(c, t);
-      c.attacksThisTurn++;
-      this.checkDeaths();
       return true;
     }
     /**
@@ -1452,7 +1595,6 @@
           }
         }
         c.frozen = c.statuses.some((s) => s.type === "Freeze" /* Freeze */);
-        c.attacksThisTurn = 0;
         c.unblockableThisTurn = false;
         if (!c.silenced && c.data.onTurnEnd?.length) this.runEffects(c.data.onTurnEnd, side, { sourceUid: c.uid, sourceCard: c.data });
       }
@@ -1946,6 +2088,7 @@
       for (const c of list) {
         v += c.attack * 1.5 + c.health;
         if (c.keywords.includes("Taunt" /* Taunt */)) v += 1;
+        if (c.keywords.includes("Vigilance" /* Vigilance */)) v += 0.7;
         if (c.keywords.includes("Lifesteal" /* Lifesteal */)) v += 1.2;
         if (c.keywords.includes("Unblockable" /* Unblockable */)) v += 1.5;
         if (c.keywords.includes("Windfury" /* Windfury */)) v += c.attack * 0.8;
@@ -1967,6 +2110,7 @@
         v2 *= 3;
         for (const kw of card.keywords) {
           if (kw === "Taunt" /* Taunt */) v2 += this.profile.selfPreservation * 1.5;
+          if (kw === "Vigilance" /* Vigilance */) v2 += this.profile.selfPreservation * 0.65;
           if (kw === "Rush" /* Rush */) v2 += this.profile.aggression * 1.8;
           if (kw === "Lifesteal" /* Lifesteal */) v2 += me.health < 15 ? 2.2 : 0.9;
           if (kw === "Unblockable" /* Unblockable */) v2 += this.profile.aggression * 1.6;
@@ -2400,7 +2544,87 @@
         tokens: "Assets/Resources/Cards/_Tokens",
         size: "512x720",
         naming: "<cardId>.png",
-        note: "\u041F\u0430\u043F\u043A\u0438 \u0441\u043E\u0437\u0434\u0430\u043D\u044B tools/generator/make_art_folders.py; \u0432 \u043A\u0430\u0436\u0434\u043E\u0439 \u043B\u0435\u0436\u0430\u0442 README.md \u0438 manifest.csv"
+        note: "\u041F\u043E\u0434\u0444\u0440\u0430\u043A\u0446\u0438\u0438 \u043D\u0430\u0445\u043E\u0434\u044F\u0442\u0441\u044F \u0432\u043E \u0432\u043B\u043E\u0436\u0435\u043D\u043D\u044B\u0445 \u043F\u0430\u043F\u043A\u0430\u0445 \u043E\u0441\u043D\u043E\u0432\u043D\u043E\u0439 \u0444\u0440\u0430\u043A\u0446\u0438\u0438; \u043F\u0430\u043F\u043A\u0438 \u0441\u043E\u0434\u0435\u0440\u0436\u0430\u0442 README.md \u0438 manifest.csv.",
+        bySubfaction: {
+          meh: {
+            name: "\u041C\u0435\u0445\u0438 / \u043C\u0435\u0445\u0430\u043D\u043E\u0438\u0434\u044B",
+            faction: "Aurites",
+            direction: "\u0430\u0433\u0440\u043E",
+            folder: "Assets/Resources/Cards/Aurites/Mechanoids"
+          },
+          grm: {
+            name: "\u0413\u0440\u0435\u043C\u043B\u0438\u043D\u044B",
+            faction: "Pyromancer",
+            direction: "\u0430\u0433\u0440\u043E",
+            folder: "Assets/Resources/Cards/Pyromancer/Gremlins"
+          },
+          spr: {
+            name: "\u0421\u043F\u0440\u0430\u0439\u0442\u044B",
+            faction: "Ethereal",
+            direction: "\u0430\u0433\u0440\u043E",
+            folder: "Assets/Resources/Cards/Ethereal/Sprites"
+          },
+          vmp: {
+            name: "\u0412\u0430\u043C\u043F\u0438\u0440\u044B",
+            faction: "Necrus",
+            direction: "\u043E\u0442\u0436\u043E\u0440",
+            folder: "Assets/Resources/Cards/Necrus/Vampires"
+          },
+          cnb: {
+            name: "\u041A\u0430\u043D\u043D\u0438\u0431\u0430\u043B\u044B",
+            faction: "Pyromancer",
+            direction: "\u043E\u0442\u0436\u043E\u0440",
+            folder: "Assets/Resources/Cards/Pyromancer/Cannibals"
+          },
+          scc: {
+            name: "\u0421\u0443\u043A\u043A\u0443\u0431\u044B",
+            faction: "Ethereal",
+            direction: "\u043E\u0442\u0436\u043E\u0440",
+            folder: "Assets/Resources/Cards/Ethereal/Succubi"
+          },
+          ent: {
+            name: "\u042D\u043D\u0442\u044B",
+            faction: "Terramorph",
+            direction: "\u0442\u043E\u043A\u0435\u043D\u044B",
+            folder: "Assets/Resources/Cards/Terramorph/Ents"
+          },
+          pal: {
+            name: "\u0411\u0440\u0430\u0442\u0441\u0442\u0432\u043E \u043F\u0430\u043B\u0430\u0434\u0438\u043D\u043E\u0432",
+            faction: "Aurites",
+            direction: "\u0442\u043E\u043A\u0435\u043D\u044B",
+            folder: "Assets/Resources/Cards/Aurites/PaladinBrotherhood"
+          },
+          sbd: {
+            name: "\u0421\u0432\u044F\u0449\u0435\u043D\u043D\u043E\u0435 \u0431\u0440\u0430\u0442\u0441\u0442\u0432\u043E / \u0441\u0432\u044F\u0449\u0435\u043D\u043D\u0438\u043A\u0438",
+            faction: "Neutral",
+            direction: "\u0442\u043E\u043A\u0435\u043D\u044B",
+            folder: "Assets/Resources/Cards/Neutral/SacredBrotherhood"
+          },
+          wtc: {
+            name: "\u0412\u0435\u0434\u044C\u043C\u044B",
+            faction: "Necrus",
+            direction: "\u044F\u0434 \u0438 \u043F\u043E\u0440\u0447\u0430",
+            folder: "Assets/Resources/Cards/Necrus/Witches"
+          },
+          asp: {
+            name: "\u0410\u0441\u043F\u0438\u0434\u044B",
+            faction: "Terramorph",
+            direction: "\u044F\u0434 \u0438 \u043F\u043E\u0440\u0447\u0430",
+            folder: "Assets/Resources/Cards/Terramorph/Aspids"
+          },
+          wtd: {
+            name: "\u0418\u0441\u0441\u043E\u0445\u0448\u0438\u0435",
+            faction: "Neutral",
+            direction: "\u044F\u0434 \u0438 \u043F\u043E\u0440\u0447\u0430",
+            folder: "Assets/Resources/Cards/Neutral/Withered"
+          },
+          nsu: {
+            name: "\u041D\u0430\u0451\u043C\u043D\u0438\u043A\u0438",
+            faction: "Neutral",
+            direction: "\u043F\u043E\u0434\u0434\u0435\u0440\u0436\u043A\u0430",
+            folder: "Assets/Resources/Cards/Neutral/Mercenaries"
+          }
+        }
       },
       expansion: {
         set: "\u042D\u0445\u043E-\u0426\u0438\u0442\u0430\u0434\u0435\u043B\u044C: \u0420\u0430\u0441\u0448\u0438\u0440\u0435\u043D\u0438\u0435 II \xAB\u0410\u0440\u0445\u0435\u0442\u0438\u043F\u044B\xBB",
@@ -9960,8 +10184,7 @@
         artworkPath: "Resources/Cards/Pyromancer/ter_s10.png",
         artPrompt: 'epic cinematic composition, volumetric light, dark fantasy trading card game illustration, a burst of spore-infused fire magic: "\u0421\u043F\u043E\u0440\u043E\u0432\u044B\u0439 \u0433\u043E\u043B\u0435\u043C", ember-red spores spreading across a dark fantasy battlefield, glowing fungal clusters, ash, heat distortion, fiery shockwave, Pyromancer energy, centered composition, rich color grading, painterly brushwork, high detail --ar 3:4 --style raw --v 6',
         negativePrompt: "text, letters, watermark, signature, ui, frame, border, extra limbs, deformed hands, lowres, blurry, jpeg artifacts, modern clothing, photograph, 3d render plastic look",
-        artSize: "512x720",
-        subtype: "Instant"
+        artSize: "512x720"
       },
       {
         id: "ter_s11",
@@ -12277,8 +12500,8 @@
           "aggro",
           "meh"
         ],
-        art: "Resources/Cards/Aurites/meh_01.png",
-        artworkPath: "Resources/Cards/Aurites/meh_01.png",
+        art: "Resources/Cards/Aurites/Mechanoids/meh_01.png",
+        artworkPath: "Resources/Cards/Aurites/Mechanoids/meh_01.png",
         artPrompt: 'dark fantasy trading card game illustration, brass clockwork golem mech, gears and steam: "\u041C\u0435\u0445-\u0442\u0440\u0443\u0436\u0435\u043D\u0438\u043A"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -12307,8 +12530,8 @@
           "aggro",
           "meh"
         ],
-        art: "Resources/Cards/Aurites/meh_02.png",
-        artworkPath: "Resources/Cards/Aurites/meh_02.png",
+        art: "Resources/Cards/Aurites/Mechanoids/meh_02.png",
+        artworkPath: "Resources/Cards/Aurites/Mechanoids/meh_02.png",
         artPrompt: 'dark fantasy trading card game illustration, brass clockwork golem mech, gears and steam: "\u0421\u043A\u0443\u0442\u0435\u0440-\u043B\u043E\u043C\u0449\u0438\u043A"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -12338,8 +12561,8 @@
           "aggro",
           "meh"
         ],
-        art: "Resources/Cards/Aurites/meh_03.png",
-        artworkPath: "Resources/Cards/Aurites/meh_03.png",
+        art: "Resources/Cards/Aurites/Mechanoids/meh_03.png",
+        artworkPath: "Resources/Cards/Aurites/Mechanoids/meh_03.png",
         artPrompt: 'dark fantasy trading card game illustration, brass clockwork golem mech, gears and steam: "\u041F\u0440\u043E\u0442\u043E\u043A\u043E\u043B \xAB\u0421\u0442\u0440\u0430\u0436\xBB"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -12368,8 +12591,8 @@
           "aggro",
           "meh"
         ],
-        art: "Resources/Cards/Aurites/meh_04.png",
-        artworkPath: "Resources/Cards/Aurites/meh_04.png",
+        art: "Resources/Cards/Aurites/Mechanoids/meh_04.png",
+        artworkPath: "Resources/Cards/Aurites/Mechanoids/meh_04.png",
         artPrompt: 'dark fantasy trading card game illustration, brass clockwork golem mech, gears and steam: "\u0428\u0442\u0443\u0440\u043C\u043E\u0432\u043E\u0439 \u043A\u043E\u0440\u043F\u0443\u0441"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -12422,8 +12645,8 @@
           "aggro",
           "meh"
         ],
-        art: "Resources/Cards/Aurites/meh_05.png",
-        artworkPath: "Resources/Cards/Aurites/meh_05.png",
+        art: "Resources/Cards/Aurites/Mechanoids/meh_05.png",
+        artworkPath: "Resources/Cards/Aurites/Mechanoids/meh_05.png",
         artPrompt: 'dark fantasy trading card game illustration, brass clockwork golem mech, gears and steam: "\u0418\u043D\u0436\u0435\u043D\u0435\u0440 \u0421\u0431\u043E\u0440\u043A\u0438"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -12465,8 +12688,8 @@
           "aggro",
           "meh"
         ],
-        art: "Resources/Cards/Aurites/meh_06.png",
-        artworkPath: "Resources/Cards/Aurites/meh_06.png",
+        art: "Resources/Cards/Aurites/Mechanoids/meh_06.png",
+        artworkPath: "Resources/Cards/Aurites/Mechanoids/meh_06.png",
         artPrompt: 'dark fantasy trading card game illustration, brass clockwork golem mech, gears and steam: "\u041E\u0431\u0448\u0438\u0432\u0449\u0438\u043A \u0431\u0440\u043E\u043D\u0435\u0439"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -12495,8 +12718,8 @@
           "aggro",
           "meh"
         ],
-        art: "Resources/Cards/Aurites/meh_07.png",
-        artworkPath: "Resources/Cards/Aurites/meh_07.png",
+        art: "Resources/Cards/Aurites/Mechanoids/meh_07.png",
+        artworkPath: "Resources/Cards/Aurites/Mechanoids/meh_07.png",
         artPrompt: 'dark fantasy trading card game illustration, brass clockwork golem mech, gears and steam: "\u0420\u0435\u043C\u043E\u043D\u0442\u043D\u044B\u0439 \u0434\u0440\u043E\u043D"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -12525,8 +12748,8 @@
           "aggro",
           "meh"
         ],
-        art: "Resources/Cards/Aurites/meh_08.png",
-        artworkPath: "Resources/Cards/Aurites/meh_08.png",
+        art: "Resources/Cards/Aurites/Mechanoids/meh_08.png",
+        artworkPath: "Resources/Cards/Aurites/Mechanoids/meh_08.png",
         artPrompt: 'dark fantasy trading card game illustration, brass clockwork golem mech, gears and steam: "\u041C\u0435\u0445-\u0433\u0440\u043E\u043C\u0438\u043B\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -12579,8 +12802,8 @@
           "aggro",
           "meh"
         ],
-        art: "Resources/Cards/Aurites/meh_09.png",
-        artworkPath: "Resources/Cards/Aurites/meh_09.png",
+        art: "Resources/Cards/Aurites/Mechanoids/meh_09.png",
+        artworkPath: "Resources/Cards/Aurites/Mechanoids/meh_09.png",
         artPrompt: 'dark fantasy trading card game illustration, brass clockwork golem mech, gears and steam: "\u041A\u043E\u043D\u0432\u0435\u0439\u0435\u0440\u043D\u044B\u0439 \u0431\u043E\u0435\u0446"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -12610,8 +12833,8 @@
           "aggro",
           "meh"
         ],
-        art: "Resources/Cards/Aurites/meh_10.png",
-        artworkPath: "Resources/Cards/Aurites/meh_10.png",
+        art: "Resources/Cards/Aurites/Mechanoids/meh_10.png",
+        artworkPath: "Resources/Cards/Aurites/Mechanoids/meh_10.png",
         artPrompt: 'dark fantasy trading card game illustration, brass clockwork golem mech, gears and steam: "\u041E\u0441\u0430\u0434\u043D\u044B\u0439 \u0448\u0430\u0433\u043E\u0445\u043E\u0434"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -12645,8 +12868,8 @@
           "aggro",
           "meh"
         ],
-        art: "Resources/Cards/Aurites/meh_11.png",
-        artworkPath: "Resources/Cards/Aurites/meh_11.png",
+        art: "Resources/Cards/Aurites/Mechanoids/meh_11.png",
+        artworkPath: "Resources/Cards/Aurites/Mechanoids/meh_11.png",
         artPrompt: 'dark fantasy trading card game illustration, brass clockwork golem mech, gears and steam: "\u0411\u0430\u0441\u0442\u0438\u043E\u043D \u041C\u0430\u043D\u0443\u0444\u0430\u043A\u0442\u043E\u0440\u0438\u0438"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -12675,8 +12898,8 @@
           "aggro",
           "meh"
         ],
-        art: "Resources/Cards/Aurites/meh_12.png",
-        artworkPath: "Resources/Cards/Aurites/meh_12.png",
+        art: "Resources/Cards/Aurites/Mechanoids/meh_12.png",
+        artworkPath: "Resources/Cards/Aurites/Mechanoids/meh_12.png",
         artPrompt: 'dark fantasy trading card game illustration, brass clockwork golem mech, gears and steam: "\u041F\u0430\u0440\u043E\u0432\u043E\u0439 \u043F\u043E\u0442\u0440\u043E\u0448\u0438\u0442\u0435\u043B\u044C"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -12709,8 +12932,8 @@
           "aggro",
           "meh"
         ],
-        art: "Resources/Cards/Aurites/meh_13.png",
-        artworkPath: "Resources/Cards/Aurites/meh_13.png",
+        art: "Resources/Cards/Aurites/Mechanoids/meh_13.png",
+        artworkPath: "Resources/Cards/Aurites/Mechanoids/meh_13.png",
         artPrompt: 'dark fantasy trading card game illustration, brass clockwork golem mech, gears and steam: "\u041F\u0435\u0440\u0435\u0433\u0440\u0435\u0432"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -12740,8 +12963,8 @@
           "aggro",
           "meh"
         ],
-        art: "Resources/Cards/Aurites/meh_14.png",
-        artworkPath: "Resources/Cards/Aurites/meh_14.png",
+        art: "Resources/Cards/Aurites/Mechanoids/meh_14.png",
+        artworkPath: "Resources/Cards/Aurites/Mechanoids/meh_14.png",
         artPrompt: 'dark fantasy trading card game illustration, brass clockwork golem mech, gears and steam: "\u0422\u0438\u0442\u0430\u043D \u041C\u0430\u043D\u0443\u0444\u0430\u043A\u0442\u043E\u0440\u0438\u0438"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -12771,8 +12994,8 @@
           "aggro",
           "grm"
         ],
-        art: "Resources/Cards/Pyromancer/grm_01.png",
-        artworkPath: "Resources/Cards/Pyromancer/grm_01.png",
+        art: "Resources/Cards/Pyromancer/Gremlins/grm_01.png",
+        artworkPath: "Resources/Cards/Pyromancer/Gremlins/grm_01.png",
         artPrompt: 'dark fantasy trading card game illustration, feral goblin raider with torch and jagged knife: "\u0413\u0440\u0435\u043C\u043B\u0438\u043D-\u0448\u043D\u044B\u0440\u044C"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -12807,8 +13030,8 @@
           "aggro",
           "grm"
         ],
-        art: "Resources/Cards/Pyromancer/grm_02.png",
-        artworkPath: "Resources/Cards/Pyromancer/grm_02.png",
+        art: "Resources/Cards/Pyromancer/Gremlins/grm_02.png",
+        artworkPath: "Resources/Cards/Pyromancer/Gremlins/grm_02.png",
         artPrompt: 'dark fantasy trading card game illustration, feral goblin raider with torch and jagged knife: "\u0413\u0440\u0435\u043C\u043B\u0438\u043D-\u0438\u0441\u043A\u0440\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -12838,8 +13061,8 @@
           "aggro",
           "grm"
         ],
-        art: "Resources/Cards/Pyromancer/grm_03.png",
-        artworkPath: "Resources/Cards/Pyromancer/grm_03.png",
+        art: "Resources/Cards/Pyromancer/Gremlins/grm_03.png",
+        artworkPath: "Resources/Cards/Pyromancer/Gremlins/grm_03.png",
         artPrompt: 'dark fantasy trading card game illustration, feral goblin raider with torch and jagged knife: "\u041D\u0430\u043B\u0451\u0442\u0447\u0438\u043A \u0441\u0442\u0430\u0438"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -12869,8 +13092,8 @@
           "aggro",
           "grm"
         ],
-        art: "Resources/Cards/Pyromancer/grm_04.png",
-        artworkPath: "Resources/Cards/Pyromancer/grm_04.png",
+        art: "Resources/Cards/Pyromancer/Gremlins/grm_04.png",
+        artworkPath: "Resources/Cards/Pyromancer/Gremlins/grm_04.png",
         artPrompt: 'dark fantasy trading card game illustration, feral goblin raider with torch and jagged knife: "\u0413\u0440\u0435\u043C\u043B\u0438\u043D-\u0434\u0432\u043E\u0439\u043D\u044F\u0448\u043A\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -12899,8 +13122,8 @@
           "aggro",
           "grm"
         ],
-        art: "Resources/Cards/Pyromancer/grm_05.png",
-        artworkPath: "Resources/Cards/Pyromancer/grm_05.png",
+        art: "Resources/Cards/Pyromancer/Gremlins/grm_05.png",
+        artworkPath: "Resources/Cards/Pyromancer/Gremlins/grm_05.png",
         artPrompt: 'dark fantasy trading card game illustration, feral goblin raider with torch and jagged knife: "\u0420\u0432\u0430\u0447 \u0434\u043E\u0431\u044B\u0447\u0438"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -12955,8 +13178,8 @@
           "aggro",
           "grm"
         ],
-        art: "Resources/Cards/Pyromancer/grm_06.png",
-        artworkPath: "Resources/Cards/Pyromancer/grm_06.png",
+        art: "Resources/Cards/Pyromancer/Gremlins/grm_06.png",
+        artworkPath: "Resources/Cards/Pyromancer/Gremlins/grm_06.png",
         artPrompt: 'dark fantasy trading card game illustration, feral goblin raider with torch and jagged knife: "\u0412\u043E\u0436\u0430\u043A \u043D\u0430\u043B\u0451\u0442\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -12985,8 +13208,8 @@
           "aggro",
           "grm"
         ],
-        art: "Resources/Cards/Pyromancer/grm_07.png",
-        artworkPath: "Resources/Cards/Pyromancer/grm_07.png",
+        art: "Resources/Cards/Pyromancer/Gremlins/grm_07.png",
+        artworkPath: "Resources/Cards/Pyromancer/Gremlins/grm_07.png",
         artPrompt: 'dark fantasy trading card game illustration, feral goblin raider with torch and jagged knife: "\u0422\u0440\u0443\u0449\u043E\u0431\u043D\u044B\u0439 \u043D\u043E\u0436"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -13022,8 +13245,8 @@
           "aggro",
           "grm"
         ],
-        art: "Resources/Cards/Pyromancer/grm_08.png",
-        artworkPath: "Resources/Cards/Pyromancer/grm_08.png",
+        art: "Resources/Cards/Pyromancer/Gremlins/grm_08.png",
+        artworkPath: "Resources/Cards/Pyromancer/Gremlins/grm_08.png",
         artPrompt: 'dark fantasy trading card game illustration, feral goblin raider with torch and jagged knife: "\u0413\u0440\u0435\u043C\u043B\u0438\u043D-\u043F\u043E\u0434\u0440\u044B\u0432\u043D\u0438\u043A"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -13053,8 +13276,8 @@
           "aggro",
           "grm"
         ],
-        art: "Resources/Cards/Pyromancer/grm_09.png",
-        artworkPath: "Resources/Cards/Pyromancer/grm_09.png",
+        art: "Resources/Cards/Pyromancer/Gremlins/grm_09.png",
+        artworkPath: "Resources/Cards/Pyromancer/Gremlins/grm_09.png",
         artPrompt: 'dark fantasy trading card game illustration, feral goblin raider with torch and jagged knife: "\u0411\u0435\u0448\u0435\u043D\u044B\u0439 \u0440\u0435\u0437\u0430\u043A"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -13134,8 +13357,8 @@
           "aggro",
           "grm"
         ],
-        art: "Resources/Cards/Pyromancer/grm_10.png",
-        artworkPath: "Resources/Cards/Pyromancer/grm_10.png",
+        art: "Resources/Cards/Pyromancer/Gremlins/grm_10.png",
+        artworkPath: "Resources/Cards/Pyromancer/Gremlins/grm_10.png",
         artPrompt: 'dark fantasy trading card game illustration, feral goblin raider with torch and jagged knife: "\u041A\u043B\u0438\u0447 \u0441\u0442\u0430\u0438"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -13167,8 +13390,8 @@
           "aggro",
           "grm"
         ],
-        art: "Resources/Cards/Pyromancer/grm_11.png",
-        artworkPath: "Resources/Cards/Pyromancer/grm_11.png",
+        art: "Resources/Cards/Pyromancer/Gremlins/grm_11.png",
+        artworkPath: "Resources/Cards/Pyromancer/Gremlins/grm_11.png",
         artPrompt: 'dark fantasy trading card game illustration, feral goblin raider with torch and jagged knife: "\u0413\u0440\u0435\u043C\u043B\u0438\u043D-\u0431\u0443\u043D\u0442"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -13198,8 +13421,8 @@
           "aggro",
           "grm"
         ],
-        art: "Resources/Cards/Pyromancer/grm_12.png",
-        artworkPath: "Resources/Cards/Pyromancer/grm_12.png",
+        art: "Resources/Cards/Pyromancer/Gremlins/grm_12.png",
+        artworkPath: "Resources/Cards/Pyromancer/Gremlins/grm_12.png",
         artPrompt: 'dark fantasy trading card game illustration, feral goblin raider with torch and jagged knife: "\u0412\u043E\u0436\u0434\u044C \u0413\u0440\u0435\u043C\u043B\u0438\u043D\u043E\u0432"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -13232,8 +13455,8 @@
           "aggro",
           "grm"
         ],
-        art: "Resources/Cards/Pyromancer/grm_13.png",
-        artworkPath: "Resources/Cards/Pyromancer/grm_13.png",
+        art: "Resources/Cards/Pyromancer/Gremlins/grm_13.png",
+        artworkPath: "Resources/Cards/Pyromancer/Gremlins/grm_13.png",
         artPrompt: 'dark fantasy trading card game illustration, feral goblin raider with torch and jagged knife: "\u0423\u0433\u043E\u043B\u044C\u043D\u0430\u044F \u0438\u0441\u043A\u0440\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -13266,8 +13489,8 @@
           "aggro",
           "grm"
         ],
-        art: "Resources/Cards/Pyromancer/grm_14.png",
-        artworkPath: "Resources/Cards/Pyromancer/grm_14.png",
+        art: "Resources/Cards/Pyromancer/Gremlins/grm_14.png",
+        artworkPath: "Resources/Cards/Pyromancer/Gremlins/grm_14.png",
         artPrompt: 'dark fantasy trading card game illustration, feral goblin raider with torch and jagged knife: "\u042F\u0440\u043E\u0441\u0442\u044C \u0441\u0442\u0430\u0438"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -13296,8 +13519,8 @@
           "aggro",
           "spr"
         ],
-        art: "Resources/Cards/Ethereal/spr_01.png",
-        artworkPath: "Resources/Cards/Ethereal/spr_01.png",
+        art: "Resources/Cards/Ethereal/Sprites/spr_01.png",
+        artworkPath: "Resources/Cards/Ethereal/Sprites/spr_01.png",
         artPrompt: 'dark fantasy trading card game illustration, glowing fae sprite with translucent wings: "\u0421\u043F\u0440\u0430\u0439\u0442-\u043C\u0435\u0440\u0446\u0430\u043D\u0438\u0435"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -13324,8 +13547,8 @@
           "aggro",
           "spr"
         ],
-        art: "Resources/Cards/Ethereal/spr_02.png",
-        artworkPath: "Resources/Cards/Ethereal/spr_02.png",
+        art: "Resources/Cards/Ethereal/Sprites/spr_02.png",
+        artworkPath: "Resources/Cards/Ethereal/Sprites/spr_02.png",
         artPrompt: 'dark fantasy trading card game illustration, glowing fae sprite with translucent wings: "\u0421\u043F\u0440\u0430\u0439\u0442-\u043E\u0441\u043A\u043E\u043B\u043E\u043A"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -13354,8 +13577,8 @@
           "aggro",
           "spr"
         ],
-        art: "Resources/Cards/Ethereal/spr_03.png",
-        artworkPath: "Resources/Cards/Ethereal/spr_03.png",
+        art: "Resources/Cards/Ethereal/Sprites/spr_03.png",
+        artworkPath: "Resources/Cards/Ethereal/Sprites/spr_03.png",
         artPrompt: 'dark fantasy trading card game illustration, glowing fae sprite with translucent wings: "\u041D\u043E\u0447\u043D\u043E\u0439 \u0448\u0435\u043F\u0442\u0443\u043D"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -13384,8 +13607,8 @@
           "aggro",
           "spr"
         ],
-        art: "Resources/Cards/Ethereal/spr_04.png",
-        artworkPath: "Resources/Cards/Ethereal/spr_04.png",
+        art: "Resources/Cards/Ethereal/Sprites/spr_04.png",
+        artworkPath: "Resources/Cards/Ethereal/Sprites/spr_04.png",
         artPrompt: 'dark fantasy trading card game illustration, glowing fae sprite with translucent wings: "\u0421\u043F\u0440\u0430\u0439\u0442-\u0437\u0430\u0432\u0435\u0441\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -13414,8 +13637,8 @@
           "aggro",
           "spr"
         ],
-        art: "Resources/Cards/Ethereal/spr_05.png",
-        artworkPath: "Resources/Cards/Ethereal/spr_05.png",
+        art: "Resources/Cards/Ethereal/Sprites/spr_05.png",
+        artworkPath: "Resources/Cards/Ethereal/Sprites/spr_05.png",
         artPrompt: 'dark fantasy trading card game illustration, glowing fae sprite with translucent wings: "\u0417\u0432\u0451\u0437\u0434\u043D\u044B\u0439 \u043D\u0430\u043B\u0451\u0442\u0447\u0438\u043A"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -13450,8 +13673,8 @@
           "aggro",
           "spr"
         ],
-        art: "Resources/Cards/Ethereal/spr_06.png",
-        artworkPath: "Resources/Cards/Ethereal/spr_06.png",
+        art: "Resources/Cards/Ethereal/Sprites/spr_06.png",
+        artworkPath: "Resources/Cards/Ethereal/Sprites/spr_06.png",
         artPrompt: 'dark fantasy trading card game illustration, glowing fae sprite with translucent wings: "\u0425\u0440\u0430\u043D\u0438\u0442\u0435\u043B\u044C\u043D\u0438\u0446\u0430 \u043C\u0435\u0440\u0446\u0430\u043D\u0438\u044F"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -13487,8 +13710,8 @@
           "aggro",
           "spr"
         ],
-        art: "Resources/Cards/Ethereal/spr_07.png",
-        artworkPath: "Resources/Cards/Ethereal/spr_07.png",
+        art: "Resources/Cards/Ethereal/Sprites/spr_07.png",
+        artworkPath: "Resources/Cards/Ethereal/Sprites/spr_07.png",
         artPrompt: 'dark fantasy trading card game illustration, glowing fae sprite with translucent wings: "\u0421\u043F\u0440\u0430\u0439\u0442-\u0432\u0435\u0441\u0442\u044C"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -13517,8 +13740,8 @@
           "aggro",
           "spr"
         ],
-        art: "Resources/Cards/Ethereal/spr_08.png",
-        artworkPath: "Resources/Cards/Ethereal/spr_08.png",
+        art: "Resources/Cards/Ethereal/Sprites/spr_08.png",
+        artworkPath: "Resources/Cards/Ethereal/Sprites/spr_08.png",
         artPrompt: 'dark fantasy trading card game illustration, glowing fae sprite with translucent wings: "\u0421\u0443\u043C\u0435\u0440\u0435\u0447\u043D\u044B\u0439 \u043A\u043B\u0438\u043D\u043E\u043A"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -13548,8 +13771,8 @@
           "aggro",
           "spr"
         ],
-        art: "Resources/Cards/Ethereal/spr_09.png",
-        artworkPath: "Resources/Cards/Ethereal/spr_09.png",
+        art: "Resources/Cards/Ethereal/Sprites/spr_09.png",
+        artworkPath: "Resources/Cards/Ethereal/Sprites/spr_09.png",
         artPrompt: 'dark fantasy trading card game illustration, glowing fae sprite with translucent wings: "\u0414\u0432\u043E\u0439\u043D\u0430\u044F \u0432\u0441\u043F\u044B\u0448\u043A\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -13584,8 +13807,8 @@
           "aggro",
           "spr"
         ],
-        art: "Resources/Cards/Ethereal/spr_10.png",
-        artworkPath: "Resources/Cards/Ethereal/spr_10.png",
+        art: "Resources/Cards/Ethereal/Sprites/spr_10.png",
+        artworkPath: "Resources/Cards/Ethereal/Sprites/spr_10.png",
         artPrompt: 'dark fantasy trading card game illustration, glowing fae sprite with translucent wings: "\u0421\u043F\u0440\u0430\u0439\u0442-\u043F\u043E\u0445\u0438\u0442\u0438\u0442\u0435\u043B\u044C"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -13617,8 +13840,8 @@
           "aggro",
           "spr"
         ],
-        art: "Resources/Cards/Ethereal/spr_11.png",
-        artworkPath: "Resources/Cards/Ethereal/spr_11.png",
+        art: "Resources/Cards/Ethereal/Sprites/spr_11.png",
+        artworkPath: "Resources/Cards/Ethereal/Sprites/spr_11.png",
         artPrompt: 'dark fantasy trading card game illustration, glowing fae sprite with translucent wings: "\u041F\u043E\u0442\u043E\u043A \u0437\u0432\u0451\u0437\u0434"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -13648,8 +13871,8 @@
           "aggro",
           "spr"
         ],
-        art: "Resources/Cards/Ethereal/spr_12.png",
-        artworkPath: "Resources/Cards/Ethereal/spr_12.png",
+        art: "Resources/Cards/Ethereal/Sprites/spr_12.png",
+        artworkPath: "Resources/Cards/Ethereal/Sprites/spr_12.png",
         artPrompt: 'dark fantasy trading card game illustration, glowing fae sprite with translucent wings: "\u0424\u0430\u043D\u0442\u043E\u043C-\u043F\u0440\u0438\u043B\u0438\u0432\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -13682,8 +13905,8 @@
           "aggro",
           "spr"
         ],
-        art: "Resources/Cards/Ethereal/spr_13.png",
-        artworkPath: "Resources/Cards/Ethereal/spr_13.png",
+        art: "Resources/Cards/Ethereal/Sprites/spr_13.png",
+        artworkPath: "Resources/Cards/Ethereal/Sprites/spr_13.png",
         artPrompt: 'dark fantasy trading card game illustration, glowing fae sprite with translucent wings: "\u0421\u0442\u0440\u0435\u043C\u0438\u0442\u0435\u043B\u044C\u043D\u043E\u0441\u0442\u044C"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -13716,8 +13939,8 @@
           "aggro",
           "spr"
         ],
-        art: "Resources/Cards/Ethereal/spr_14.png",
-        artworkPath: "Resources/Cards/Ethereal/spr_14.png",
+        art: "Resources/Cards/Ethereal/Sprites/spr_14.png",
+        artworkPath: "Resources/Cards/Ethereal/Sprites/spr_14.png",
         artPrompt: 'dark fantasy trading card game illustration, glowing fae sprite with translucent wings: "\u041B\u0443\u043D\u043D\u0430\u044F \u0441\u0442\u0440\u0435\u043B\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -13746,8 +13969,8 @@
           "drain",
           "vmp"
         ],
-        art: "Resources/Cards/Necrus/vmp_01.png",
-        artworkPath: "Resources/Cards/Necrus/vmp_01.png",
+        art: "Resources/Cards/Necrus/Vampires/vmp_01.png",
+        artworkPath: "Resources/Cards/Necrus/Vampires/vmp_01.png",
         artPrompt: 'dark fantasy trading card game illustration, pale vampire noble with crimson eyes: "\u041F\u043E\u043B\u0443\u043D\u043E\u0447\u043D\u044B\u0439 \u043B\u043E\u0432\u0447\u0438\u0439"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -13776,8 +13999,8 @@
           "drain",
           "vmp"
         ],
-        art: "Resources/Cards/Necrus/vmp_02.png",
-        artworkPath: "Resources/Cards/Necrus/vmp_02.png",
+        art: "Resources/Cards/Necrus/Vampires/vmp_02.png",
+        artworkPath: "Resources/Cards/Necrus/Vampires/vmp_02.png",
         artPrompt: 'dark fantasy trading card game illustration, pale vampire noble with crimson eyes: "\u0412\u0443\u0440\u0434\u0430\u043B\u0430\u043A-\u0441\u043B\u0435\u0434\u043E\u043F\u044B\u0442"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -13807,8 +14030,8 @@
           "drain",
           "vmp"
         ],
-        art: "Resources/Cards/Necrus/vmp_03.png",
-        artworkPath: "Resources/Cards/Necrus/vmp_03.png",
+        art: "Resources/Cards/Necrus/Vampires/vmp_03.png",
+        artworkPath: "Resources/Cards/Necrus/Vampires/vmp_03.png",
         artPrompt: 'dark fantasy trading card game illustration, pale vampire noble with crimson eyes: "\u041A\u043D\u044F\u0436\u0438\u0439 \u043E\u0442\u043F\u0440\u044B\u0441\u043A"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -13838,8 +14061,8 @@
           "drain",
           "vmp"
         ],
-        art: "Resources/Cards/Necrus/vmp_04.png",
-        artworkPath: "Resources/Cards/Necrus/vmp_04.png",
+        art: "Resources/Cards/Necrus/Vampires/vmp_04.png",
+        artworkPath: "Resources/Cards/Necrus/Vampires/vmp_04.png",
         artPrompt: 'dark fantasy trading card game illustration, pale vampire noble with crimson eyes: "\u041A\u0440\u043E\u0432\u0430\u0432\u044B\u0439 \u043F\u0440\u0438\u0432\u0440\u0430\u0442\u043D\u0438\u043A"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -13868,8 +14091,8 @@
           "drain",
           "vmp"
         ],
-        art: "Resources/Cards/Necrus/vmp_05.png",
-        artworkPath: "Resources/Cards/Necrus/vmp_05.png",
+        art: "Resources/Cards/Necrus/Vampires/vmp_05.png",
+        artworkPath: "Resources/Cards/Necrus/Vampires/vmp_05.png",
         artPrompt: 'dark fantasy trading card game illustration, pale vampire noble with crimson eyes: "\u0421\u0442\u0430\u0440\u0435\u0439\u0448\u0438\u0439 \u0436\u043D\u0435\u0446"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -13899,8 +14122,8 @@
           "drain",
           "vmp"
         ],
-        art: "Resources/Cards/Necrus/vmp_06.png",
-        artworkPath: "Resources/Cards/Necrus/vmp_06.png",
+        art: "Resources/Cards/Necrus/Vampires/vmp_06.png",
+        artworkPath: "Resources/Cards/Necrus/Vampires/vmp_06.png",
         artPrompt: 'dark fantasy trading card game illustration, pale vampire noble with crimson eyes: "\u041D\u0435\u0442\u043E\u043F\u044B\u0440\u044C-\u0440\u0435\u0437\u0443\u043D"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -13936,8 +14159,8 @@
           "drain",
           "vmp"
         ],
-        art: "Resources/Cards/Necrus/vmp_07.png",
-        artworkPath: "Resources/Cards/Necrus/vmp_07.png",
+        art: "Resources/Cards/Necrus/Vampires/vmp_07.png",
+        artworkPath: "Resources/Cards/Necrus/Vampires/vmp_07.png",
         artPrompt: 'dark fantasy trading card game illustration, pale vampire noble with crimson eyes: "\u0426\u0435\u043B\u0438\u0442\u0435\u043B\u044C\u043D\u0438\u0446\u0430 \u0441\u043A\u043B\u0435\u043F\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -13966,8 +14189,8 @@
           "drain",
           "vmp"
         ],
-        art: "Resources/Cards/Necrus/vmp_08.png",
-        artworkPath: "Resources/Cards/Necrus/vmp_08.png",
+        art: "Resources/Cards/Necrus/Vampires/vmp_08.png",
+        artworkPath: "Resources/Cards/Necrus/Vampires/vmp_08.png",
         artPrompt: 'dark fantasy trading card game illustration, pale vampire noble with crimson eyes: "\u0411\u0430\u0440\u043E\u043D \u0411\u0430\u0433\u0440\u043E\u0432\u043E\u0439 \u041B\u0443\u043D\u044B"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -14002,8 +14225,8 @@
           "drain",
           "vmp"
         ],
-        art: "Resources/Cards/Necrus/vmp_09.png",
-        artworkPath: "Resources/Cards/Necrus/vmp_09.png",
+        art: "Resources/Cards/Necrus/Vampires/vmp_09.png",
+        artworkPath: "Resources/Cards/Necrus/Vampires/vmp_09.png",
         artPrompt: 'dark fantasy trading card game illustration, pale vampire noble with crimson eyes: "\u041B\u0430\u043C\u0438\u044F-\u0447\u0440\u0435\u0432\u043E\u0432\u0435\u0449\u0430\u0442\u0435\u043B\u044C\u043D\u0438\u0446\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -14033,8 +14256,8 @@
           "drain",
           "vmp"
         ],
-        art: "Resources/Cards/Necrus/vmp_10.png",
-        artworkPath: "Resources/Cards/Necrus/vmp_10.png",
+        art: "Resources/Cards/Necrus/Vampires/vmp_10.png",
+        artworkPath: "Resources/Cards/Necrus/Vampires/vmp_10.png",
         artPrompt: 'dark fantasy trading card game illustration, pale vampire noble with crimson eyes: "\u041A\u0430\u043F\u0435\u043B\u043B\u0430\u043D \u0416\u0430\u0436\u0434\u044B"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -14063,8 +14286,8 @@
           "drain",
           "vmp"
         ],
-        art: "Resources/Cards/Necrus/vmp_11.png",
-        artworkPath: "Resources/Cards/Necrus/vmp_11.png",
+        art: "Resources/Cards/Necrus/Vampires/vmp_11.png",
+        artworkPath: "Resources/Cards/Necrus/Vampires/vmp_11.png",
         artPrompt: 'dark fantasy trading card game illustration, pale vampire noble with crimson eyes: "\u041F\u0430\u0442\u0440\u0438\u0430\u0440\u0445 \u0420\u043E\u0434\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -14099,8 +14322,8 @@
           "drain",
           "vmp"
         ],
-        art: "Resources/Cards/Necrus/vmp_12.png",
-        artworkPath: "Resources/Cards/Necrus/vmp_12.png",
+        art: "Resources/Cards/Necrus/Vampires/vmp_12.png",
+        artworkPath: "Resources/Cards/Necrus/Vampires/vmp_12.png",
         artPrompt: 'dark fantasy trading card game illustration, pale vampire noble with crimson eyes: "\u0421\u0443\u043C\u0440\u0430\u0447\u043D\u0430\u044F \u0433\u0440\u0430\u0444\u0438\u043D\u044F"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -14133,8 +14356,8 @@
           "drain",
           "vmp"
         ],
-        art: "Resources/Cards/Necrus/vmp_13.png",
-        artworkPath: "Resources/Cards/Necrus/vmp_13.png",
+        art: "Resources/Cards/Necrus/Vampires/vmp_13.png",
+        artworkPath: "Resources/Cards/Necrus/Vampires/vmp_13.png",
         artPrompt: 'dark fantasy trading card game illustration, pale vampire noble with crimson eyes: "\u0413\u043B\u043E\u0442\u043E\u043A \u043A\u0440\u043E\u0432\u0438"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -14172,8 +14395,8 @@
           "drain",
           "vmp"
         ],
-        art: "Resources/Cards/Necrus/vmp_14.png",
-        artworkPath: "Resources/Cards/Necrus/vmp_14.png",
+        art: "Resources/Cards/Necrus/Vampires/vmp_14.png",
+        artworkPath: "Resources/Cards/Necrus/Vampires/vmp_14.png",
         artPrompt: 'dark fantasy trading card game illustration, pale vampire noble with crimson eyes: "\u0421\u0438\u0444\u043E\u043D \u0434\u0443\u0448\u0438"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -14202,8 +14425,8 @@
           "drain",
           "cnb"
         ],
-        art: "Resources/Cards/Pyromancer/cnb_01.png",
-        artworkPath: "Resources/Cards/Pyromancer/cnb_01.png",
+        art: "Resources/Cards/Pyromancer/Cannibals/cnb_01.png",
+        artworkPath: "Resources/Cards/Pyromancer/Cannibals/cnb_01.png",
         artPrompt: 'dark fantasy trading card game illustration, savage cannibal warband brute with bone trophies: "\u041F\u043E\u0436\u0438\u0440\u0430\u0442\u0435\u043B\u044C \u043F\u0430\u0434\u0430\u043B\u0438"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -14230,8 +14453,8 @@
           "drain",
           "cnb"
         ],
-        art: "Resources/Cards/Pyromancer/cnb_02.png",
-        artworkPath: "Resources/Cards/Pyromancer/cnb_02.png",
+        art: "Resources/Cards/Pyromancer/Cannibals/cnb_02.png",
+        artworkPath: "Resources/Cards/Pyromancer/Cannibals/cnb_02.png",
         artPrompt: 'dark fantasy trading card game illustration, savage cannibal warband brute with bone trophies: "\u041A\u043E\u0441\u0442\u0435\u0433\u0440\u044B\u0437"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -14274,8 +14497,8 @@
           "drain",
           "cnb"
         ],
-        art: "Resources/Cards/Pyromancer/cnb_03.png",
-        artworkPath: "Resources/Cards/Pyromancer/cnb_03.png",
+        art: "Resources/Cards/Pyromancer/Cannibals/cnb_03.png",
+        artworkPath: "Resources/Cards/Pyromancer/Cannibals/cnb_03.png",
         artPrompt: 'dark fantasy trading card game illustration, savage cannibal warband brute with bone trophies: "\u0422\u0440\u0430\u043F\u0435\u0437\u043D\u0438\u043A \u0432\u043E\u0439\u043D\u044B"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -14319,8 +14542,8 @@
           "drain",
           "cnb"
         ],
-        art: "Resources/Cards/Pyromancer/cnb_04.png",
-        artworkPath: "Resources/Cards/Pyromancer/cnb_04.png",
+        art: "Resources/Cards/Pyromancer/Cannibals/cnb_04.png",
+        artworkPath: "Resources/Cards/Pyromancer/Cannibals/cnb_04.png",
         artPrompt: 'dark fantasy trading card game illustration, savage cannibal warband brute with bone trophies: "\u041E\u0431\u0436\u043E\u0440\u0430 \u043E\u0442\u0440\u044F\u0434\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -14364,8 +14587,8 @@
           "drain",
           "cnb"
         ],
-        art: "Resources/Cards/Pyromancer/cnb_05.png",
-        artworkPath: "Resources/Cards/Pyromancer/cnb_05.png",
+        art: "Resources/Cards/Pyromancer/Cannibals/cnb_05.png",
+        artworkPath: "Resources/Cards/Pyromancer/Cannibals/cnb_05.png",
         artPrompt: 'dark fantasy trading card game illustration, savage cannibal warband brute with bone trophies: "\u041F\u0440\u043E\u0436\u043E\u0440\u043B\u0438\u0432\u044B\u0439 \u0432\u0430\u043B"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -14405,8 +14628,8 @@
           "drain",
           "cnb"
         ],
-        art: "Resources/Cards/Pyromancer/cnb_06.png",
-        artworkPath: "Resources/Cards/Pyromancer/cnb_06.png",
+        art: "Resources/Cards/Pyromancer/Cannibals/cnb_06.png",
+        artworkPath: "Resources/Cards/Pyromancer/Cannibals/cnb_06.png",
         artPrompt: 'dark fantasy trading card game illustration, savage cannibal warband brute with bone trophies: "\u041D\u0430\u0441\u044B\u0449\u0435\u043D\u043D\u044B\u0439 \u0437\u0432\u0435\u0440\u044C"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -14435,8 +14658,8 @@
           "drain",
           "cnb"
         ],
-        art: "Resources/Cards/Pyromancer/cnb_07.png",
-        artworkPath: "Resources/Cards/Pyromancer/cnb_07.png",
+        art: "Resources/Cards/Pyromancer/Cannibals/cnb_07.png",
+        artworkPath: "Resources/Cards/Pyromancer/Cannibals/cnb_07.png",
         artPrompt: 'dark fantasy trading card game illustration, savage cannibal warband brute with bone trophies: "\u0420\u0432\u0430\u0447 \u043C\u044F\u0441\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -14473,8 +14696,8 @@
           "drain",
           "cnb"
         ],
-        art: "Resources/Cards/Pyromancer/cnb_08.png",
-        artworkPath: "Resources/Cards/Pyromancer/cnb_08.png",
+        art: "Resources/Cards/Pyromancer/Cannibals/cnb_08.png",
+        artworkPath: "Resources/Cards/Pyromancer/Cannibals/cnb_08.png",
         artPrompt: 'dark fantasy trading card game illustration, savage cannibal warband brute with bone trophies: "\u041F\u0438\u0440\u0448\u0435\u0441\u0442\u0432\u0435\u043D\u043D\u044B\u0439 \u0448\u0430\u043C\u0430\u043D"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -14518,8 +14741,8 @@
           "drain",
           "cnb"
         ],
-        art: "Resources/Cards/Pyromancer/cnb_09.png",
-        artworkPath: "Resources/Cards/Pyromancer/cnb_09.png",
+        art: "Resources/Cards/Pyromancer/Cannibals/cnb_09.png",
+        artworkPath: "Resources/Cards/Pyromancer/Cannibals/cnb_09.png",
         artPrompt: 'dark fantasy trading card game illustration, savage cannibal warband brute with bone trophies: "\u0413\u043B\u043E\u0442-\u043A\u043E\u0441\u0442\u043E\u043B\u043E\u043C"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -14562,8 +14785,8 @@
           "drain",
           "cnb"
         ],
-        art: "Resources/Cards/Pyromancer/cnb_10.png",
-        artworkPath: "Resources/Cards/Pyromancer/cnb_10.png",
+        art: "Resources/Cards/Pyromancer/Cannibals/cnb_10.png",
+        artworkPath: "Resources/Cards/Pyromancer/Cannibals/cnb_10.png",
         artPrompt: 'dark fantasy trading card game illustration, savage cannibal warband brute with bone trophies: "\u041F\u043E\u0436\u0438\u0440\u0430\u0442\u0435\u043B\u044C \u041A\u043E\u0441\u0442\u0435\u0439"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -14599,8 +14822,8 @@
           "drain",
           "cnb"
         ],
-        art: "Resources/Cards/Pyromancer/cnb_11.png",
-        artworkPath: "Resources/Cards/Pyromancer/cnb_11.png",
+        art: "Resources/Cards/Pyromancer/Cannibals/cnb_11.png",
+        artworkPath: "Resources/Cards/Pyromancer/Cannibals/cnb_11.png",
         artPrompt: 'dark fantasy trading card game illustration, savage cannibal warband brute with bone trophies: "\u0420\u0438\u0442\u0443\u0430\u043B \u0442\u0440\u0430\u043F\u0435\u0437\u044B"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -14644,8 +14867,8 @@
           "drain",
           "cnb"
         ],
-        art: "Resources/Cards/Pyromancer/cnb_12.png",
-        artworkPath: "Resources/Cards/Pyromancer/cnb_12.png",
+        art: "Resources/Cards/Pyromancer/Cannibals/cnb_12.png",
+        artworkPath: "Resources/Cards/Pyromancer/Cannibals/cnb_12.png",
         artPrompt: 'dark fantasy trading card game illustration, savage cannibal warband brute with bone trophies: "\u041C\u0430\u0442\u0435\u0440\u044C \u041E\u0431\u0436\u043E\u0440\u0441\u0442\u0432\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -14683,8 +14906,8 @@
           "drain",
           "cnb"
         ],
-        art: "Resources/Cards/Pyromancer/cnb_13.png",
-        artworkPath: "Resources/Cards/Pyromancer/cnb_13.png",
+        art: "Resources/Cards/Pyromancer/Cannibals/cnb_13.png",
+        artworkPath: "Resources/Cards/Pyromancer/Cannibals/cnb_13.png",
         artPrompt: 'dark fantasy trading card game illustration, savage cannibal warband brute with bone trophies: "\u0421\u044B\u0442\u043D\u0430\u044F \u043F\u043E\u0445\u043B\u0451\u0431\u043A\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -14721,8 +14944,8 @@
           "drain",
           "cnb"
         ],
-        art: "Resources/Cards/Pyromancer/cnb_14.png",
-        artworkPath: "Resources/Cards/Pyromancer/cnb_14.png",
+        art: "Resources/Cards/Pyromancer/Cannibals/cnb_14.png",
+        artworkPath: "Resources/Cards/Pyromancer/Cannibals/cnb_14.png",
         artPrompt: 'dark fantasy trading card game illustration, savage cannibal warband brute with bone trophies: "\u041F\u043E\u043B\u043D\u043E\u0435 \u0431\u0440\u044E\u0445\u043E"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -14751,8 +14974,8 @@
           "drain",
           "scc"
         ],
-        art: "Resources/Cards/Ethereal/scc_01.png",
-        artworkPath: "Resources/Cards/Ethereal/scc_01.png",
+        art: "Resources/Cards/Ethereal/Succubi/scc_01.png",
+        artworkPath: "Resources/Cards/Ethereal/Succubi/scc_01.png",
         artPrompt: 'dark fantasy trading card game illustration, alluring succubus demoness with violet flame: "\u0421\u0443\u043A\u043A\u0443\u0431-\u043B\u0438\u0445\u043E\u0440\u0430\u0434\u043A\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -14781,8 +15004,8 @@
           "drain",
           "scc"
         ],
-        art: "Resources/Cards/Ethereal/scc_02.png",
-        artworkPath: "Resources/Cards/Ethereal/scc_02.png",
+        art: "Resources/Cards/Ethereal/Succubi/scc_02.png",
+        artworkPath: "Resources/Cards/Ethereal/Succubi/scc_02.png",
         artPrompt: 'dark fantasy trading card game illustration, alluring succubus demoness with violet flame: "\u0421\u0443\u043A\u043A\u0443\u0431-\u043F\u043E\u043B\u0443\u043D\u043E\u0447\u043D\u0438\u0446\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -14818,8 +15041,8 @@
           "drain",
           "scc"
         ],
-        art: "Resources/Cards/Ethereal/scc_03.png",
-        artworkPath: "Resources/Cards/Ethereal/scc_03.png",
+        art: "Resources/Cards/Ethereal/Succubi/scc_03.png",
+        artworkPath: "Resources/Cards/Ethereal/Succubi/scc_03.png",
         artPrompt: 'dark fantasy trading card game illustration, alluring succubus demoness with violet flame: "\u0427\u0430\u0440\u043E\u0432\u043D\u0438\u0446\u0430 \u0432\u0437\u0434\u043E\u0445\u043E\u0432"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -14848,8 +15071,8 @@
           "drain",
           "scc"
         ],
-        art: "Resources/Cards/Ethereal/scc_04.png",
-        artworkPath: "Resources/Cards/Ethereal/scc_04.png",
+        art: "Resources/Cards/Ethereal/Succubi/scc_04.png",
+        artworkPath: "Resources/Cards/Ethereal/Succubi/scc_04.png",
         artPrompt: 'dark fantasy trading card game illustration, alluring succubus demoness with violet flame: "\u0414\u0435\u043C\u043E\u043D\u0435\u0441\u0441\u0430-\u043E\u0431\u0435\u0442"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -14878,8 +15101,8 @@
           "drain",
           "scc"
         ],
-        art: "Resources/Cards/Ethereal/scc_05.png",
-        artworkPath: "Resources/Cards/Ethereal/scc_05.png",
+        art: "Resources/Cards/Ethereal/Succubi/scc_05.png",
+        artworkPath: "Resources/Cards/Ethereal/Succubi/scc_05.png",
         artPrompt: 'dark fantasy trading card game illustration, alluring succubus demoness with violet flame: "\u0421\u0443\u043A\u043A\u0443\u0431-\u0446\u0435\u043B\u0438\u0442\u0435\u043B\u044C\u043D\u0438\u0446\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -14916,8 +15139,8 @@
           "drain",
           "scc"
         ],
-        art: "Resources/Cards/Ethereal/scc_06.png",
-        artworkPath: "Resources/Cards/Ethereal/scc_06.png",
+        art: "Resources/Cards/Ethereal/Succubi/scc_06.png",
+        artworkPath: "Resources/Cards/Ethereal/Succubi/scc_06.png",
         artPrompt: 'dark fantasy trading card game illustration, alluring succubus demoness with violet flame: "\u0428\u0451\u043F\u043E\u0442 \u0438\u0441\u043A\u0443\u0448\u0435\u043D\u0438\u044F"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -14953,8 +15176,8 @@
           "drain",
           "scc"
         ],
-        art: "Resources/Cards/Ethereal/scc_07.png",
-        artworkPath: "Resources/Cards/Ethereal/scc_07.png",
+        art: "Resources/Cards/Ethereal/Succubi/scc_07.png",
+        artworkPath: "Resources/Cards/Ethereal/Succubi/scc_07.png",
         artPrompt: 'dark fantasy trading card game illustration, alluring succubus demoness with violet flame: "\u0413\u043E\u0441\u043F\u043E\u0436\u0430 \u0412\u0443\u0430\u043B\u0438"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -14984,8 +15207,8 @@
           "drain",
           "scc"
         ],
-        art: "Resources/Cards/Ethereal/scc_08.png",
-        artworkPath: "Resources/Cards/Ethereal/scc_08.png",
+        art: "Resources/Cards/Ethereal/Succubi/scc_08.png",
+        artworkPath: "Resources/Cards/Ethereal/Succubi/scc_08.png",
         artPrompt: 'dark fantasy trading card game illustration, alluring succubus demoness with violet flame: "\u0421\u0443\u043A\u043A\u0443\u0431-\u0431\u0430\u0440\u043E\u043D\u0435\u0441\u0441\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -15026,8 +15249,8 @@
           "drain",
           "scc"
         ],
-        art: "Resources/Cards/Ethereal/scc_09.png",
-        artworkPath: "Resources/Cards/Ethereal/scc_09.png",
+        art: "Resources/Cards/Ethereal/Succubi/scc_09.png",
+        artworkPath: "Resources/Cards/Ethereal/Succubi/scc_09.png",
         artPrompt: 'dark fantasy trading card game illustration, alluring succubus demoness with violet flame: "\u041F\u043E\u0446\u0435\u043B\u0443\u0439 \u043B\u0438\u0445\u043E\u0440\u0430\u0434\u043A\u0438"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -15057,8 +15280,8 @@
           "drain",
           "scc"
         ],
-        art: "Resources/Cards/Ethereal/scc_10.png",
-        artworkPath: "Resources/Cards/Ethereal/scc_10.png",
+        art: "Resources/Cards/Ethereal/Succubi/scc_10.png",
+        artworkPath: "Resources/Cards/Ethereal/Succubi/scc_10.png",
         artPrompt: 'dark fantasy trading card game illustration, alluring succubus demoness with violet flame: "\u041D\u043E\u0447\u043D\u0430\u044F \u0433\u043E\u0441\u043F\u043E\u0436\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -15090,8 +15313,8 @@
           "drain",
           "scc"
         ],
-        art: "Resources/Cards/Ethereal/scc_11.png",
-        artworkPath: "Resources/Cards/Ethereal/scc_11.png",
+        art: "Resources/Cards/Ethereal/Succubi/scc_11.png",
+        artworkPath: "Resources/Cards/Ethereal/Succubi/scc_11.png",
         artPrompt: 'dark fantasy trading card game illustration, alluring succubus demoness with violet flame: "\u0423\u043A\u0440\u0430\u0434\u0435\u043D\u043D\u044B\u0439 \u0441\u043E\u043D"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -15129,8 +15352,8 @@
           "drain",
           "scc"
         ],
-        art: "Resources/Cards/Ethereal/scc_12.png",
-        artworkPath: "Resources/Cards/Ethereal/scc_12.png",
+        art: "Resources/Cards/Ethereal/Succubi/scc_12.png",
+        artworkPath: "Resources/Cards/Ethereal/Succubi/scc_12.png",
         artPrompt: 'dark fantasy trading card game illustration, alluring succubus demoness with violet flame: "\u0427\u0430\u0440\u044B \u043F\u043E\u0434\u0447\u0438\u043D\u0435\u043D\u0438\u044F"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -15169,8 +15392,8 @@
           "drain",
           "scc"
         ],
-        art: "Resources/Cards/Ethereal/scc_13.png",
-        artworkPath: "Resources/Cards/Ethereal/scc_13.png",
+        art: "Resources/Cards/Ethereal/Succubi/scc_13.png",
+        artworkPath: "Resources/Cards/Ethereal/Succubi/scc_13.png",
         artPrompt: 'dark fantasy trading card game illustration, alluring succubus demoness with violet flame: "\u041C\u0430\u0442\u0435\u0440\u044C \u0418\u0441\u043A\u0443\u0448\u0435\u043D\u0438\u0439"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -15208,8 +15431,8 @@
           "drain",
           "scc"
         ],
-        art: "Resources/Cards/Ethereal/scc_14.png",
-        artworkPath: "Resources/Cards/Ethereal/scc_14.png",
+        art: "Resources/Cards/Ethereal/Succubi/scc_14.png",
+        artworkPath: "Resources/Cards/Ethereal/Succubi/scc_14.png",
         artPrompt: 'dark fantasy trading card game illustration, alluring succubus demoness with violet flame: "\u041E\u0431\u0435\u0442 \u043A\u0440\u043E\u0432\u0438"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -15239,8 +15462,8 @@
           "tokens",
           "ent"
         ],
-        art: "Resources/Cards/Terramorph/ent_01.png",
-        artworkPath: "Resources/Cards/Terramorph/ent_01.png",
+        art: "Resources/Cards/Terramorph/Ents/ent_01.png",
+        artworkPath: "Resources/Cards/Terramorph/Ents/ent_01.png",
         artPrompt: 'dark fantasy trading card game illustration, ancient bark ent with mossy shoulders: "\u042E\u043D\u044B\u0439 \u0434\u0440\u0435\u0432\u0435\u043D\u044C"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -15294,8 +15517,8 @@
           "tokens",
           "ent"
         ],
-        art: "Resources/Cards/Terramorph/ent_02.png",
-        artworkPath: "Resources/Cards/Terramorph/ent_02.png",
+        art: "Resources/Cards/Terramorph/Ents/ent_02.png",
+        artworkPath: "Resources/Cards/Terramorph/Ents/ent_02.png",
         artPrompt: 'dark fantasy trading card game illustration, ancient bark ent with mossy shoulders: "\u042D\u043D\u0442-\u0440\u043E\u0449\u0435\u043D\u043E\u0441\u0435\u0446"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -15349,8 +15572,8 @@
           "tokens",
           "ent"
         ],
-        art: "Resources/Cards/Terramorph/ent_03.png",
-        artworkPath: "Resources/Cards/Terramorph/ent_03.png",
+        art: "Resources/Cards/Terramorph/Ents/ent_03.png",
+        artworkPath: "Resources/Cards/Terramorph/Ents/ent_03.png",
         artPrompt: 'dark fantasy trading card game illustration, ancient bark ent with mossy shoulders: "\u0421\u0442\u0430\u0440\u044B\u0439 \u043A\u043E\u0440\u043D\u0435\u043F\u043B\u0451\u0442"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -15362,11 +15585,12 @@
         attack: 4,
         health: 5,
         keywords: [
-          "Taunt"
+          "Taunt",
+          "Vigilance"
         ],
         effects: [],
         onDeath: [],
-        abilityText: "\u0422\u0430\u0443\u043D\u0442. \u0421\u0442\u043E\u0438\u0442 \u0441 \u041F\u0435\u0440\u0432\u043E\u0439 \u041F\u043E\u0441\u0430\u0434\u043A\u0438.",
+        abilityText: "\u041F\u0440\u043E\u0432\u043E\u043A\u0430\u0446\u0438\u044F. \u0411\u0434\u0438\u0442\u0435\u043B\u044C\u043D\u043E\u0441\u0442\u044C: \u043D\u0435 \u043F\u043E\u0432\u043E\u0440\u0430\u0447\u0438\u0432\u0430\u0435\u0442\u0441\u044F \u043F\u043E\u0441\u043B\u0435 \u0430\u0442\u0430\u043A\u0438.",
         target: "None",
         element: "None",
         type: "Creature",
@@ -15379,8 +15603,8 @@
           "tokens",
           "ent"
         ],
-        art: "Resources/Cards/Terramorph/ent_04.png",
-        artworkPath: "Resources/Cards/Terramorph/ent_04.png",
+        art: "Resources/Cards/Terramorph/Ents/ent_04.png",
+        artworkPath: "Resources/Cards/Terramorph/Ents/ent_04.png",
         artPrompt: 'dark fantasy trading card game illustration, ancient bark ent with mossy shoulders: "\u0414\u0443\u0431-\u0447\u0430\u0441\u043E\u0432\u043E\u0439"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -15434,8 +15658,8 @@
           "tokens",
           "ent"
         ],
-        art: "Resources/Cards/Terramorph/ent_05.png",
-        artworkPath: "Resources/Cards/Terramorph/ent_05.png",
+        art: "Resources/Cards/Terramorph/Ents/ent_05.png",
+        artworkPath: "Resources/Cards/Terramorph/Ents/ent_05.png",
         artPrompt: 'dark fantasy trading card game illustration, ancient bark ent with mossy shoulders: "\u0421\u0435\u044F\u0442\u0435\u043B\u044C \u0440\u043E\u0449\u0438"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -15464,8 +15688,8 @@
           "tokens",
           "ent"
         ],
-        art: "Resources/Cards/Terramorph/ent_06.png",
-        artworkPath: "Resources/Cards/Terramorph/ent_06.png",
+        art: "Resources/Cards/Terramorph/Ents/ent_06.png",
+        artworkPath: "Resources/Cards/Terramorph/Ents/ent_06.png",
         artPrompt: 'dark fantasy trading card game illustration, ancient bark ent with mossy shoulders: "\u041A\u043E\u0440\u0430-\u043A\u0440\u0435\u043F\u043E\u0441\u0442\u044C"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -15500,8 +15724,8 @@
           "tokens",
           "ent"
         ],
-        art: "Resources/Cards/Terramorph/ent_07.png",
-        artworkPath: "Resources/Cards/Terramorph/ent_07.png",
+        art: "Resources/Cards/Terramorph/Ents/ent_07.png",
+        artworkPath: "Resources/Cards/Terramorph/Ents/ent_07.png",
         artPrompt: 'dark fantasy trading card game illustration, ancient bark ent with mossy shoulders: "\u042D\u043D\u0442-\u0441\u0430\u0434\u043E\u0432\u043D\u0438\u043A"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -15531,8 +15755,8 @@
           "tokens",
           "ent"
         ],
-        art: "Resources/Cards/Terramorph/ent_08.png",
-        artworkPath: "Resources/Cards/Terramorph/ent_08.png",
+        art: "Resources/Cards/Terramorph/Ents/ent_08.png",
+        artworkPath: "Resources/Cards/Terramorph/Ents/ent_08.png",
         artPrompt: 'dark fantasy trading card game illustration, ancient bark ent with mossy shoulders: "\u041B\u043E\u043C\u043E\u0432\u0435\u0442\u0432\u044C"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -15567,8 +15791,8 @@
           "tokens",
           "ent"
         ],
-        art: "Resources/Cards/Terramorph/ent_09.png",
-        artworkPath: "Resources/Cards/Terramorph/ent_09.png",
+        art: "Resources/Cards/Terramorph/Ents/ent_09.png",
+        artworkPath: "Resources/Cards/Terramorph/Ents/ent_09.png",
         artPrompt: 'dark fantasy trading card game illustration, ancient bark ent with mossy shoulders: "\u0420\u043E\u0449\u0435\u043C\u0430\u0442\u044C"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -15623,8 +15847,8 @@
           "tokens",
           "ent"
         ],
-        art: "Resources/Cards/Terramorph/ent_10.png",
-        artworkPath: "Resources/Cards/Terramorph/ent_10.png",
+        art: "Resources/Cards/Terramorph/Ents/ent_10.png",
+        artworkPath: "Resources/Cards/Terramorph/Ents/ent_10.png",
         artPrompt: 'dark fantasy trading card game illustration, ancient bark ent with mossy shoulders: "\u0414\u0440\u0435\u0432\u0435\u043D\u044C-\u043F\u0430\u0442\u0440\u0438\u0430\u0440\u0445"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -15721,8 +15945,8 @@
           "tokens",
           "ent"
         ],
-        art: "Resources/Cards/Terramorph/ent_11.png",
-        artworkPath: "Resources/Cards/Terramorph/ent_11.png",
+        art: "Resources/Cards/Terramorph/Ents/ent_11.png",
+        artworkPath: "Resources/Cards/Terramorph/Ents/ent_11.png",
         artPrompt: 'dark fantasy trading card game illustration, ancient bark ent with mossy shoulders: "\u0411\u0443\u0439\u043D\u044B\u0439 \u0440\u043E\u0441\u0442"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -15800,8 +16024,8 @@
           "tokens",
           "ent"
         ],
-        art: "Resources/Cards/Terramorph/ent_12.png",
-        artworkPath: "Resources/Cards/Terramorph/ent_12.png",
+        art: "Resources/Cards/Terramorph/Ents/ent_12.png",
+        artworkPath: "Resources/Cards/Terramorph/Ents/ent_12.png",
         artPrompt: 'dark fantasy trading card game illustration, ancient bark ent with mossy shoulders: "\u0414\u0440\u0435\u0432\u043D\u0438\u0439 \u0420\u043E\u0449\u0438"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -15834,8 +16058,8 @@
           "tokens",
           "ent"
         ],
-        art: "Resources/Cards/Terramorph/ent_13.png",
-        artworkPath: "Resources/Cards/Terramorph/ent_13.png",
+        art: "Resources/Cards/Terramorph/Ents/ent_13.png",
+        artworkPath: "Resources/Cards/Terramorph/Ents/ent_13.png",
         artPrompt: 'dark fantasy trading card game illustration, ancient bark ent with mossy shoulders: "\u0414\u0443\u0431\u043E\u0432\u0430\u044F \u043A\u043E\u0436\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -15867,8 +16091,8 @@
           "tokens",
           "ent"
         ],
-        art: "Resources/Cards/Terramorph/ent_14.png",
-        artworkPath: "Resources/Cards/Terramorph/ent_14.png",
+        art: "Resources/Cards/Terramorph/Ents/ent_14.png",
+        artworkPath: "Resources/Cards/Terramorph/Ents/ent_14.png",
         artPrompt: 'dark fantasy trading card game illustration, ancient bark ent with mossy shoulders: "\u0412\u0435\u0441\u0435\u043D\u043D\u0438\u0439 \u0441\u043E\u043A"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -15897,8 +16121,8 @@
           "tokens",
           "pal"
         ],
-        art: "Resources/Cards/Aurites/pal_01.png",
-        artworkPath: "Resources/Cards/Aurites/pal_01.png",
+        art: "Resources/Cards/Aurites/PaladinBrotherhood/pal_01.png",
+        artworkPath: "Resources/Cards/Aurites/PaladinBrotherhood/pal_01.png",
         artPrompt: 'dark fantasy trading card game illustration, knight paladin of a brotherhood with sun sigil: "\u0420\u044F\u0434\u043E\u0432\u043E\u0439 \u0411\u0440\u0430\u0442\u0441\u0442\u0432\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -15951,8 +16175,8 @@
           "tokens",
           "pal"
         ],
-        art: "Resources/Cards/Aurites/pal_02.png",
-        artworkPath: "Resources/Cards/Aurites/pal_02.png",
+        art: "Resources/Cards/Aurites/PaladinBrotherhood/pal_02.png",
+        artworkPath: "Resources/Cards/Aurites/PaladinBrotherhood/pal_02.png",
         artPrompt: 'dark fantasy trading card game illustration, knight paladin of a brotherhood with sun sigil: "\u041E\u0440\u0443\u0436\u0435\u043D\u043E\u0441\u0435\u0446-\u043D\u0430\u0441\u0442\u0430\u0432\u043D\u0438\u043A"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -16006,8 +16230,8 @@
           "tokens",
           "pal"
         ],
-        art: "Resources/Cards/Aurites/pal_03.png",
-        artworkPath: "Resources/Cards/Aurites/pal_03.png",
+        art: "Resources/Cards/Aurites/PaladinBrotherhood/pal_03.png",
+        artworkPath: "Resources/Cards/Aurites/PaladinBrotherhood/pal_03.png",
         artPrompt: 'dark fantasy trading card game illustration, knight paladin of a brotherhood with sun sigil: "\u041A\u0430\u043F\u0435\u043B\u043B\u0430\u043D \u043E\u0440\u0434\u0435\u043D\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -16036,8 +16260,8 @@
           "tokens",
           "pal"
         ],
-        art: "Resources/Cards/Aurites/pal_04.png",
-        artworkPath: "Resources/Cards/Aurites/pal_04.png",
+        art: "Resources/Cards/Aurites/PaladinBrotherhood/pal_04.png",
+        artworkPath: "Resources/Cards/Aurites/PaladinBrotherhood/pal_04.png",
         artPrompt: 'dark fantasy trading card game illustration, knight paladin of a brotherhood with sun sigil: "\u0429\u0438\u0442\u043E\u043D\u043E\u0441\u0435\u0446 \u0440\u0430\u0441\u0441\u0432\u0435\u0442\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -16066,8 +16290,8 @@
           "tokens",
           "pal"
         ],
-        art: "Resources/Cards/Aurites/pal_05.png",
-        artworkPath: "Resources/Cards/Aurites/pal_05.png",
+        art: "Resources/Cards/Aurites/PaladinBrotherhood/pal_05.png",
+        artworkPath: "Resources/Cards/Aurites/PaladinBrotherhood/pal_05.png",
         artPrompt: 'dark fantasy trading card game illustration, knight paladin of a brotherhood with sun sigil: "\u0421\u0435\u0440\u0436\u0430\u043D\u0442 \u0441\u0442\u0440\u043E\u044F"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -16115,8 +16339,8 @@
           "tokens",
           "pal"
         ],
-        art: "Resources/Cards/Aurites/pal_06.png",
-        artworkPath: "Resources/Cards/Aurites/pal_06.png",
+        art: "Resources/Cards/Aurites/PaladinBrotherhood/pal_06.png",
+        artworkPath: "Resources/Cards/Aurites/PaladinBrotherhood/pal_06.png",
         artPrompt: 'dark fantasy trading card game illustration, knight paladin of a brotherhood with sun sigil: "\u041C\u043E\u043B\u043E\u0434\u043E\u0439 \u0440\u0435\u043A\u0440\u0443\u0442"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -16171,8 +16395,8 @@
           "tokens",
           "pal"
         ],
-        art: "Resources/Cards/Aurites/pal_07.png",
-        artworkPath: "Resources/Cards/Aurites/pal_07.png",
+        art: "Resources/Cards/Aurites/PaladinBrotherhood/pal_07.png",
+        artworkPath: "Resources/Cards/Aurites/PaladinBrotherhood/pal_07.png",
         artPrompt: 'dark fantasy trading card game illustration, knight paladin of a brotherhood with sun sigil: "\u0417\u043D\u0430\u043C\u0435\u043D\u043E\u0441\u0435\u0446"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -16205,8 +16429,8 @@
           "tokens",
           "pal"
         ],
-        art: "Resources/Cards/Aurites/pal_08.png",
-        artworkPath: "Resources/Cards/Aurites/pal_08.png",
+        art: "Resources/Cards/Aurites/PaladinBrotherhood/pal_08.png",
+        artworkPath: "Resources/Cards/Aurites/PaladinBrotherhood/pal_08.png",
         artPrompt: 'dark fantasy trading card game illustration, knight paladin of a brotherhood with sun sigil: "\u041A\u043E\u043C\u0430\u043D\u0434\u043E\u0440 \u0449\u0438\u0442\u043E\u0432"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -16283,8 +16507,8 @@
           "tokens",
           "pal"
         ],
-        art: "Resources/Cards/Aurites/pal_09.png",
-        artworkPath: "Resources/Cards/Aurites/pal_09.png",
+        art: "Resources/Cards/Aurites/PaladinBrotherhood/pal_09.png",
+        artworkPath: "Resources/Cards/Aurites/PaladinBrotherhood/pal_09.png",
         artPrompt: 'dark fantasy trading card game illustration, knight paladin of a brotherhood with sun sigil: "\u041C\u0430\u0440\u0448\u0430\u043B \u0411\u0440\u0430\u0442\u0441\u0442\u0432\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -16314,8 +16538,8 @@
           "tokens",
           "pal"
         ],
-        art: "Resources/Cards/Aurites/pal_10.png",
-        artworkPath: "Resources/Cards/Aurites/pal_10.png",
+        art: "Resources/Cards/Aurites/PaladinBrotherhood/pal_10.png",
+        artworkPath: "Resources/Cards/Aurites/PaladinBrotherhood/pal_10.png",
         artPrompt: 'dark fantasy trading card game illustration, knight paladin of a brotherhood with sun sigil: "\u0421\u0432\u0435\u0442\u043E\u0437\u0430\u0440\u043D\u044B\u0439 \u0441\u0443\u0434\u044C\u044F"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -16346,8 +16570,8 @@
           "tokens",
           "pal"
         ],
-        art: "Resources/Cards/Aurites/pal_11.png",
-        artworkPath: "Resources/Cards/Aurites/pal_11.png",
+        art: "Resources/Cards/Aurites/PaladinBrotherhood/pal_11.png",
+        artworkPath: "Resources/Cards/Aurites/PaladinBrotherhood/pal_11.png",
         artPrompt: 'dark fantasy trading card game illustration, knight paladin of a brotherhood with sun sigil: "\u0411\u043B\u0430\u0433\u043E\u0441\u043B\u043E\u0432\u0435\u043D\u0438\u0435 \u0449\u0438\u0442\u043E\u0432"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -16447,8 +16671,8 @@
           "tokens",
           "pal"
         ],
-        art: "Resources/Cards/Aurites/pal_12.png",
-        artworkPath: "Resources/Cards/Aurites/pal_12.png",
+        art: "Resources/Cards/Aurites/PaladinBrotherhood/pal_12.png",
+        artworkPath: "Resources/Cards/Aurites/PaladinBrotherhood/pal_12.png",
         artPrompt: 'dark fantasy trading card game illustration, knight paladin of a brotherhood with sun sigil: "\u0413\u0440\u043E\u0441\u0441\u043C\u0435\u0439\u0441\u0442\u0435\u0440 \u041E\u0440\u0434\u0435\u043D\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -16486,8 +16710,8 @@
           "tokens",
           "pal"
         ],
-        art: "Resources/Cards/Aurites/pal_13.png",
-        artworkPath: "Resources/Cards/Aurites/pal_13.png",
+        art: "Resources/Cards/Aurites/PaladinBrotherhood/pal_13.png",
+        artworkPath: "Resources/Cards/Aurites/PaladinBrotherhood/pal_13.png",
         artPrompt: 'dark fantasy trading card game illustration, knight paladin of a brotherhood with sun sigil: "\u041E\u0431\u0435\u0442 \u0441\u0442\u043E\u0439\u043A\u043E\u0441\u0442\u0438"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -16520,8 +16744,8 @@
           "tokens",
           "pal"
         ],
-        art: "Resources/Cards/Aurites/pal_14.png",
-        artworkPath: "Resources/Cards/Aurites/pal_14.png",
+        art: "Resources/Cards/Aurites/PaladinBrotherhood/pal_14.png",
+        artworkPath: "Resources/Cards/Aurites/PaladinBrotherhood/pal_14.png",
         artPrompt: 'dark fantasy trading card game illustration, knight paladin of a brotherhood with sun sigil: "\u041C\u043E\u043B\u0438\u0442\u0432\u0430 \u043B\u0430\u0437\u0430\u0440\u0435\u0442\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -16556,8 +16780,8 @@
           "tokens",
           "sbd"
         ],
-        art: "Resources/Cards/Neutral/sbd_01.png",
-        artworkPath: "Resources/Cards/Neutral/sbd_01.png",
+        art: "Resources/Cards/Neutral/SacredBrotherhood/sbd_01.png",
+        artworkPath: "Resources/Cards/Neutral/SacredBrotherhood/sbd_01.png",
         artPrompt: 'dark fantasy trading card game illustration, hooded monk of a sacred brotherhood with candle: "\u041F\u043E\u0441\u043B\u0443\u0448\u043D\u0438\u043A \u0441\u0432\u0435\u0447\u0438"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -16586,8 +16810,8 @@
           "tokens",
           "sbd"
         ],
-        art: "Resources/Cards/Neutral/sbd_02.png",
-        artworkPath: "Resources/Cards/Neutral/sbd_02.png",
+        art: "Resources/Cards/Neutral/SacredBrotherhood/sbd_02.png",
+        artworkPath: "Resources/Cards/Neutral/SacredBrotherhood/sbd_02.png",
         artPrompt: 'dark fantasy trading card game illustration, hooded monk of a sacred brotherhood with candle: "\u0411\u0440\u0430\u0442-\u043F\u0440\u0438\u0432\u0440\u0430\u0442\u043D\u0438\u043A"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -16640,8 +16864,8 @@
           "tokens",
           "sbd"
         ],
-        art: "Resources/Cards/Neutral/sbd_03.png",
-        artworkPath: "Resources/Cards/Neutral/sbd_03.png",
+        art: "Resources/Cards/Neutral/SacredBrotherhood/sbd_03.png",
+        artworkPath: "Resources/Cards/Neutral/SacredBrotherhood/sbd_03.png",
         artPrompt: 'dark fantasy trading card game illustration, hooded monk of a sacred brotherhood with candle: "\u0421\u0442\u0440\u0430\u043D\u0441\u0442\u0432\u0443\u044E\u0449\u0438\u0439 \u043F\u0440\u043E\u043F\u043E\u0432\u0435\u0434\u043D\u0438\u043A"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -16694,8 +16918,8 @@
           "tokens",
           "sbd"
         ],
-        art: "Resources/Cards/Neutral/sbd_04.png",
-        artworkPath: "Resources/Cards/Neutral/sbd_04.png",
+        art: "Resources/Cards/Neutral/SacredBrotherhood/sbd_04.png",
+        artworkPath: "Resources/Cards/Neutral/SacredBrotherhood/sbd_04.png",
         artPrompt: 'dark fantasy trading card game illustration, hooded monk of a sacred brotherhood with candle: "\u0425\u043E\u0440\u0430\u043B\u044C\u043D\u044B\u0439 \u0431\u0440\u0430\u0442"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -16753,8 +16977,8 @@
           "tokens",
           "sbd"
         ],
-        art: "Resources/Cards/Neutral/sbd_05.png",
-        artworkPath: "Resources/Cards/Neutral/sbd_05.png",
+        art: "Resources/Cards/Neutral/SacredBrotherhood/sbd_05.png",
+        artworkPath: "Resources/Cards/Neutral/SacredBrotherhood/sbd_05.png",
         artPrompt: 'dark fantasy trading card game illustration, hooded monk of a sacred brotherhood with candle: "\u041D\u0430\u0441\u0442\u0430\u0432\u043D\u0438\u043A \u043D\u043E\u0432\u0438\u0446\u0438\u044F"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -16807,8 +17031,8 @@
           "tokens",
           "sbd"
         ],
-        art: "Resources/Cards/Neutral/sbd_06.png",
-        artworkPath: "Resources/Cards/Neutral/sbd_06.png",
+        art: "Resources/Cards/Neutral/SacredBrotherhood/sbd_06.png",
+        artworkPath: "Resources/Cards/Neutral/SacredBrotherhood/sbd_06.png",
         artPrompt: 'dark fantasy trading card game illustration, hooded monk of a sacred brotherhood with candle: "\u041C\u0443\u0447\u0435\u043D\u0438\u043A \u0432\u0435\u0440\u044B"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -16842,8 +17066,8 @@
           "tokens",
           "sbd"
         ],
-        art: "Resources/Cards/Neutral/sbd_07.png",
-        artworkPath: "Resources/Cards/Neutral/sbd_07.png",
+        art: "Resources/Cards/Neutral/SacredBrotherhood/sbd_07.png",
+        artworkPath: "Resources/Cards/Neutral/SacredBrotherhood/sbd_07.png",
         artPrompt: 'dark fantasy trading card game illustration, hooded monk of a sacred brotherhood with candle: "\u0426\u0435\u043B\u0438\u0442\u0435\u043B\u044C \u043E\u0431\u0438\u0442\u0435\u043B\u0438"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -16919,8 +17143,8 @@
           "tokens",
           "sbd"
         ],
-        art: "Resources/Cards/Neutral/sbd_08.png",
-        artworkPath: "Resources/Cards/Neutral/sbd_08.png",
+        art: "Resources/Cards/Neutral/SacredBrotherhood/sbd_08.png",
+        artworkPath: "Resources/Cards/Neutral/SacredBrotherhood/sbd_08.png",
         artPrompt: 'dark fantasy trading card game illustration, hooded monk of a sacred brotherhood with candle: "\u0410\u0440\u0445\u0438\u043C\u0430\u043D\u0434\u0440\u0438\u0442"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -16957,8 +17181,8 @@
           "tokens",
           "sbd"
         ],
-        art: "Resources/Cards/Neutral/sbd_09.png",
-        artworkPath: "Resources/Cards/Neutral/sbd_09.png",
+        art: "Resources/Cards/Neutral/SacredBrotherhood/sbd_09.png",
+        artworkPath: "Resources/Cards/Neutral/SacredBrotherhood/sbd_09.png",
         artPrompt: 'dark fantasy trading card game illustration, hooded monk of a sacred brotherhood with candle: "\u0421\u0432\u0435\u0442\u043E\u0447 \u0431\u0440\u0430\u0442\u0441\u0442\u0432\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -17015,8 +17239,8 @@
           "tokens",
           "sbd"
         ],
-        art: "Resources/Cards/Neutral/sbd_10.png",
-        artworkPath: "Resources/Cards/Neutral/sbd_10.png",
+        art: "Resources/Cards/Neutral/SacredBrotherhood/sbd_10.png",
+        artworkPath: "Resources/Cards/Neutral/SacredBrotherhood/sbd_10.png",
         artPrompt: 'dark fantasy trading card game illustration, hooded monk of a sacred brotherhood with candle: "\u0418\u0433\u0443\u043C\u0435\u043D \u043F\u0440\u043E\u0446\u0435\u0441\u0441\u0438\u0439"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -17113,8 +17337,8 @@
           "tokens",
           "sbd"
         ],
-        art: "Resources/Cards/Neutral/sbd_11.png",
-        artworkPath: "Resources/Cards/Neutral/sbd_11.png",
+        art: "Resources/Cards/Neutral/SacredBrotherhood/sbd_11.png",
+        artworkPath: "Resources/Cards/Neutral/SacredBrotherhood/sbd_11.png",
         artPrompt: 'dark fantasy trading card game illustration, hooded monk of a sacred brotherhood with candle: "\u0412\u0435\u043B\u0438\u043A\u0430\u044F \u043F\u0440\u043E\u0446\u0435\u0441\u0441\u0438\u044F"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -17195,8 +17419,8 @@
           "tokens",
           "sbd"
         ],
-        art: "Resources/Cards/Neutral/sbd_12.png",
-        artworkPath: "Resources/Cards/Neutral/sbd_12.png",
+        art: "Resources/Cards/Neutral/SacredBrotherhood/sbd_12.png",
+        artworkPath: "Resources/Cards/Neutral/SacredBrotherhood/sbd_12.png",
         artPrompt: 'dark fantasy trading card game illustration, hooded monk of a sacred brotherhood with candle: "\u041F\u0430\u0442\u0440\u0438\u0430\u0440\u0445 \u0411\u0440\u0430\u0442\u0441\u0442\u0432\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -17233,8 +17457,8 @@
           "tokens",
           "sbd"
         ],
-        art: "Resources/Cards/Neutral/sbd_13.png",
-        artworkPath: "Resources/Cards/Neutral/sbd_13.png",
+        art: "Resources/Cards/Neutral/SacredBrotherhood/sbd_13.png",
+        artworkPath: "Resources/Cards/Neutral/SacredBrotherhood/sbd_13.png",
         artPrompt: 'dark fantasy trading card game illustration, hooded monk of a sacred brotherhood with candle: "\u041C\u0438\u043B\u043E\u0441\u0442\u044B\u043D\u044F \u0438 \u043C\u043E\u043B\u0438\u0442\u0432\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -17266,8 +17490,8 @@
           "tokens",
           "sbd"
         ],
-        art: "Resources/Cards/Neutral/sbd_14.png",
-        artworkPath: "Resources/Cards/Neutral/sbd_14.png",
+        art: "Resources/Cards/Neutral/SacredBrotherhood/sbd_14.png",
+        artworkPath: "Resources/Cards/Neutral/SacredBrotherhood/sbd_14.png",
         artPrompt: 'dark fantasy trading card game illustration, hooded monk of a sacred brotherhood with candle: "\u0415\u043B\u0435\u043E\u0441\u0432\u044F\u0449\u0435\u043D\u0438\u0435"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -17309,8 +17533,8 @@
           "poison",
           "wtc"
         ],
-        art: "Resources/Cards/Necrus/wtc_01.png",
-        artworkPath: "Resources/Cards/Necrus/wtc_01.png",
+        art: "Resources/Cards/Necrus/Witches/wtc_01.png",
+        artworkPath: "Resources/Cards/Necrus/Witches/wtc_01.png",
         artPrompt: 'dark fantasy trading card game illustration, hag witch with toadstool crown and green fumes: "\u0412\u0435\u0434\u044C\u043C\u0430-\u043F\u043E\u043B\u0443\u043D\u043E\u0447\u043D\u0438\u0446\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -17351,8 +17575,8 @@
           "poison",
           "wtc"
         ],
-        art: "Resources/Cards/Necrus/wtc_02.png",
-        artworkPath: "Resources/Cards/Necrus/wtc_02.png",
+        art: "Resources/Cards/Necrus/Witches/wtc_02.png",
+        artworkPath: "Resources/Cards/Necrus/Witches/wtc_02.png",
         artPrompt: 'dark fantasy trading card game illustration, hag witch with toadstool crown and green fumes: "\u0422\u0440\u0430\u0432\u043D\u0438\u0446\u0430 \u043A\u043E\u0442\u043B\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -17389,8 +17613,8 @@
           "poison",
           "wtc"
         ],
-        art: "Resources/Cards/Necrus/wtc_03.png",
-        artworkPath: "Resources/Cards/Necrus/wtc_03.png",
+        art: "Resources/Cards/Necrus/Witches/wtc_03.png",
+        artworkPath: "Resources/Cards/Necrus/Witches/wtc_03.png",
         artPrompt: 'dark fantasy trading card game illustration, hag witch with toadstool crown and green fumes: "\u0421\u0433\u043B\u0430\u0437-\u0448\u0435\u043F\u0442\u0443\u043D\u044C\u044F"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -17438,8 +17662,8 @@
           "poison",
           "wtc"
         ],
-        art: "Resources/Cards/Necrus/wtc_04.png",
-        artworkPath: "Resources/Cards/Necrus/wtc_04.png",
+        art: "Resources/Cards/Necrus/Witches/wtc_04.png",
+        artworkPath: "Resources/Cards/Necrus/Witches/wtc_04.png",
         artPrompt: 'dark fantasy trading card game illustration, hag witch with toadstool crown and green fumes: "\u0416\u0430\u0431\u0430-\u0444\u0430\u043C\u0438\u043B\u044C\u044F\u0440"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -17480,8 +17704,8 @@
           "poison",
           "wtc"
         ],
-        art: "Resources/Cards/Necrus/wtc_05.png",
-        artworkPath: "Resources/Cards/Necrus/wtc_05.png",
+        art: "Resources/Cards/Necrus/Witches/wtc_05.png",
+        artworkPath: "Resources/Cards/Necrus/Witches/wtc_05.png",
         artPrompt: 'dark fantasy trading card game illustration, hag witch with toadstool crown and green fumes: "\u041A\u043E\u0442\u0435\u043B\u044C\u043D\u0430\u044F \u0431\u0430\u0431\u043A\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -17523,8 +17747,8 @@
           "poison",
           "wtc"
         ],
-        art: "Resources/Cards/Necrus/wtc_06.png",
-        artworkPath: "Resources/Cards/Necrus/wtc_06.png",
+        art: "Resources/Cards/Necrus/Witches/wtc_06.png",
+        artworkPath: "Resources/Cards/Necrus/Witches/wtc_06.png",
         artPrompt: 'dark fantasy trading card game illustration, hag witch with toadstool crown and green fumes: "\u0413\u043D\u0438\u043B\u0430\u044F \u043F\u043E\u0432\u0438\u0442\u0443\u0445\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -17559,8 +17783,8 @@
           "poison",
           "wtc"
         ],
-        art: "Resources/Cards/Necrus/wtc_07.png",
-        artworkPath: "Resources/Cards/Necrus/wtc_07.png",
+        art: "Resources/Cards/Necrus/Witches/wtc_07.png",
+        artworkPath: "Resources/Cards/Necrus/Witches/wtc_07.png",
         artPrompt: 'dark fantasy trading card game illustration, hag witch with toadstool crown and green fumes: "\u0412\u0435\u0434\u044C\u043C\u0430-\u0441\u0443\u0445\u043E\u0440\u0443\u043A\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -17601,8 +17825,8 @@
           "poison",
           "wtc"
         ],
-        art: "Resources/Cards/Necrus/wtc_08.png",
-        artworkPath: "Resources/Cards/Necrus/wtc_08.png",
+        art: "Resources/Cards/Necrus/Witches/wtc_08.png",
+        artworkPath: "Resources/Cards/Necrus/Witches/wtc_08.png",
         artPrompt: 'dark fantasy trading card game illustration, hag witch with toadstool crown and green fumes: "\u041F\u043E\u043B\u044B\u043D\u043D\u0430\u044F \u0437\u043D\u0430\u0445\u0430\u0440\u043A\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -17640,8 +17864,8 @@
           "poison",
           "wtc"
         ],
-        art: "Resources/Cards/Necrus/wtc_09.png",
-        artworkPath: "Resources/Cards/Necrus/wtc_09.png",
+        art: "Resources/Cards/Necrus/Witches/wtc_09.png",
+        artworkPath: "Resources/Cards/Necrus/Witches/wtc_09.png",
         artPrompt: 'dark fantasy trading card game illustration, hag witch with toadstool crown and green fumes: "\u041F\u043E\u043B\u0443\u043D\u043E\u0447\u043D\u0430\u044F \u0448\u0435\u043F\u0442\u0443\u0445\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -17689,8 +17913,8 @@
           "poison",
           "wtc"
         ],
-        art: "Resources/Cards/Necrus/wtc_10.png",
-        artworkPath: "Resources/Cards/Necrus/wtc_10.png",
+        art: "Resources/Cards/Necrus/Witches/wtc_10.png",
+        artworkPath: "Resources/Cards/Necrus/Witches/wtc_10.png",
         artPrompt: 'dark fantasy trading card game illustration, hag witch with toadstool crown and green fumes: "\u041C\u0430\u0442\u044C \u0436\u0430\u0431\u044C\u0435\u0433\u043E \u043A\u043E\u0442\u043B\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -17725,8 +17949,8 @@
           "poison",
           "wtc"
         ],
-        art: "Resources/Cards/Necrus/wtc_11.png",
-        artworkPath: "Resources/Cards/Necrus/wtc_11.png",
+        art: "Resources/Cards/Necrus/Witches/wtc_11.png",
+        artworkPath: "Resources/Cards/Necrus/Witches/wtc_11.png",
         artPrompt: 'dark fantasy trading card game illustration, hag witch with toadstool crown and green fumes: "\u041C\u043E\u0440\u043E\u0432\u0430\u044F \u0437\u0430\u0440\u044F"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -17768,8 +17992,8 @@
           "poison",
           "wtc"
         ],
-        art: "Resources/Cards/Necrus/wtc_12.png",
-        artworkPath: "Resources/Cards/Necrus/wtc_12.png",
+        art: "Resources/Cards/Necrus/Witches/wtc_12.png",
+        artworkPath: "Resources/Cards/Necrus/Witches/wtc_12.png",
         artPrompt: 'dark fantasy trading card game illustration, hag witch with toadstool crown and green fumes: "\u041C\u0430\u0442\u0435\u0440\u044C \u041A\u043E\u0432\u0435\u043D\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -17804,8 +18028,8 @@
           "poison",
           "wtc"
         ],
-        art: "Resources/Cards/Necrus/wtc_13.png",
-        artworkPath: "Resources/Cards/Necrus/wtc_13.png",
+        art: "Resources/Cards/Necrus/Witches/wtc_13.png",
+        artworkPath: "Resources/Cards/Necrus/Witches/wtc_13.png",
         artPrompt: 'dark fantasy trading card game illustration, hag witch with toadstool crown and green fumes: "\u0418\u0441\u043A\u0440\u0430 \u0441\u0433\u043B\u0430\u0437\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -17844,8 +18068,8 @@
           "poison",
           "wtc"
         ],
-        art: "Resources/Cards/Necrus/wtc_14.png",
-        artworkPath: "Resources/Cards/Necrus/wtc_14.png",
+        art: "Resources/Cards/Necrus/Witches/wtc_14.png",
+        artworkPath: "Resources/Cards/Necrus/Witches/wtc_14.png",
         artPrompt: 'dark fantasy trading card game illustration, hag witch with toadstool crown and green fumes: "\u0412\u0435\u0434\u044C\u043C\u0438\u043D \u044F\u0434"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -17886,8 +18110,8 @@
           "poison",
           "asp"
         ],
-        art: "Resources/Cards/Terramorph/asp_01.png",
-        artworkPath: "Resources/Cards/Terramorph/asp_01.png",
+        art: "Resources/Cards/Terramorph/Aspids/asp_01.png",
+        artworkPath: "Resources/Cards/Terramorph/Aspids/asp_01.png",
         artPrompt: 'dark fantasy trading card game illustration, giant asp serpent with iridescent scales: "\u0410\u0441\u043F\u0438\u0434-\u043F\u043B\u0443\u0442"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -17917,8 +18141,8 @@
           "poison",
           "asp"
         ],
-        art: "Resources/Cards/Terramorph/asp_02.png",
-        artworkPath: "Resources/Cards/Terramorph/asp_02.png",
+        art: "Resources/Cards/Terramorph/Aspids/asp_02.png",
+        artworkPath: "Resources/Cards/Terramorph/Aspids/asp_02.png",
         artPrompt: 'dark fantasy trading card game illustration, giant asp serpent with iridescent scales: "\u0427\u0435\u0448\u0443\u0439\u0447\u0430\u0442\u044B\u0439 \u043F\u043E\u043B\u0437\u0443\u043D"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -17955,8 +18179,8 @@
           "poison",
           "asp"
         ],
-        art: "Resources/Cards/Terramorph/asp_03.png",
-        artworkPath: "Resources/Cards/Terramorph/asp_03.png",
+        art: "Resources/Cards/Terramorph/Aspids/asp_03.png",
+        artworkPath: "Resources/Cards/Terramorph/Aspids/asp_03.png",
         artPrompt: 'dark fantasy trading card game illustration, giant asp serpent with iridescent scales: "\u042F\u0434\u043E\u0437\u0443\u0431"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -17998,8 +18222,8 @@
           "poison",
           "asp"
         ],
-        art: "Resources/Cards/Terramorph/asp_04.png",
-        artworkPath: "Resources/Cards/Terramorph/asp_04.png",
+        art: "Resources/Cards/Terramorph/Aspids/asp_04.png",
+        artworkPath: "Resources/Cards/Terramorph/Aspids/asp_04.png",
         artPrompt: 'dark fantasy trading card game illustration, giant asp serpent with iridescent scales: "\u041D\u043E\u0447\u043D\u0430\u044F \u0441\u043A\u043E\u043B\u044C\u0437\u044F\u0449\u0430\u044F"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -18037,8 +18261,8 @@
           "poison",
           "asp"
         ],
-        art: "Resources/Cards/Terramorph/asp_05.png",
-        artworkPath: "Resources/Cards/Terramorph/asp_05.png",
+        art: "Resources/Cards/Terramorph/Aspids/asp_05.png",
+        artworkPath: "Resources/Cards/Terramorph/Aspids/asp_05.png",
         artPrompt: 'dark fantasy trading card game illustration, giant asp serpent with iridescent scales: "\u0410\u0441\u043F\u0438\u0434-\u0443\u0434\u0430\u0432"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -18080,8 +18304,8 @@
           "poison",
           "asp"
         ],
-        art: "Resources/Cards/Terramorph/asp_06.png",
-        artworkPath: "Resources/Cards/Terramorph/asp_06.png",
+        art: "Resources/Cards/Terramorph/Aspids/asp_06.png",
+        artworkPath: "Resources/Cards/Terramorph/Aspids/asp_06.png",
         artPrompt: 'dark fantasy trading card game illustration, giant asp serpent with iridescent scales: "\u0413\u0430\u0434\u044E\u043A\u0430-\u043C\u0430\u0442\u044C"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -18110,8 +18334,8 @@
           "poison",
           "asp"
         ],
-        art: "Resources/Cards/Terramorph/asp_07.png",
-        artworkPath: "Resources/Cards/Terramorph/asp_07.png",
+        art: "Resources/Cards/Terramorph/Aspids/asp_07.png",
+        artworkPath: "Resources/Cards/Terramorph/Aspids/asp_07.png",
         artPrompt: 'dark fantasy trading card game illustration, giant asp serpent with iridescent scales: "\u041A\u043E\u0440\u043E\u043B\u0435\u0432\u0441\u043A\u0430\u044F \u043A\u043E\u0431\u0440\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -18154,8 +18378,8 @@
           "poison",
           "asp"
         ],
-        art: "Resources/Cards/Terramorph/asp_08.png",
-        artworkPath: "Resources/Cards/Terramorph/asp_08.png",
+        art: "Resources/Cards/Terramorph/Aspids/asp_08.png",
+        artworkPath: "Resources/Cards/Terramorph/Aspids/asp_08.png",
         artPrompt: 'dark fantasy trading card game illustration, giant asp serpent with iridescent scales: "\u041F\u043E\u043B\u043E\u0437-\u043A\u0430\u043C\u0435\u043D\u0449\u0443\u043A"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -18193,8 +18417,8 @@
           "poison",
           "asp"
         ],
-        art: "Resources/Cards/Terramorph/asp_09.png",
-        artworkPath: "Resources/Cards/Terramorph/asp_09.png",
+        art: "Resources/Cards/Terramorph/Aspids/asp_09.png",
+        artworkPath: "Resources/Cards/Terramorph/Aspids/asp_09.png",
         artPrompt: 'dark fantasy trading card game illustration, giant asp serpent with iridescent scales: "\u0421\u0442\u0440\u0435\u043C\u0438\u0442\u0435\u043B\u044C\u043D\u044B\u0439 \u043A\u043B\u044B\u043A"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -18232,8 +18456,8 @@
           "poison",
           "asp"
         ],
-        art: "Resources/Cards/Terramorph/asp_10.png",
-        artworkPath: "Resources/Cards/Terramorph/asp_10.png",
+        art: "Resources/Cards/Terramorph/Aspids/asp_10.png",
+        artworkPath: "Resources/Cards/Terramorph/Aspids/asp_10.png",
         artPrompt: 'dark fantasy trading card game illustration, giant asp serpent with iridescent scales: "\u0420\u0430\u0434\u0443\u0436\u043D\u044B\u0439 \u0430\u0441\u043F\u0438\u0434"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -18277,8 +18501,8 @@
           "poison",
           "asp"
         ],
-        art: "Resources/Cards/Terramorph/asp_11.png",
-        artworkPath: "Resources/Cards/Terramorph/asp_11.png",
+        art: "Resources/Cards/Terramorph/Aspids/asp_11.png",
+        artworkPath: "Resources/Cards/Terramorph/Aspids/asp_11.png",
         artPrompt: 'dark fantasy trading card game illustration, giant asp serpent with iridescent scales: "\u0414\u0432\u043E\u0439\u043D\u043E\u0439 \u0443\u043A\u0443\u0441"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -18316,8 +18540,8 @@
           "poison",
           "asp"
         ],
-        art: "Resources/Cards/Terramorph/asp_12.png",
-        artworkPath: "Resources/Cards/Terramorph/asp_12.png",
+        art: "Resources/Cards/Terramorph/Aspids/asp_12.png",
+        artworkPath: "Resources/Cards/Terramorph/Aspids/asp_12.png",
         artPrompt: 'dark fantasy trading card game illustration, giant asp serpent with iridescent scales: "\u041F\u0440\u0430\u0440\u043E\u0434\u0438\u0442\u0435\u043B\u044C \u0417\u043C\u0435\u0439"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -18357,8 +18581,8 @@
           "poison",
           "asp"
         ],
-        art: "Resources/Cards/Terramorph/asp_13.png",
-        artworkPath: "Resources/Cards/Terramorph/asp_13.png",
+        art: "Resources/Cards/Terramorph/Aspids/asp_13.png",
+        artworkPath: "Resources/Cards/Terramorph/Aspids/asp_13.png",
         artPrompt: 'dark fantasy trading card game illustration, giant asp serpent with iridescent scales: "\u0423\u043A\u0443\u0441 \u0438 \u0436\u0430\u043B"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -18400,8 +18624,8 @@
           "poison",
           "asp"
         ],
-        art: "Resources/Cards/Terramorph/asp_14.png",
-        artworkPath: "Resources/Cards/Terramorph/asp_14.png",
+        art: "Resources/Cards/Terramorph/Aspids/asp_14.png",
+        artworkPath: "Resources/Cards/Terramorph/Aspids/asp_14.png",
         artPrompt: 'dark fantasy trading card game illustration, giant asp serpent with iridescent scales: "\u042F\u0434 \u0438 \u043B\u0438\u0445\u043E\u0440\u0430\u0434\u043A\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -18436,8 +18660,8 @@
           "poison",
           "wtd"
         ],
-        art: "Resources/Cards/Neutral/wtd_01.png",
-        artworkPath: "Resources/Cards/Neutral/wtd_01.png",
+        art: "Resources/Cards/Neutral/Withered/wtd_01.png",
+        artworkPath: "Resources/Cards/Neutral/Withered/wtd_01.png",
         artPrompt: 'dark fantasy trading card game illustration, withered cursed husk pilgrim in rags: "\u0418\u0441\u0441\u043E\u0445\u0448\u0438\u0439 \u043F\u0430\u043B\u043E\u043C\u043D\u0438\u043A"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -18473,8 +18697,8 @@
           "poison",
           "wtd"
         ],
-        art: "Resources/Cards/Neutral/wtd_02.png",
-        artworkPath: "Resources/Cards/Neutral/wtd_02.png",
+        art: "Resources/Cards/Neutral/Withered/wtd_02.png",
+        artworkPath: "Resources/Cards/Neutral/Withered/wtd_02.png",
         artPrompt: 'dark fantasy trading card game illustration, withered cursed husk pilgrim in rags: "\u041D\u043E\u0441\u0438\u0442\u0435\u043B\u044C \u043F\u043E\u0440\u0447\u0438"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -18509,8 +18733,8 @@
           "poison",
           "wtd"
         ],
-        art: "Resources/Cards/Neutral/wtd_03.png",
-        artworkPath: "Resources/Cards/Neutral/wtd_03.png",
+        art: "Resources/Cards/Neutral/Withered/wtd_03.png",
+        artworkPath: "Resources/Cards/Neutral/Withered/wtd_03.png",
         artPrompt: 'dark fantasy trading card game illustration, withered cursed husk pilgrim in rags: "\u041F\u0440\u043E\u043A\u043B\u044F\u0442\u044B\u0439 \u0437\u0435\u043C\u043B\u0435\u043F\u0430\u0448\u0435\u0446"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -18549,8 +18773,8 @@
           "poison",
           "wtd"
         ],
-        art: "Resources/Cards/Neutral/wtd_04.png",
-        artworkPath: "Resources/Cards/Neutral/wtd_04.png",
+        art: "Resources/Cards/Neutral/Withered/wtd_04.png",
+        artworkPath: "Resources/Cards/Neutral/Withered/wtd_04.png",
         artPrompt: 'dark fantasy trading card game illustration, withered cursed husk pilgrim in rags: "\u0418\u0441\u0441\u043E\u0445\u0448\u0430\u044F \u0432\u0434\u043E\u0432\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -18591,8 +18815,8 @@
           "poison",
           "wtd"
         ],
-        art: "Resources/Cards/Neutral/wtd_05.png",
-        artworkPath: "Resources/Cards/Neutral/wtd_05.png",
+        art: "Resources/Cards/Neutral/Withered/wtd_05.png",
+        artworkPath: "Resources/Cards/Neutral/Withered/wtd_05.png",
         artPrompt: 'dark fantasy trading card game illustration, withered cursed husk pilgrim in rags: "\u041C\u043E\u0433\u0438\u043B\u044C\u043D\u044B\u0439 \u0433\u043B\u0430\u0448\u0430\u0442\u0430\u0439"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -18627,8 +18851,8 @@
           "poison",
           "wtd"
         ],
-        art: "Resources/Cards/Neutral/wtd_06.png",
-        artworkPath: "Resources/Cards/Neutral/wtd_06.png",
+        art: "Resources/Cards/Neutral/Withered/wtd_06.png",
+        artworkPath: "Resources/Cards/Neutral/Withered/wtd_06.png",
         artPrompt: 'dark fantasy trading card game illustration, withered cursed husk pilgrim in rags: "\u041F\u0440\u043E\u043A\u043B\u044F\u0442\u044B\u0439 \u043A\u043E\u043B\u043E\u0441\u0441"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -18664,8 +18888,8 @@
           "poison",
           "wtd"
         ],
-        art: "Resources/Cards/Neutral/wtd_07.png",
-        artworkPath: "Resources/Cards/Neutral/wtd_07.png",
+        art: "Resources/Cards/Neutral/Withered/wtd_07.png",
+        artworkPath: "Resources/Cards/Neutral/Withered/wtd_07.png",
         artPrompt: 'dark fantasy trading card game illustration, withered cursed husk pilgrim in rags: "\u0418\u0441\u0441\u043E\u0445\u0448\u0438\u0439 \u0445\u043E\u0440"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -18700,8 +18924,8 @@
           "poison",
           "wtd"
         ],
-        art: "Resources/Cards/Neutral/wtd_08.png",
-        artworkPath: "Resources/Cards/Neutral/wtd_08.png",
+        art: "Resources/Cards/Neutral/Withered/wtd_08.png",
+        artworkPath: "Resources/Cards/Neutral/Withered/wtd_08.png",
         artPrompt: 'dark fantasy trading card game illustration, withered cursed husk pilgrim in rags: "\u0421\u0443\u0445\u043E\u0440\u0443\u043A\u0438\u0439 \u0436\u043D\u0435\u0446"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -18741,8 +18965,8 @@
           "poison",
           "wtd"
         ],
-        art: "Resources/Cards/Neutral/wtd_09.png",
-        artworkPath: "Resources/Cards/Neutral/wtd_09.png",
+        art: "Resources/Cards/Neutral/Withered/wtd_09.png",
+        artworkPath: "Resources/Cards/Neutral/Withered/wtd_09.png",
         artPrompt: 'dark fantasy trading card game illustration, withered cursed husk pilgrim in rags: "\u041F\u0440\u043E\u0440\u043E\u043A \u043F\u043E\u0440\u0447\u0438"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -18778,8 +19002,8 @@
           "poison",
           "wtd"
         ],
-        art: "Resources/Cards/Neutral/wtd_10.png",
-        artworkPath: "Resources/Cards/Neutral/wtd_10.png",
+        art: "Resources/Cards/Neutral/Withered/wtd_10.png",
+        artworkPath: "Resources/Cards/Neutral/Withered/wtd_10.png",
         artPrompt: 'dark fantasy trading card game illustration, withered cursed husk pilgrim in rags: "\u0418\u0441\u0441\u043E\u0445\u0448\u0438\u0439 \u0438\u0441\u043F\u043E\u043B\u0438\u043D"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -18821,8 +19045,8 @@
           "poison",
           "wtd"
         ],
-        art: "Resources/Cards/Neutral/wtd_11.png",
-        artworkPath: "Resources/Cards/Neutral/wtd_11.png",
+        art: "Resources/Cards/Neutral/Withered/wtd_11.png",
+        artworkPath: "Resources/Cards/Neutral/Withered/wtd_11.png",
         artPrompt: 'dark fantasy trading card game illustration, withered cursed husk pilgrim in rags: "\u0412\u0435\u0441\u0442\u043D\u0438\u043A \u043F\u0440\u043E\u043A\u043B\u044F\u0442\u0438\u044F"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -18855,8 +19079,8 @@
           "poison",
           "wtd"
         ],
-        art: "Resources/Cards/Neutral/wtd_12.png",
-        artworkPath: "Resources/Cards/Neutral/wtd_12.png",
+        art: "Resources/Cards/Neutral/Withered/wtd_12.png",
+        artworkPath: "Resources/Cards/Neutral/Withered/wtd_12.png",
         artPrompt: 'dark fantasy trading card game illustration, withered cursed husk pilgrim in rags: "\u0412\u0435\u043B\u0438\u043A\u043E\u0435 \u043F\u0440\u043E\u043A\u043B\u044F\u0442\u0438\u0435"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -18896,8 +19120,8 @@
           "poison",
           "wtd"
         ],
-        art: "Resources/Cards/Neutral/wtd_13.png",
-        artworkPath: "Resources/Cards/Neutral/wtd_13.png",
+        art: "Resources/Cards/Neutral/Withered/wtd_13.png",
+        artworkPath: "Resources/Cards/Neutral/Withered/wtd_13.png",
         artPrompt: 'dark fantasy trading card game illustration, withered cursed husk pilgrim in rags: "\u041F\u0430\u0442\u0440\u0438\u0430\u0440\u0445 \u0418\u0441\u0441\u043E\u0445\u0448\u0438\u0445"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -18930,8 +19154,8 @@
           "poison",
           "wtd"
         ],
-        art: "Resources/Cards/Neutral/wtd_14.png",
-        artworkPath: "Resources/Cards/Neutral/wtd_14.png",
+        art: "Resources/Cards/Neutral/Withered/wtd_14.png",
+        artworkPath: "Resources/Cards/Neutral/Withered/wtd_14.png",
         artPrompt: 'dark fantasy trading card game illustration, withered cursed husk pilgrim in rags: "\u0421\u043B\u0430\u0431\u043E\u0441\u0442\u044C"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -18960,8 +19184,8 @@
           "support",
           "nsu"
         ],
-        art: "Resources/Cards/Neutral/nsu_01.png",
-        artworkPath: "Resources/Cards/Neutral/nsu_01.png",
+        art: "Resources/Cards/Neutral/Mercenaries/nsu_01.png",
+        artworkPath: "Resources/Cards/Neutral/Mercenaries/nsu_01.png",
         artPrompt: 'dark fantasy trading card game illustration, wandering mercenary of the echo lands: "\u0421\u0442\u0435\u043F\u043D\u043E\u0439 \u043D\u0430\u0435\u0437\u0434\u043D\u0438\u043A"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -18990,8 +19214,8 @@
           "support",
           "nsu"
         ],
-        art: "Resources/Cards/Neutral/nsu_02.png",
-        artworkPath: "Resources/Cards/Neutral/nsu_02.png",
+        art: "Resources/Cards/Neutral/Mercenaries/nsu_02.png",
+        artworkPath: "Resources/Cards/Neutral/Mercenaries/nsu_02.png",
         artPrompt: 'dark fantasy trading card game illustration, wandering mercenary of the echo lands: "\u0422\u0435\u043D\u0451\u043A \u0438\u0437 \u043F\u043E\u0434\u0432\u043E\u0440\u043E\u0442\u043D\u0438"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -19020,8 +19244,8 @@
           "support",
           "nsu"
         ],
-        art: "Resources/Cards/Neutral/nsu_03.png",
-        artworkPath: "Resources/Cards/Neutral/nsu_03.png",
+        art: "Resources/Cards/Neutral/Mercenaries/nsu_03.png",
+        artworkPath: "Resources/Cards/Neutral/Mercenaries/nsu_03.png",
         artPrompt: 'dark fantasy trading card game illustration, wandering mercenary of the echo lands: "\u041D\u0430\u0451\u043C\u043D\u044B\u0439 \u043A\u043B\u0438\u043D\u043E\u043A"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -19048,8 +19272,8 @@
           "support",
           "nsu"
         ],
-        art: "Resources/Cards/Neutral/nsu_04.png",
-        artworkPath: "Resources/Cards/Neutral/nsu_04.png",
+        art: "Resources/Cards/Neutral/Mercenaries/nsu_04.png",
+        artworkPath: "Resources/Cards/Neutral/Mercenaries/nsu_04.png",
         artPrompt: 'dark fantasy trading card game illustration, wandering mercenary of the echo lands: "\u0421\u0435\u0440\u044B\u0439 \u0432\u0435\u0442\u0435\u0440\u0430\u043D"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -19085,8 +19309,8 @@
           "support",
           "nsu"
         ],
-        art: "Resources/Cards/Neutral/nsu_05.png",
-        artworkPath: "Resources/Cards/Neutral/nsu_05.png",
+        art: "Resources/Cards/Neutral/Mercenaries/nsu_05.png",
+        artworkPath: "Resources/Cards/Neutral/Mercenaries/nsu_05.png",
         artPrompt: 'dark fantasy trading card game illustration, wandering mercenary of the echo lands: "\u0420\u0430\u0437\u0432\u0435\u0434\u0447\u0438\u0446\u0430 \u0434\u044E\u043D"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -19115,8 +19339,8 @@
           "support",
           "nsu"
         ],
-        art: "Resources/Cards/Neutral/nsu_06.png",
-        artworkPath: "Resources/Cards/Neutral/nsu_06.png",
+        art: "Resources/Cards/Neutral/Mercenaries/nsu_06.png",
+        artworkPath: "Resources/Cards/Neutral/Mercenaries/nsu_06.png",
         artPrompt: 'dark fantasy trading card game illustration, wandering mercenary of the echo lands: "\u041A\u043E\u043F\u0435\u0439\u0449\u0438\u043A \u0430\u0432\u0430\u043D\u0433\u0430\u0440\u0434\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -19149,8 +19373,8 @@
           "support",
           "nsu"
         ],
-        art: "Resources/Cards/Neutral/nsu_07.png",
-        artworkPath: "Resources/Cards/Neutral/nsu_07.png",
+        art: "Resources/Cards/Neutral/Mercenaries/nsu_07.png",
+        artworkPath: "Resources/Cards/Neutral/Mercenaries/nsu_07.png",
         artPrompt: 'dark fantasy trading card game illustration, wandering mercenary of the echo lands: "\u0420\u044B\u0432\u043E\u043A \u0432\u043F\u0435\u0440\u0451\u0434"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -19183,8 +19407,8 @@
           "support",
           "nsu"
         ],
-        art: "Resources/Cards/Neutral/nsu_08.png",
-        artworkPath: "Resources/Cards/Neutral/nsu_08.png",
+        art: "Resources/Cards/Neutral/Mercenaries/nsu_08.png",
+        artworkPath: "Resources/Cards/Neutral/Mercenaries/nsu_08.png",
         artPrompt: 'dark fantasy trading card game illustration, wandering mercenary of the echo lands: "\u0411\u044B\u0441\u0442\u0440\u044B\u0439 \u0432\u044B\u043F\u0430\u0434"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -19213,8 +19437,8 @@
           "support",
           "nsu"
         ],
-        art: "Resources/Cards/Neutral/nsu_09.png",
-        artworkPath: "Resources/Cards/Neutral/nsu_09.png",
+        art: "Resources/Cards/Neutral/Mercenaries/nsu_09.png",
+        artworkPath: "Resources/Cards/Neutral/Mercenaries/nsu_09.png",
         artPrompt: 'dark fantasy trading card game illustration, wandering mercenary of the echo lands: "\u041F\u0438\u044F\u0432\u043A\u0430-\u043A\u0440\u043E\u0432\u043E\u0441\u043E\u0441"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -19243,8 +19467,8 @@
           "support",
           "nsu"
         ],
-        art: "Resources/Cards/Neutral/nsu_10.png",
-        artworkPath: "Resources/Cards/Neutral/nsu_10.png",
+        art: "Resources/Cards/Neutral/Mercenaries/nsu_10.png",
+        artworkPath: "Resources/Cards/Neutral/Mercenaries/nsu_10.png",
         artPrompt: 'dark fantasy trading card game illustration, wandering mercenary of the echo lands: "\u0428\u0430\u043A\u0430\u043B-\u043F\u0430\u0434\u0430\u043B\u044C\u0449\u0438\u043A"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -19273,8 +19497,8 @@
           "support",
           "nsu"
         ],
-        art: "Resources/Cards/Neutral/nsu_11.png",
-        artworkPath: "Resources/Cards/Neutral/nsu_11.png",
+        art: "Resources/Cards/Neutral/Mercenaries/nsu_11.png",
+        artworkPath: "Resources/Cards/Neutral/Mercenaries/nsu_11.png",
         artPrompt: 'dark fantasy trading card game illustration, wandering mercenary of the echo lands: "\u0412\u0430\u043C\u043F\u0438\u0440-\u043E\u0442\u0441\u0442\u0443\u043F\u043D\u0438\u043A"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -19304,8 +19528,8 @@
           "support",
           "nsu"
         ],
-        art: "Resources/Cards/Neutral/nsu_12.png",
-        artworkPath: "Resources/Cards/Neutral/nsu_12.png",
+        art: "Resources/Cards/Neutral/Mercenaries/nsu_12.png",
+        artworkPath: "Resources/Cards/Neutral/Mercenaries/nsu_12.png",
         artPrompt: 'dark fantasy trading card game illustration, wandering mercenary of the echo lands: "\u041C\u043E\u043D\u0430\u0445\u0438\u043D\u044F-\u043A\u0440\u043E\u0432\u043E\u043F\u0438\u0439\u0446\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -19334,8 +19558,8 @@
           "support",
           "nsu"
         ],
-        art: "Resources/Cards/Neutral/nsu_13.png",
-        artworkPath: "Resources/Cards/Neutral/nsu_13.png",
+        art: "Resources/Cards/Neutral/Mercenaries/nsu_13.png",
+        artworkPath: "Resources/Cards/Neutral/Mercenaries/nsu_13.png",
         artPrompt: 'dark fantasy trading card game illustration, wandering mercenary of the echo lands: "\u0413\u0443\u043B\u044C-\u0433\u0443\u0440\u043C\u0430\u043D"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -19373,8 +19597,8 @@
           "support",
           "nsu"
         ],
-        art: "Resources/Cards/Neutral/nsu_14.png",
-        artworkPath: "Resources/Cards/Neutral/nsu_14.png",
+        art: "Resources/Cards/Neutral/Mercenaries/nsu_14.png",
+        artworkPath: "Resources/Cards/Neutral/Mercenaries/nsu_14.png",
         artPrompt: 'dark fantasy trading card game illustration, wandering mercenary of the echo lands: "\u041A\u0440\u0443\u0433 \u043A\u0440\u043E\u0432\u0438"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -19403,8 +19627,8 @@
           "support",
           "nsu"
         ],
-        art: "Resources/Cards/Neutral/nsu_15.png",
-        artworkPath: "Resources/Cards/Neutral/nsu_15.png",
+        art: "Resources/Cards/Neutral/Mercenaries/nsu_15.png",
+        artworkPath: "Resources/Cards/Neutral/Mercenaries/nsu_15.png",
         artPrompt: 'dark fantasy trading card game illustration, wandering mercenary of the echo lands: "\u0425\u0438\u043C\u0435\u0440\u0430-\u043A\u0440\u043E\u0432\u043E\u0445\u043B\u0451\u0431"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -19437,8 +19661,8 @@
           "support",
           "nsu"
         ],
-        art: "Resources/Cards/Neutral/nsu_16.png",
-        artworkPath: "Resources/Cards/Neutral/nsu_16.png",
+        art: "Resources/Cards/Neutral/Mercenaries/nsu_16.png",
+        artworkPath: "Resources/Cards/Neutral/Mercenaries/nsu_16.png",
         artPrompt: 'dark fantasy trading card game illustration, wandering mercenary of the echo lands: "\u0416\u0438\u0432\u0438\u0442\u0435\u043B\u044C\u043D\u044B\u0439 \u043E\u0442\u0432\u0430\u0440"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -19491,8 +19715,8 @@
           "support",
           "nsu"
         ],
-        art: "Resources/Cards/Neutral/nsu_17.png",
-        artworkPath: "Resources/Cards/Neutral/nsu_17.png",
+        art: "Resources/Cards/Neutral/Mercenaries/nsu_17.png",
+        artworkPath: "Resources/Cards/Neutral/Mercenaries/nsu_17.png",
         artPrompt: 'dark fantasy trading card game illustration, wandering mercenary of the echo lands: "\u0421\u0435\u0440\u0436\u0430\u043D\u0442 \u043D\u043E\u0432\u043E\u0431\u0440\u0430\u043D\u0446\u0435\u0432"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -19545,8 +19769,8 @@
           "support",
           "nsu"
         ],
-        art: "Resources/Cards/Neutral/nsu_18.png",
-        artworkPath: "Resources/Cards/Neutral/nsu_18.png",
+        art: "Resources/Cards/Neutral/Mercenaries/nsu_18.png",
+        artworkPath: "Resources/Cards/Neutral/Mercenaries/nsu_18.png",
         artPrompt: 'dark fantasy trading card game illustration, wandering mercenary of the echo lands: "\u0417\u043D\u0430\u043C\u0435\u043D\u043E\u0441\u0435\u0446 \u0440\u043E\u0442\u044B"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -19599,8 +19823,8 @@
           "support",
           "nsu"
         ],
-        art: "Resources/Cards/Neutral/nsu_19.png",
-        artworkPath: "Resources/Cards/Neutral/nsu_19.png",
+        art: "Resources/Cards/Neutral/Mercenaries/nsu_19.png",
+        artworkPath: "Resources/Cards/Neutral/Mercenaries/nsu_19.png",
         artPrompt: 'dark fantasy trading card game illustration, wandering mercenary of the echo lands: "\u041A\u0430\u043F\u0438\u0442\u0430\u043D \u043E\u043F\u043E\u043B\u0447\u0435\u043D\u0438\u044F"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -19654,8 +19878,8 @@
           "support",
           "nsu"
         ],
-        art: "Resources/Cards/Neutral/nsu_20.png",
-        artworkPath: "Resources/Cards/Neutral/nsu_20.png",
+        art: "Resources/Cards/Neutral/Mercenaries/nsu_20.png",
+        artworkPath: "Resources/Cards/Neutral/Mercenaries/nsu_20.png",
         artPrompt: 'dark fantasy trading card game illustration, wandering mercenary of the echo lands: "\u041A\u043E\u043C\u0435\u043D\u0434\u0430\u043D\u0442 \u0444\u043E\u0440\u0442\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -19731,8 +19955,8 @@
           "support",
           "nsu"
         ],
-        art: "Resources/Cards/Neutral/nsu_21.png",
-        artworkPath: "Resources/Cards/Neutral/nsu_21.png",
+        art: "Resources/Cards/Neutral/Mercenaries/nsu_21.png",
+        artworkPath: "Resources/Cards/Neutral/Mercenaries/nsu_21.png",
         artPrompt: 'dark fantasy trading card game illustration, wandering mercenary of the echo lands: "\u0413\u0435\u043D\u0435\u0440\u0430\u043B \u0440\u0435\u0437\u0435\u0440\u0432\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -19806,8 +20030,8 @@
           "support",
           "nsu"
         ],
-        art: "Resources/Cards/Neutral/nsu_22.png",
-        artworkPath: "Resources/Cards/Neutral/nsu_22.png",
+        art: "Resources/Cards/Neutral/Mercenaries/nsu_22.png",
+        artworkPath: "Resources/Cards/Neutral/Mercenaries/nsu_22.png",
         artPrompt: 'dark fantasy trading card game illustration, wandering mercenary of the echo lands: "\u041C\u043E\u0431\u0438\u043B\u0438\u0437\u0430\u0446\u0438\u044F"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -19906,8 +20130,8 @@
           "support",
           "nsu"
         ],
-        art: "Resources/Cards/Neutral/nsu_23.png",
-        artworkPath: "Resources/Cards/Neutral/nsu_23.png",
+        art: "Resources/Cards/Neutral/Mercenaries/nsu_23.png",
+        artworkPath: "Resources/Cards/Neutral/Mercenaries/nsu_23.png",
         artPrompt: 'dark fantasy trading card game illustration, wandering mercenary of the echo lands: "\u041C\u0430\u0440\u0448\u0430\u043B \u043B\u0435\u0433\u0438\u043E\u043D\u043E\u0432"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -19962,8 +20186,8 @@
           "support",
           "nsu"
         ],
-        art: "Resources/Cards/Neutral/nsu_24.png",
-        artworkPath: "Resources/Cards/Neutral/nsu_24.png",
+        art: "Resources/Cards/Neutral/Mercenaries/nsu_24.png",
+        artworkPath: "Resources/Cards/Neutral/Mercenaries/nsu_24.png",
         artPrompt: 'dark fantasy trading card game illustration, wandering mercenary of the echo lands: "\u0420\u043E\u0442\u043D\u044B\u0439 \u043F\u0438\u0441\u0430\u0440\u044C"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -19998,8 +20222,8 @@
           "support",
           "nsu"
         ],
-        art: "Resources/Cards/Neutral/nsu_25.png",
-        artworkPath: "Resources/Cards/Neutral/nsu_25.png",
+        art: "Resources/Cards/Neutral/Mercenaries/nsu_25.png",
+        artworkPath: "Resources/Cards/Neutral/Mercenaries/nsu_25.png",
         artPrompt: 'dark fantasy trading card game illustration, wandering mercenary of the echo lands: "\u0422\u043B\u0435\u044E\u0449\u0430\u044F \u043F\u043E\u0440\u0447\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -20040,8 +20264,8 @@
           "support",
           "nsu"
         ],
-        art: "Resources/Cards/Neutral/nsu_26.png",
-        artworkPath: "Resources/Cards/Neutral/nsu_26.png",
+        art: "Resources/Cards/Neutral/Mercenaries/nsu_26.png",
+        artworkPath: "Resources/Cards/Neutral/Mercenaries/nsu_26.png",
         artPrompt: 'dark fantasy trading card game illustration, wandering mercenary of the echo lands: "\u0427\u0443\u043C\u043D\u043E\u0439 \u043A\u0440\u044B\u0441\u043E\u043B\u043E\u0432"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -20076,8 +20300,8 @@
           "support",
           "nsu"
         ],
-        art: "Resources/Cards/Neutral/nsu_27.png",
-        artworkPath: "Resources/Cards/Neutral/nsu_27.png",
+        art: "Resources/Cards/Neutral/Mercenaries/nsu_27.png",
+        artworkPath: "Resources/Cards/Neutral/Mercenaries/nsu_27.png",
         artPrompt: 'dark fantasy trading card game illustration, wandering mercenary of the echo lands: "\u0421\u043A\u0432\u0435\u0440\u043D\u0430"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -20113,8 +20337,8 @@
           "support",
           "nsu"
         ],
-        art: "Resources/Cards/Neutral/nsu_28.png",
-        artworkPath: "Resources/Cards/Neutral/nsu_28.png",
+        art: "Resources/Cards/Neutral/Mercenaries/nsu_28.png",
+        artworkPath: "Resources/Cards/Neutral/Mercenaries/nsu_28.png",
         artPrompt: 'dark fantasy trading card game illustration, wandering mercenary of the echo lands: "\u041F\u0440\u043E\u043A\u043B\u044F\u0442\u044B\u0439 \u043C\u043E\u0433\u0438\u043B\u044C\u0449\u0438\u043A"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -20166,8 +20390,8 @@
           "support",
           "nsu"
         ],
-        art: "Resources/Cards/Neutral/nsu_29.png",
-        artworkPath: "Resources/Cards/Neutral/nsu_29.png",
+        art: "Resources/Cards/Neutral/Mercenaries/nsu_29.png",
+        artworkPath: "Resources/Cards/Neutral/Mercenaries/nsu_29.png",
         artPrompt: 'dark fantasy trading card game illustration, wandering mercenary of the echo lands: "\u0417\u043D\u0430\u0445\u0430\u0440\u044C-\u043E\u0442\u0440\u0430\u0432\u0438\u0442\u0435\u043B\u044C"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -20205,8 +20429,8 @@
           "support",
           "nsu"
         ],
-        art: "Resources/Cards/Neutral/nsu_30.png",
-        artworkPath: "Resources/Cards/Neutral/nsu_30.png",
+        art: "Resources/Cards/Neutral/Mercenaries/nsu_30.png",
+        artworkPath: "Resources/Cards/Neutral/Mercenaries/nsu_30.png",
         artPrompt: 'dark fantasy trading card game illustration, wandering mercenary of the echo lands: "\u041F\u043E\u0440\u0447\u0430 \u0438 \u043D\u0435\u043C\u043E\u0449\u044C"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -20243,8 +20467,8 @@
           "support",
           "nsu"
         ],
-        art: "Resources/Cards/Neutral/nsu_31.png",
-        artworkPath: "Resources/Cards/Neutral/nsu_31.png",
+        art: "Resources/Cards/Neutral/Mercenaries/nsu_31.png",
+        artworkPath: "Resources/Cards/Neutral/Mercenaries/nsu_31.png",
         artPrompt: 'dark fantasy trading card game illustration, wandering mercenary of the echo lands: "\u041D\u043E\u0441\u0438\u0442\u0435\u043B\u044C \u0447\u0443\u043C\u044B"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -20294,8 +20518,8 @@
           "support",
           "nsu"
         ],
-        art: "Resources/Cards/Neutral/nsu_32.png",
-        artworkPath: "Resources/Cards/Neutral/nsu_32.png",
+        art: "Resources/Cards/Neutral/Mercenaries/nsu_32.png",
+        artworkPath: "Resources/Cards/Neutral/Mercenaries/nsu_32.png",
         artPrompt: 'dark fantasy trading card game illustration, wandering mercenary of the echo lands: "\u042D\u043F\u0438\u0434\u0435\u043C\u0438\u044F"',
         negativePrompt: "text, letters, watermark, frame borders",
         artSize: "512x720"
@@ -21064,6 +21288,18 @@
   14%{opacity:.85;transform:translate(-50%,-50%) scale(1) rotateX(58deg)}
   70%{opacity:.55}100%{opacity:0;transform:translate(-50%,-50%) scale(1.06) rotateX(58deg)}}
 
+.vfx-summon-sigil{position:absolute;transform:translate(-50%,-50%) scale(.18) rotate(-34deg);opacity:0;
+  filter:drop-shadow(0 0 7px currentColor) drop-shadow(0 0 20px currentColor);mix-blend-mode:screen}
+.vfx-summon-sigil.go{animation:vfxSummonSigil .78s cubic-bezier(.18,.78,.22,1) forwards}
+.vfx-summon-sigil svg{display:block;width:100%;height:100%;overflow:visible}
+.vfx-summon-sigil .orbit{stroke-dasharray:3 4;animation:vfxSigilOrbit 2.4s linear infinite}
+.vfx-summon-sigil .etch{stroke-dasharray:2 3;opacity:.72}
+@keyframes vfxSummonSigil{0%{opacity:0;transform:translate(-50%,-50%) scale(.16) rotate(-34deg);filter:blur(3px) drop-shadow(0 0 4px currentColor)}
+  25%{opacity:.98;filter:blur(0) drop-shadow(0 0 10px currentColor) drop-shadow(0 0 24px currentColor)}
+  62%{opacity:.76;transform:translate(-50%,-50%) scale(1.04) rotate(8deg)}
+  100%{opacity:0;transform:translate(-50%,-50%) scale(1.32) rotate(24deg);filter:blur(1.5px) drop-shadow(0 0 16px currentColor)}}
+@keyframes vfxSigilOrbit{to{stroke-dashoffset:-28}}
+
 .vfx-flash{position:fixed;inset:0;background:currentColor;opacity:0;mix-blend-mode:screen}
 .vfx-flash.go{animation:vfxFlash var(--d,.28s) ease-out forwards}
 @keyframes vfxFlash{0%{opacity:var(--a,.5)}100%{opacity:0}}
@@ -21515,9 +21751,30 @@
     motes(at, color, 14, 80);
   }
   function summonFx(at, color = "#d8b45a") {
-    groundDecal(at, color, 140, 1100, true);
-    impactRing(at, color, 130);
-    sparkBurst(at, color, 12, 90);
+    if (reducedMotion) return;
+    const size = 176;
+    const sigil = add("vfx-summon-sigil", color, {
+      left: `${at.x}px`,
+      top: `${at.y}px`,
+      width: `${size}px`,
+      height: `${size}px`
+    });
+    sigil.setAttribute("aria-hidden", "true");
+    sigil.innerHTML = `<svg viewBox="0 0 128 128" focusable="false">
+    <circle cx="64" cy="64" r="54" fill="none" stroke="currentColor" stroke-width="1.4" opacity=".92"/>
+    <circle class="orbit" cx="64" cy="64" r="45" fill="none" stroke="currentColor" stroke-width="1" opacity=".78"/>
+    <circle cx="64" cy="64" r="31" fill="currentColor" opacity=".10"/>
+    <path d="M64 10 70 48 108 64 70 70 64 108 58 70 20 64 58 58Z" fill="none" stroke="currentColor" stroke-width="1.4" opacity=".9"/>
+    <path d="M64 28 75 53 100 64 75 75 64 100 53 75 28 64 53 53Z" fill="none" stroke="currentColor" stroke-width=".9" opacity=".7"/>
+    <path class="etch" d="M42 23 48 34 39 41M86 23 80 34 89 41M105 42 94 48 87 39M105 86 94 80 87 89M42 105 48 94 39 87M23 86 34 80 41 89M23 42 34 48 41 39M86 105 80 94 89 87" fill="none" stroke="currentColor" stroke-width="1.1"/>
+    <path d="M64 46 68 60 82 64 68 68 64 82 60 68 46 64 60 60Z" fill="currentColor" opacity=".62"/>
+    <circle cx="64" cy="10" r="2" fill="currentColor"/><circle cx="118" cy="64" r="2" fill="currentColor"/>
+    <circle cx="64" cy="118" r="2" fill="currentColor"/><circle cx="10" cy="64" r="2" fill="currentColor"/>
+  </svg>`;
+    go(sigil, 820);
+    groundDecal(at, color, 132, 1050, true);
+    impactRing(at, color, 136);
+    sparkBurst(at, color, 16, 94);
   }
   function echoFx(at) {
     ripple(at, "#b06cf0", 4, 170);
@@ -21831,6 +22088,16 @@
     Ethereal: { primary: "#3fd6c8", secondary: "#c8fff8", accent: "#1b6f68", deep: "#0b1c1e" },
     Neutral: { primary: "#9aa3ad", secondary: "#dfe4ea", accent: "#5a616b", deep: "#12141a" }
   };
+  function artUrlFor(card, base = "/art") {
+    const rel = card.artworkPath ?? card.art;
+    if (!rel) return null;
+    const parts = rel.replace(/\\/g, "/").split("/").filter(Boolean);
+    const i = parts.indexOf("Cards");
+    if (i < 0) return null;
+    const tail = parts.slice(i + 1);
+    if (tail.length < 2 || tail.some((part) => part === "." || part === "..")) return null;
+    return `${base}/${tail.map(encodeURIComponent).join("/")}`;
+  }
   function paletteOf(faction) {
     return PALETTES[faction in PALETTES ? faction : "Neutral" /* Neutral */];
   }
@@ -22003,6 +22270,32 @@
     return { ok: problems.length === 0, problems, total: cards.length };
   }
 
+  // src/ui/deckheroes.ts
+  var DECK_HERO_COIN_PRICE = 2e3;
+  var DECK_HERO_CATALOG = [
+    { id: "Aurites", faction: "Aurites" /* Aurites */, name: "\u0421\u0442\u0440\u0430\u0436\u0438 \u0421\u0432\u0435\u0442\u0430", tier: "standard" },
+    { id: "aurites-veteran", faction: "Aurites" /* Aurites */, name: "\u041A\u0430\u043F\u0438\u0442\u0430\u043D \u0420\u0430\u0441\u0441\u0432\u0435\u0442\u0430", tier: "coin" },
+    { id: "aurites-ascendant", faction: "Aurites" /* Aurites */, name: "\u0417\u043B\u0430\u0442\u043E\u043A\u0440\u044B\u043B\u044B\u0439 \u0437\u0430\u0449\u0438\u0442\u043D\u0438\u043A", tier: "donation" },
+    { id: "Necrus", faction: "Necrus" /* Necrus */, name: "\u041A\u0443\u043B\u044C\u0442 \u0422\u0435\u043D\u0438", tier: "standard" },
+    { id: "necrus-herald", faction: "Necrus" /* Necrus */, name: "\u0412\u0435\u0441\u0442\u043D\u0438\u043A \u0411\u0435\u0437\u0434\u043D\u044B", tier: "coin" },
+    { id: "necrus-overlord", faction: "Necrus" /* Necrus */, name: "\u041F\u043E\u0432\u0435\u043B\u0438\u0442\u0435\u043B\u044C \u041A\u043E\u0441\u0442\u0435\u0439", tier: "donation" },
+    { id: "Terramorph", faction: "Terramorph" /* Terramorph */, name: "\u0414\u0440\u0435\u0432\u043D\u0438\u0439 \u041A\u043E\u043D\u043A\u043B\u0430\u0432", tier: "standard" },
+    { id: "terramorph-elder", faction: "Terramorph" /* Terramorph */, name: "\u0421\u0442\u0430\u0440\u0435\u0439\u0448\u0438\u043D\u0430 \u0420\u043E\u0449\u0438", tier: "coin" },
+    { id: "terramorph-worldroot", faction: "Terramorph" /* Terramorph */, name: "\u0421\u0435\u0440\u0434\u0446\u0435 \u0414\u0440\u0435\u0432\u043D\u0435\u0433\u043E \u041B\u0435\u0441\u0430", tier: "donation" },
+    { id: "Pyromancer", faction: "Pyromancer" /* Pyromancer */, name: "\u041B\u0435\u0433\u0438\u043E\u043D \u041F\u043B\u0430\u043C\u0435\u043D\u0438", tier: "standard" },
+    { id: "pyromancer-sparkmaster", faction: "Pyromancer" /* Pyromancer */, name: "\u041C\u0430\u0441\u0442\u0435\u0440 \u0418\u0441\u043A\u0440", tier: "coin" },
+    { id: "pyromancer-inferno", faction: "Pyromancer" /* Pyromancer */, name: "\u0412\u043B\u0430\u0434\u044B\u043A\u0430 \u041F\u043B\u0430\u043C\u0435\u043D\u0438", tier: "donation" },
+    { id: "Ethereal", faction: "Ethereal" /* Ethereal */, name: "\u0421\u0442\u0440\u0430\u043D\u043D\u0438\u043A \u0412\u0435\u0442\u0440\u0430", tier: "standard" },
+    { id: "ethereal-stormkeeper", faction: "Ethereal" /* Ethereal */, name: "\u0425\u0440\u0430\u043D\u0438\u0442\u0435\u043B\u044C \u0411\u0443\u0440\u0438", tier: "coin" },
+    { id: "ethereal-starborn", faction: "Ethereal" /* Ethereal */, name: "\u0410\u0441\u0442\u0440\u0430\u043B\u044C\u043D\u044B\u0439 \u0441\u0442\u0440\u0430\u043D\u043D\u0438\u043A", tier: "donation" }
+  ];
+  var DECK_HERO_BY_ID = new Map(
+    DECK_HERO_CATALOG.map((hero) => [hero.id, hero])
+  );
+  function deckHeroesForFaction(faction) {
+    return DECK_HERO_CATALOG.filter((hero) => hero.faction === faction);
+  }
+
   // src/ui/prototype.ts
   var cardsJson = Cards_default;
   var decksJson = Decks_default;
@@ -22021,8 +22314,121 @@
   var appRoute = "home";
   var routeHistory = [];
   var suppressRouteHistory = false;
+  var APP_ROUTE_SURFACES = {
+    home: "menu",
+    collection: "collection",
+    decks: "decksScreen",
+    store: "shopModal",
+    profile: "profileModal",
+    events: "eventsScreen",
+    packs: "boosterModal",
+    mastery: "bpModal",
+    battle: "battle",
+    rules: "rules",
+    campaign: "campaignModal",
+    online: "onlineModal"
+  };
+  var APP_ROUTE_NAMES = {
+    home: "\u0413\u043B\u0430\u0432\u043D\u0430\u044F",
+    collection: "\u041A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u044F \u043A\u0430\u0440\u0442",
+    decks: "\u041A\u043E\u043B\u043E\u0434\u044B",
+    store: "\u041C\u0430\u0433\u0430\u0437\u0438\u043D",
+    profile: "\u041F\u0440\u043E\u0444\u0438\u043B\u044C",
+    events: "\u0421\u043E\u0431\u044B\u0442\u0438\u044F",
+    packs: "\u0411\u0443\u0441\u0442\u0435\u0440\u044B",
+    mastery: "\u0411\u043E\u0435\u0432\u043E\u0439 \u043F\u0440\u043E\u043F\u0443\u0441\u043A",
+    battle: "\u041C\u0430\u0442\u0447",
+    rules: "\u041F\u0440\u0430\u0432\u0438\u043B\u0430",
+    campaign: "\u041A\u0430\u043C\u043F\u0430\u043D\u0438\u044F",
+    online: "\u0421\u0435\u0442\u0435\u0432\u0430\u044F \u0438\u0433\u0440\u0430"
+  };
+  var uiMotionCleanup = /* @__PURE__ */ new WeakMap();
+  var routeFxTimer = null;
+  function prefersReducedUiMotion() {
+    return document.body.classList.contains("fxLite") || !!window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+  }
+  function animateUiSurface(surface, className, baseDuration = 380) {
+    if (!surface) return;
+    uiMotionCleanup.get(surface)?.();
+    if (prefersReducedUiMotion()) return;
+    const speed = Math.max(0.55, Math.min(1.5, Number.isFinite(animSpd) ? animSpd : 1));
+    const duration = Math.round(baseDuration * speed);
+    const animationName = className === "ecRouteEnter" ? "ecRouteArrival" : "ecSubpanelArrival";
+    surface.style.setProperty("--ec-ui-motion-duration", `${duration}ms`);
+    surface.classList.remove(className);
+    void surface.offsetWidth;
+    surface.classList.add(className);
+    let timer = 0;
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      window.clearTimeout(timer);
+      surface.removeEventListener("animationend", onEnd);
+      surface.classList.remove(className);
+      surface.style.removeProperty("--ec-ui-motion-duration");
+      if (uiMotionCleanup.get(surface) === finish) uiMotionCleanup.delete(surface);
+    };
+    const onEnd = (event) => {
+      const animation = event;
+      if (animation.target === surface && animation.animationName === animationName) finish();
+    };
+    surface.addEventListener("animationend", onEnd);
+    timer = window.setTimeout(finish, duration + 100);
+    uiMotionCleanup.set(surface, finish);
+  }
+  function playRouteTransitionFx() {
+    const fx = document.getElementById("ecRouteTransitionFx");
+    if (!fx || prefersReducedUiMotion()) return;
+    if (routeFxTimer !== null) window.clearTimeout(routeFxTimer);
+    fx.classList.remove("playing");
+    void fx.offsetWidth;
+    fx.classList.add("playing");
+    const speed = Math.max(0.55, Math.min(1.5, Number.isFinite(animSpd) ? animSpd : 1));
+    routeFxTimer = window.setTimeout(() => {
+      fx.classList.remove("playing");
+      routeFxTimer = null;
+    }, Math.round(440 * speed));
+  }
+  function syncQuickNav(next) {
+    const dock = document.getElementById("ecQuickNav");
+    if (!dock) return;
+    const show = next !== "home" && next !== "battle";
+    dock.classList.toggle("hidden", !show);
+    dock.setAttribute("aria-hidden", show ? "false" : "true");
+    let activeItem = null;
+    dock.querySelectorAll("[data-route]").forEach((item) => {
+      const active = item.dataset.route === next;
+      item.classList.toggle("active", active);
+      if (active) {
+        item.setAttribute("aria-current", "page");
+        activeItem = item;
+      } else item.removeAttribute("aria-current");
+    });
+    const back = dock.querySelector('[data-route="back"]');
+    const canGoBack = routeHistory.length > 0 && next !== "home" && next !== "battle";
+    if (back) {
+      back.disabled = !canGoBack;
+      back.setAttribute("aria-disabled", String(!canGoBack));
+      const previous = routeHistory[routeHistory.length - 1];
+      back.title = canGoBack && previous ? `\u041D\u0430\u0437\u0430\u0434: ${APP_ROUTE_NAMES[previous]}` : "\u0412\u044B \u043D\u0430 \u043F\u0435\u0440\u0432\u043E\u043C \u044D\u043A\u0440\u0430\u043D\u0435";
+    }
+    const compact = window.matchMedia?.("(max-width: 760px)").matches ?? window.innerWidth <= 760;
+    if (show && compact && activeItem) window.requestAnimationFrame(() => {
+      if (!activeItem || dock.classList.contains("hidden") || dock.clientWidth === 0) return;
+      const itemRect = activeItem.getBoundingClientRect();
+      const dockRect = dock.getBoundingClientRect();
+      const target = dock.scrollLeft + itemRect.left - dockRect.left - (dockRect.width - itemRect.width) / 2;
+      try {
+        dock.scrollTo({ left: Math.max(0, target), behavior: prefersReducedUiMotion() ? "auto" : "smooth" });
+      } catch {
+        dock.scrollLeft = Math.max(0, target);
+      }
+    });
+  }
   function setAppRoute(next) {
-    if (next !== appRoute) {
+    const changed = next !== appRoute;
+    if (changed) {
       if (next === "home" && !suppressRouteHistory) routeHistory.length = 0;
       else if (!suppressRouteHistory) routeHistory.push(appRoute);
       if (routeHistory.length > 24) routeHistory.shift();
@@ -22031,18 +22437,19 @@
     document.body.dataset.appRoute = next;
     if (next !== "rules") document.getElementById("rules")?.classList.add("hidden");
     if (typeof closeOnline === "function" && document.getElementById("onlineModal") && !document.getElementById("onlineModal").classList.contains("hidden")) closeOnline();
-    const dock = document.getElementById("ecQuickNav");
-    const show = next !== "home" && next !== "battle";
-    dock?.classList.toggle("hidden", !show);
-    dock?.setAttribute("aria-hidden", show ? "false" : "true");
-    dock?.querySelectorAll("[data-route]").forEach((item) => {
-      const active = item.dataset.route === next;
-      item.classList.toggle("active", active);
-      if (active) item.setAttribute("aria-current", "page");
-      else item.removeAttribute("aria-current");
-    });
+    syncQuickNav(next);
+    if (changed) {
+      animateUiSurface(document.getElementById(APP_ROUTE_SURFACES[next]), "ecRouteEnter", 400);
+      playRouteTransitionFx();
+      const live = document.getElementById("ecRouteLive");
+      if (live) live.textContent = `\u0420\u0430\u0437\u0434\u0435\u043B \u043E\u0442\u043A\u0440\u044B\u0442: ${APP_ROUTE_NAMES[next]}`;
+    }
   }
   function navigateApp(next) {
+    if (!meta.starterDecksUnlocked && next !== "home") {
+      openIntroFlow();
+      return;
+    }
     if (next === "back") {
       const previous = routeHistory.pop() ?? "home";
       if (previous === appRoute) return;
@@ -22200,6 +22607,9 @@
     Pyromancer: "pyr_14",
     Ethereal: "eth_15"
   };
+  function cardArtworkUrl(card) {
+    return artUrlFor(card) ?? `/art/${encodeURIComponent(String(card.faction))}/${encodeURIComponent(card.id)}.png`;
+  }
   var fmtNum = (n) => n.toLocaleString("ru-RU");
   function artChain(img, urls) {
     if (!img) return;
@@ -22215,11 +22625,17 @@
     img.src = list[0];
   }
   function hubArtUrls(f) {
-    return [`/heroes/${f}`, `/art/${f}/${HUB_ART[f]}.png`, `img/menu_${f.toLowerCase()}.jpg`];
+    const card = HUB_ART[f] ? db.get(HUB_ART[f]) : void 0;
+    return [`/heroes/${f}`, card ? cardArtworkUrl(card) : `/art/${encodeURIComponent(f)}/${HUB_ART[f]}.png`, `img/menu_${f.toLowerCase()}.jpg`];
+  }
+  function deckHeroArtUrls(heroId, faction) {
+    const hero = DECK_HERO_BY_ID.get(heroId);
+    const fallback = hubArtUrls(faction);
+    return hero && hero.faction === faction ? [`/deck-heroes/${encodeURIComponent(hero.id)}`, ...fallback] : fallback;
   }
   var TYPE_RU = { Creature: "\u0421\u0443\u0449\u0435\u0441\u0442\u0432\u043E", Spell: "\u0417\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0435", Rune: "\u0420\u0443\u043D\u0430" };
   var PHASE_HINT = {
-    Start: "\u0421\u0442\u0430\u0434\u0438\u044F \u043D\u0430\u0447\u0430\u043B\u0430: \u0434\u043E\u0431\u043E\u0440\u0430 \u043A\u0430\u0440\u0442\u044B \u0438 \u0441\u0440\u0430\u0431\u0430\u0442\u044B\u0432\u0430\u043D\u0438\u044F \xAB\u0432 \u043D\u0430\u0447\u0430\u043B\u0435 \u0445\u043E\u0434\u0430\xBB",
+    Start: "\u0421\u0442\u0430\u0434\u0438\u044F \u043D\u0430\u0447\u0430\u043B\u0430: \u0440\u0430\u0437\u0432\u043E\u0440\u043E\u0442 \u0432\u0430\u0448\u0438\u0445 \u0441\u0443\u0449\u0435\u0441\u0442\u0432, \u0434\u043E\u0431\u043E\u0440 \u043A\u0430\u0440\u0442\u044B \u0438 \u0441\u0440\u0430\u0431\u0430\u0442\u044B\u0432\u0430\u043D\u0438\u044F \xAB\u0432 \u043D\u0430\u0447\u0430\u043B\u0435 \u0445\u043E\u0434\u0430\xBB",
     Resource: "\u0421\u0442\u0430\u0434\u0438\u044F \u0440\u0435\u0441\u0443\u0440\u0441\u0430: +1 \u043A \u043C\u0430\u043A\u0441\u0438\u043C\u0443\u043C\u0443 \u043C\u0430\u043D\u044B, \u043A\u0440\u0438\u0441\u0442\u0430\u043B\u043B\u044B \u043F\u043E\u043F\u043E\u043B\u043D\u044F\u044E\u0442\u0441\u044F",
     Main: "\u0413\u043B\u0430\u0432\u043D\u0430\u044F \u0441\u0442\u0430\u0434\u0438\u044F: \u0440\u043E\u0437\u044B\u0433\u0440\u044B\u0448 \u043A\u0430\u0440\u0442 \u0438 \u042D\u0445\u043E; \u0434\u0430\u043B\u0435\u0435 \u2014 \u043E\u0431\u044A\u044F\u0432\u043B\u0435\u043D\u0438\u0435 \u0430\u0442\u0430\u043A",
     Combat: "\u0421\u0442\u0430\u0434\u0438\u044F \u0431\u043E\u044F: \u0432\u0430\u0448\u0438 \u0430\u0442\u0430\u043A\u0438 \u043E\u0431\u044A\u044F\u0432\u043B\u044F\u044E\u0442\u0441\u044F \u0441\u0442\u0440\u0435\u043B\u043A\u043E\u0439, \u043E\u0441\u0442\u0430\u043B\u044C\u043D\u044B\u0435 \u0434\u043E\u0438\u0433\u0440\u044B\u0432\u0430\u0435\u0442 \u0430\u0432\u0442\u043E-\u0431\u043E\u0439",
@@ -22239,10 +22655,12 @@
     SpellDamage: "\u0423\u0440\u043E\u043D \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0439 +1",
     DivineShield: "\u0411\u043E\u0436\u0435\u0441\u0442\u0432\u0435\u043D\u043D\u044B\u0439 \u0449\u0438\u0442",
     Poisonous: "\u042F\u0434\u043E\u0432\u0438\u0442\u044B\u0439",
-    Freezing: "\u041B\u0435\u0434\u044F\u043D\u043E\u0435 \u043A\u0430\u0441\u0430\u043D\u0438\u0435"
+    Freezing: "\u041B\u0435\u0434\u044F\u043D\u043E\u0435 \u043A\u0430\u0441\u0430\u043D\u0438\u0435",
+    Vigilance: "\u0411\u0434\u0438\u0442\u0435\u043B\u044C\u043D\u043E\u0441\u0442\u044C"
   };
   var KW_BADGE = {
     Taunt: { ico: "\u26E8", title: "\u041F\u0440\u043E\u0432\u043E\u043A\u0430\u0446\u0438\u044F: \u0430\u0432\u0442\u043E-\u0430\u0442\u0430\u043A\u0430 \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430 \u043E\u0431\u044F\u0437\u0430\u043D\u0430 \u0431\u0438\u0442\u044C \u044D\u0442\u043E \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E" },
+    Vigilance: { ico: "\u25C9", title: "\u0411\u0434\u0438\u0442\u0435\u043B\u044C\u043D\u043E\u0441\u0442\u044C: \u043F\u043E\u0441\u043B\u0435 \u0430\u0442\u0430\u043A\u0438 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u043E\u0441\u0442\u0430\u0451\u0442\u0441\u044F \u0440\u0430\u0437\u0432\u0451\u0440\u043D\u0443\u0442\u044B\u043C" },
     Lifesteal: { ico: "\u{1FA78}", title: "\u0412\u0430\u043C\u043F\u0438\u0440\u0438\u0437\u043C: \u043D\u0430\u043D\u0435\u0441\u0451\u043D\u043D\u044B\u0439 \u0443\u0440\u043E\u043D \u043B\u0435\u0447\u0438\u0442 \u0432\u0430\u0448\u0435\u0433\u043E \u0433\u0435\u0440\u043E\u044F" },
     Windfury: { ico: "\u{1F300}", title: "\u0411\u0443\u0440\u044F: \u0434\u0432\u0435 \u0430\u0442\u0430\u043A\u0438 \u0437\u0430 \u0445\u043E\u0434" },
     Trample: { ico: "\u27A4", title: "\u041F\u0440\u043E\u0440\u044B\u0432: \u0438\u0437\u0431\u044B\u0442\u043E\u0447\u043D\u044B\u0439 \u0443\u0440\u043E\u043D \u0443\u0445\u043E\u0434\u0438\u0442 \u0432 \u0433\u0435\u0440\u043E\u044F" },
@@ -22253,6 +22671,20 @@
     DivineShield: { ico: "\u{1F6E1}", title: "\u0411\u043E\u0436\u0435\u0441\u0442\u0432\u0435\u043D\u043D\u044B\u0439 \u0449\u0438\u0442: \u0432\u0445\u043E\u0434\u0438\u0442 \u0441\u043E \u0429\u0438\u0442\u043E\u043C, \u043F\u043E\u0433\u043B\u043E\u0449\u0430\u0435\u0442 \u043F\u0435\u0440\u0432\u044B\u0439 \u0443\u0440\u043E\u043D" },
     Poisonous: { ico: "\u2620", title: "\u042F\u0434\u043E\u0432\u0438\u0442\u044B\u0439: \u043D\u0430\u043D\u043E\u0441\u0438\u0442 \u042F\u0434 \u043F\u0440\u0438 \u0443\u0440\u043E\u043D\u0435 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0443 (\u043B\u044E\u0431\u0430\u044F \u0440\u0430\u043D\u0430 \u0441\u043C\u0435\u0440\u0442\u0435\u043B\u044C\u043D\u0430)" },
     Freezing: { ico: "\u2744", title: "\u041B\u0435\u0434\u044F\u043D\u043E\u0435 \u043A\u0430\u0441\u0430\u043D\u0438\u0435: \u0437\u0430\u043C\u043E\u0440\u0430\u0436\u0438\u0432\u0430\u0435\u0442 \u0446\u0435\u043B\u044C \u043D\u0430 1 \u0445\u043E\u0434 \u043F\u0440\u0438 \u0443\u0440\u043E\u043D\u0435" }
+  };
+  var KW_BADGE_EN = {
+    Taunt: "Taunt: enemies must attack this creature when able",
+    Vigilance: "Vigilance: this creature does not tap when it attacks",
+    Lifesteal: "Lifesteal: damage dealt heals your hero",
+    Windfury: "Windfury: can attack twice each turn",
+    Trample: "Trample: excess combat damage hits the enemy hero",
+    Rush: "Rush: may attack on the turn it enters play",
+    Unblockable: "Unblockable: cannot be chosen as an attack target",
+    SpellDamage: "Spell Damage +1",
+    Deathrattle: "Deathrattle: effect triggers when this creature dies",
+    DivineShield: "Divine Shield: absorbs the first damage",
+    Poisonous: "Poisonous: damage to a creature is lethal",
+    Freezing: "Freezing Touch: freezes its target for one turn"
   };
   var STATUS_BADGE = {
     Shield: { ico: "\u{1F6E1}", cls: "shield", title: "\u0429\u0438\u0442: \u043F\u043E\u0433\u043B\u043E\u0449\u0430\u0435\u0442 \u043F\u0435\u0440\u0432\u043E\u0435 \u043F\u043E\u0432\u0440\u0435\u0436\u0434\u0435\u043D\u0438\u0435" },
@@ -22268,7 +22700,7 @@
     void h;
     const p = paletteOf(card.faction);
     const sig = FACTION_SIGIL[card.faction] ?? "\u2726";
-    return `<div class="artBox" style="--fa:${p.primary};--fb:${p.secondary}" data-sigil="${sig}"><img src="/art/${encodeURIComponent(card.faction)}/${encodeURIComponent(card.id)}.png" alt="" loading="lazy" onerror="this.classList.add('miss')"></div>`;
+    return `<div class="artBox" style="--fa:${p.primary};--fb:${p.secondary}" data-sigil="${sig}"><img src="${cardArtworkUrl(card)}" alt="" loading="lazy" onerror="this.classList.add('miss')"></div>`;
   }
   var { db } = buildDatabase(cardsJson);
   var deckList = decksJson.decks;
@@ -22362,7 +22794,7 @@
     tooltip.classList.remove("show");
   }
   var SETTINGS_KEY = "echo-citadel.settings.v1";
-  var SETTINGS_DEFAULT = { preview: true, fxLite: false, sound: true, hints: true, animSpeed: 1, autoPass: false, rope: true, cbMode: false, fontScale: 1, subs: true, lang: "ru", volMusic: 60, volSfx: 80, quality: "high" };
+  var SETTINGS_DEFAULT = { preview: true, fxLite: false, sound: true, hints: true, animSpeed: 1, autoPass: false, fullControl: false, rope: true, cbMode: false, fontScale: 1, subs: true, lang: "ru", volMusic: 60, volSfx: 80, quality: "high" };
   function loadSettings() {
     try {
       const raw = window.localStorage?.getItem(SETTINGS_KEY);
@@ -22421,6 +22853,8 @@
     if (sp) sp.value = String(settings.animSpeed ?? 1);
     const ap = document.getElementById("setAutoPass");
     if (ap) ap.checked = !!settings.autoPass;
+    const fc = document.getElementById("setFullControl");
+    if (fc) fc.checked = !!settings.fullControl;
     const rp = document.getElementById("setRope");
     if (rp) rp.checked = !!settings.rope;
     document.body.dataset.cb = settings.cbMode ? "1" : "0";
@@ -22573,6 +23007,7 @@
     while (logBuffer.length > 240) logBuffer.shift();
   }
   var KW_GLOSS = {
+    "\u0411\u0434\u0438\u0442\u0435\u043B\u044C\u043D\u043E\u0441\u0442\u044C": "\u0411\u0434\u0438\u0442\u0435\u043B\u044C\u043D\u043E\u0441\u0442\u044C: \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u043D\u0435 \u043F\u043E\u0432\u043E\u0440\u0430\u0447\u0438\u0432\u0430\u0435\u0442\u0441\u044F \u043F\u043E\u0441\u043B\u0435 \u0430\u0442\u0430\u043A\u0438 \u0438 \u043E\u0441\u0442\u0430\u0451\u0442\u0441\u044F \u0433\u043E\u0442\u043E\u0432\u044B\u043C \u043A \u0441\u043B\u0435\u0434\u0443\u044E\u0449\u0435\u043C\u0443 \u0445\u043E\u0434\u0443.",
     "\u041F\u0440\u043E\u0432\u043E\u043A\u0430\u0446\u0438\u044F": "\u041F\u0440\u043E\u0432\u043E\u043A\u0430\u0446\u0438\u044F: \u0430\u0432\u0442\u043E-\u0430\u0442\u0430\u043A\u0438 \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430 \u043E\u0431\u044F\u0437\u0430\u043D\u044B \u0432\u044B\u0431\u0438\u0440\u0430\u0442\u044C \u044D\u0442\u043E \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u043F\u0435\u0440\u0432\u043E\u0439 \u0446\u0435\u043B\u044C\u044E.",
     "\u0420\u044B\u0432\u043E\u043A": "\u0420\u044B\u0432\u043E\u043A: \u043C\u043E\u0436\u0435\u0442 \u0430\u0442\u0430\u043A\u043E\u0432\u0430\u0442\u044C \u0432 \u0445\u043E\u0434 \u043F\u0440\u0438\u0437\u044B\u0432\u0430 (\u0438\u0433\u043D\u043E\u0440\u0438\u0440\u0443\u0435\u0442 \u0431\u043E\u043B\u0435\u0437\u043D\u044C \u043F\u0440\u0438\u0437\u044B\u0432\u0430).",
     "\u041F\u0440\u043E\u0440\u044B\u0432": "\u041F\u0440\u043E\u0440\u044B\u0432: \u0438\u0437\u0431\u044B\u0442\u043E\u0447\u043D\u044B\u0439 \u0443\u0440\u043E\u043D \u043E\u0442 \u0430\u0442\u0430\u043A\u0438 \u043F\u0440\u043E\u0445\u043E\u0434\u0438\u0442 \u0432 \u0433\u0435\u0440\u043E\u044F \u0437\u0430\u0449\u0438\u0449\u0430\u044E\u0449\u0435\u0433\u043E\u0441\u044F.",
@@ -22646,7 +23081,8 @@
     SpellDamage: "Spell Damage +1",
     DivineShield: "Divine Shield",
     Poisonous: "Poisonous",
-    Freezing: "Freezing"
+    Freezing: "Freezing",
+    Vigilance: "Vigilance"
   };
   var TYPE_EN = { Creature: "Minion", Spell: "Spell", Rune: "Rune" };
   var RARITY_EN = { Common: "Common", Rare: "Rare", Epic: "Epic", Legendary: "Legendary" };
@@ -22690,6 +23126,7 @@
     return isEN() ? localeCache?.[`card_${c.id}_text`] || ru : ru;
   }
   var KW_REMINDER = {
+    Vigilance: "\u041F\u043E\u0441\u043B\u0435 \u0430\u0442\u0430\u043A\u0438 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u043D\u0435 \u043F\u043E\u0432\u043E\u0440\u0430\u0447\u0438\u0432\u0430\u0435\u0442\u0441\u044F.",
     Taunt: "\u041F\u043E\u043A\u0430 \u044D\u0442\u043E \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u043D\u0430 \u043F\u043E\u043B\u0435, \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A \u043E\u0431\u044F\u0437\u0430\u043D \u0430\u0442\u0430\u043A\u043E\u0432\u0430\u0442\u044C \u0435\u0433\u043E \u2014 \u0431\u0438\u0442\u044C \u0433\u0435\u0440\u043E\u044F \u0438\u043B\u0438 \u0434\u0440\u0443\u0433\u0438\u0445 \u0441\u0443\u0449\u0435\u0441\u0442\u0432 \u043D\u0435\u043B\u044C\u0437\u044F.",
     Rush: "\u041C\u043E\u0436\u0435\u0442 \u0430\u0442\u0430\u043A\u043E\u0432\u0430\u0442\u044C \u0432 \u0442\u043E\u0442 \u0436\u0435 \u0445\u043E\u0434, \u043A\u043E\u0433\u0434\u0430 \u0432\u044B\u0448\u043B\u043E \u043D\u0430 \u043F\u043E\u043B\u0435.",
     Windfury: "\u041C\u043E\u0436\u0435\u0442 \u0430\u0442\u0430\u043A\u043E\u0432\u0430\u0442\u044C \u0434\u0432\u0430\u0436\u0434\u044B \u0437\u0430 \u0445\u043E\u0434.",
@@ -22950,6 +23387,7 @@
       this.net = null;
       this.playerFaction = "Aurites" /* Aurites */;
       this.playerDeckId = "Aurites";
+      this.playerHeroId = "Aurites" /* Aurites */;
       this.enemyFaction = "Necrus" /* Necrus */;
       this.difficulty = 0.8;
       this.running = false;
@@ -22971,6 +23409,7 @@
       this.massTotal = 0;
       this.combatWindowDone = null;
       this.turnDone = null;
+      this.sessionId = 0;
       /** Существа, призванные с прошлого рендера: им показываем анимацию выхода. */
       this.summonedUids = /* @__PURE__ */ new Set();
       /** VFX призыва ждут рендера: событие приходит раньше DOM-узла существа. */
@@ -23033,6 +23472,8 @@
       this.campNode = null;
       this.bossLastTurn = -1;
       this.stackBusy = false;
+      this.stackGeneration = 0;
+      this.stackTask = null;
       this.instantLabel = "";
       this.cdTimer = 0;
       this.cdLeft = 20;
@@ -23061,6 +23502,11 @@
     }
     /* ------------------------------ запуск ------------------------------ */
     async start() {
+      const sessionId = ++this.sessionId;
+      this.finishInstantWindow("cancelled", false);
+      this.stackGeneration++;
+      this.stackTask = null;
+      this.stackBusy = false;
       this.running = true;
       this.busy = false;
       this.overShown = false;
@@ -23073,6 +23519,7 @@
       logBuffer.length = 0;
       applyBattleBg(this.playerFaction);
       const pDef = resolveDeck(this.playerDeckId, deckList) ?? starterDeckForFaction(this.playerFaction) ?? deckById.get(this.playerFaction);
+      this.playerHeroId = deckHeroIdForDeck(pDef.id, pDef.faction) ?? this.playerFaction;
       const pDeck = this.net ? this.net.you.deck.slice() : pDef.cards.slice();
       if (!this.net && !isStarterDeckId(pDef.id)) {
         const unowned = pDeck.filter((id) => ownedCount(id) === 0);
@@ -23138,7 +23585,7 @@
       $("enemyFac").textContent = FACTION_RU[this.enemyFaction];
       $("enemyFac").innerHTML = FACTION_RU[this.enemyFaction];
       $("enemyFac").title = eFull.replace(/<[^>]+>/g, "");
-      this.setPortrait("playerPortrait", this.playerFaction);
+      this.setPortrait("playerPortrait", this.playerFaction, this.playerHeroId);
       this.setPortrait("enemyPortrait", this.enemyFaction);
       if (this.net) {
         await this.netSetup();
@@ -23148,9 +23595,10 @@
       pushLog(`\u2694 ${FACTION_RU[this.playerFaction]} \u043F\u0440\u043E\u0442\u0438\u0432 ${FACTION_RU[this.enemyFaction]}`, "big");
       this.renderAll();
       await this.showMulligan();
+      if (sessionId !== this.sessionId || !this.running) return;
       this.engine.activeSide = 0 /* Player */;
       this.engine.turn = 0;
-      await this.loop();
+      await this.loop(sessionId);
     }
     /**
      * Сцена боя: 4 параллакс-слоя фона в палитре фракции игрока, каменная
@@ -23173,46 +23621,62 @@
       stopAmbient();
     }
     stop() {
+      this.sessionId++;
       this.running = false;
-      this.turnDone?.();
+      this.stackGeneration++;
+      this.stackTask = null;
+      this.stackBusy = false;
+      this.finishInstantWindow("cancelled", false);
+      const doneTurn = this.turnDone;
+      this.turnDone = null;
+      doneTurn?.();
+      this.ropeStop();
       this.clearThinkWatch();
     }
     /* --------------------------- главный цикл --------------------------- */
-    async loop() {
+    async loop(sessionId = this.sessionId) {
       const e = this.engine;
       try {
-        while (this.running && e.result === "Ongoing" /* Ongoing */) {
-          if (e.activeSide === 0 /* Player */) await this.humanTurn();
+        while (sessionId === this.sessionId && this.running && e.result === "Ongoing" /* Ongoing */) {
+          if (e.activeSide === 0 /* Player */) await this.humanTurn(sessionId, e);
           else if (this.net) await this.netTurn();
           else await this.aiTurn();
+          if (sessionId !== this.sessionId) return;
           if (e.result === "Ongoing" /* Ongoing */ && e.turn > e.config.maxTurns) e.result = "Draw" /* Draw */;
           this.renderAll();
         }
+        if (sessionId !== this.sessionId) return;
         this.renderAll();
         await sleep2(340);
+        if (sessionId !== this.sessionId || !this.running) return;
         this.showGameOver();
       } catch (err) {
+        if (sessionId !== this.sessionId) return;
         reportFatal("loop", err);
         this.running = false;
         this.setBusy(false);
       }
     }
     /** Ход игрока: Start/Resource исполняет движок, Main ждёт «Завершить ход». */
-    async humanTurn() {
-      const e = this.engine;
+    async humanTurn(sessionId, e) {
+      if (sessionId !== this.sessionId || !this.running) return;
       this.setBusy(false);
       this.setWho("\u0412\u0430\u0448 \u0445\u043E\u0434");
       e.runTurn();
       this.netAct("turnStart");
       this.ropeStart();
-      await this.playPhaseBanners(["Start" /* Start */, "Resource" /* Resource */]);
+      await this.playPhaseBanners(["Start" /* Start */, "Resource" /* Resource */], sessionId);
+      if (sessionId !== this.sessionId || !this.running) return;
       this.renderAll();
       await new Promise((res) => {
         this.turnDone = res;
       });
+      if (sessionId !== this.sessionId) return;
       this.turnDone = null;
       if (!this.running || e.result !== "Ongoing" /* Ongoing */) return;
       this.aiInstantResponse("\u043F\u0435\u0440\u0435\u0434 \u0432\u0430\u0448\u0435\u0439 \u0430\u0442\u0430\u043A\u043E\u0439");
+      await this.waitForStack();
+      if (sessionId !== this.sessionId || !this.running) return;
       if (e.result !== "Ongoing" /* Ongoing */ || !this.running) {
         this.renderAll();
         return;
@@ -23222,39 +23686,47 @@
         e.enterCombatPhase();
         this.netAct("combat");
         await this.combatWindow();
-        if (!this.running || e.result !== "Ongoing" /* Ongoing */) {
+        if (sessionId !== this.sessionId || !this.running) return;
+        if (e.result !== "Ongoing" /* Ongoing */) {
           this.renderAll();
           return;
         }
       }
       const skipCombat = e.manualCombatSkip;
       await e.finishMainPhase();
+      if (sessionId !== this.sessionId || !this.running) return;
       this.netAct("endTurn", { skip: skipCombat });
       this.aiInstantResponse("\u0432 \u043A\u043E\u043D\u0435\u0446 \u0432\u0430\u0448\u0435\u0433\u043E \u0445\u043E\u0434\u0430");
+      await this.waitForStack();
+      if (sessionId !== this.sessionId || !this.running) return;
       this.renderAll();
     }
     async responseWindow(label, force = false) {
-      if (this.net) return;
+      if (this.net) return "unavailable";
       const e = this.engine;
-      if (e.result !== "Ongoing" /* Ongoing */ || !this.running) return;
+      if (!e || e.result !== "Ongoing" /* Ongoing */ || !this.running) return "cancelled";
       const hand = e.p(0 /* Player */).hand.map((id) => e.db.get(id)).filter(Boolean);
       const mana = e.p(0 /* Player */).mana;
+      const fullControl = settings.fullControl && !this.net && this.launchMode !== "tut";
       void force;
-      if (!hand.some((c) => c.type === "Spell" /* Spell */ && c.subtype === "Instant" /* Instant */ && c.cost <= mana)) return;
+      const hasAffordableInstant = hand.some((c) => c.type === "Spell" /* Spell */ && c.subtype === "Instant" /* Instant */ && c.cost <= mana);
+      if (!hasAffordableInstant && !fullControl) return "unavailable";
       e.openInstantWindow(0 /* Player */);
       const legal = e.p(0 /* Player */).hand.filter((_, i) => {
         const r = e.canPlay(0 /* Player */, i);
         return r.ok && r.card?.subtype === "Instant" /* Instant */;
       }).length;
-      if (!legal) {
+      if (!legal && !fullControl) {
         e.closeInstantWindow();
-        return;
+        return "unavailable";
       }
       document.body.classList.add("ecPriority");
+      const resumeBusy = this.busy;
+      if (resumeBusy) this.setBusy(false);
       Audio_.uiClick();
       this.instantLabel = label;
       this.renderAll();
-      if (window.ecAutoPass || settings.autoPass) {
+      if (!fullControl && (window.ecAutoPass || settings.autoPass)) {
         window.setTimeout(() => this.passInstant(), 0);
       }
       this.cdLeft = 20;
@@ -23267,11 +23739,40 @@
           cd.parentElement?.style.setProperty("--cd", `${Math.max(0, this.cdLeft / 20) * 100}%`);
         }
       }, 200);
-      await new Promise((res) => {
-        this.instantPassResolve = res;
+      const result = await new Promise((resolve) => {
+        this.instantPassResolve = resolve;
         this.instantTimer = window.setTimeout(() => this.passInstant(), 2e4);
       });
       document.body.classList.remove("ecPriority");
+      if (resumeBusy && this.running && e.result === "Ongoing" /* Ongoing */) this.setBusy(true);
+      return result;
+    }
+    /** Закрыть окно приоритета, не разрешая заклинание напрямую: ход стека продолжит pump. */
+    finishInstantWindow(result, redraw = true) {
+      const resolve = this.instantPassResolve;
+      if (!resolve) return;
+      this.instantPassResolve = null;
+      if (this.cdTimer) {
+        window.clearInterval(this.cdTimer);
+        this.cdTimer = 0;
+      }
+      if (this.instantTimer) {
+        window.clearTimeout(this.instantTimer);
+        this.instantTimer = 0;
+      }
+      document.body.classList.remove("ecPriority");
+      if (result !== "acted" && this.pendingTarget) {
+        const cancelTarget = this.pendingTarget;
+        this.pendingTarget = null;
+        cancelTarget(null, null);
+        this.clearHighlights();
+      }
+      this.engine?.closeInstantWindow();
+      if (redraw) {
+        this.renderStack();
+        this.renderAll();
+      }
+      resolve(result);
     }
     ropeStart() {
       this.ropeStop();
@@ -23282,7 +23783,7 @@
       $("ropeBar")?.classList.remove("hidden");
       this.ropeLeft = 75;
       this.ropeTimer = window.setInterval(() => {
-        if (this.busy || this.combatBusy || this.engine?.instantWindow !== null || this.engine?.result !== "Ongoing" /* Ongoing */) return;
+        if (this.busy || this.combatBusy || this.net && !this.net.isReady() || this.stackBusy || this.engine?.instantWindow !== null || this.engine?.result !== "Ongoing" /* Ongoing */) return;
         this.ropeLeft -= 0.25;
         const f = $("ropeFill");
         if (f) {
@@ -23382,14 +23883,29 @@
       });
       while (meta.telem.length > 40) meta.telem.pop();
       apiSend("/api/telemetry", { e: meta.telem[0] });
-      meta.replays = meta.replays ?? [];
+      meta.replays = Array.isArray(meta.replays) ? meta.replays : [];
       meta.replays.unshift({
         ts: tsNow,
         win,
         fac,
         turns: e.turn,
         foe: foeName,
-        lines: e.log.filter((v) => !!v.text).slice(-140).map((v) => [v.turn ?? 0, v.text ?? ""])
+        result: e.result,
+        opponentFaction: this.enemyFaction,
+        stats: {
+          durationSecs: Math.max(0, Math.round((tsNow - (this.matchStart || tsNow)) / 1e3)),
+          player: { ...e.stats[0 /* Player */] },
+          opponent: { ...e.stats[1 /* Opponent */] }
+        },
+        lines: e.log.slice(-400).map((v) => ({
+          turn: v.turn ?? 0,
+          text: replayEventText(v),
+          type: v.type,
+          side: v.side,
+          cardName: v.cardName,
+          value: v.value,
+          absorbed: v.absorbed
+        })).filter((v) => !!v.text).slice(-140)
       });
       while (meta.replays.length > 3) meta.replays.pop();
       while (meta.history.length > 20) meta.history.pop();
@@ -23405,23 +23921,81 @@
       if (reward) shardsAdd(Math.round(reward * (1 + cosmBonusTotal().sh / 100)));
       if (gemReward) gemsAdd(gemReward);
     }
-    /** Насос стека: поочерёдные окна ответа до опустошения LIFO-стека. */
-    async stackPump() {
+    /** Один насос на матч: действия/пасы чередуют приоритет, два последовательных паса разрешают вершину. */
+    startStackPump() {
       const e = this.engine;
+      if (!e?.interactiveStack || this.net || this.stackTask) return;
+      const generation = this.stackGeneration;
+      this.stackBusy = true;
+      this.clearThinkWatch();
+      const task = this.stackPump(generation, e).catch((err) => {
+        reportFatal("stack-pump", err);
+      });
+      this.stackTask = task;
+      void task.finally(() => {
+        if (generation !== this.stackGeneration || this.stackTask !== task) return;
+        this.stackTask = null;
+        this.stackBusy = false;
+        this.renderAll();
+      });
+    }
+    async waitForStack() {
+      const task = this.stackTask;
+      if (task) await task;
+    }
+    async stackPump(generation, e) {
+      const live = () => generation === this.stackGeneration && this.engine === e && this.running && e.result === "Ongoing" /* Ongoing */;
+      const other = (side) => side === 0 /* Player */ ? 1 /* Opponent */ : 0 /* Player */;
+      let priority = null;
+      let consecutivePasses = 0;
       let guard = 0;
-      while (e.stack.length > 0 && this.running && guard++ < 24) {
+      while (e.stack.length > 0 && live() && guard++ < 48) {
         const top = e.stack[e.stack.length - 1];
-        const responder = top.side === 0 /* Player */ ? 1 /* Opponent */ : 0 /* Player */;
-        if (responder === 1 /* Opponent */) {
-          await sleep2(260);
-          const before = e.stack.length;
-          this.aiInstantResponse("\u043E\u0442\u0432\u0435\u0442 \u0432 \u0441\u0442\u0435\u043A\u0435");
-          if (e.stack.length === before) e.passStack(1 /* Opponent */);
-          this.renderStack();
+        if (priority === null) priority = other(top.side);
+        if (priority === 0 /* Player */) {
+          const answer = await this.responseWindow(`\u0441\u0442\u0435\u043A: \u043E\u0442\u0432\u0435\u0442 \u043D\u0430 \xAB${top.card.name}\xBB`, true);
+          if (!live() || answer === "cancelled") return;
+          if (answer === "acted") {
+            const newTop = e.stack[e.stack.length - 1];
+            if (newTop) {
+              priority = other(newTop.side);
+              consecutivePasses = 0;
+            }
+            continue;
+          }
         } else {
-          await this.responseWindow(`\u0441\u0442\u0435\u043A: \u043E\u0442\u0432\u0435\u0442 \u043D\u0430 \xAB${top.card.name}\xBB`, true);
-          if (!this.running) return;
+          await sleep2(220);
+          if (!live()) return;
+          const acted = this.aiInstantResponse("\u043E\u0442\u0432\u0435\u0442 \u0432 \u0441\u0442\u0435\u043A\u0435");
+          if (acted) {
+            const newTop = e.stack[e.stack.length - 1];
+            if (newTop) {
+              priority = other(newTop.side);
+              consecutivePasses = 0;
+            }
+            this.renderStack();
+            continue;
+          }
         }
+        if (e.stack[e.stack.length - 1] !== top) {
+          priority = e.stack.length ? e.activeSide : null;
+          consecutivePasses = 0;
+          continue;
+        }
+        consecutivePasses++;
+        if (consecutivePasses >= 2) {
+          e.passStack(priority);
+          consecutivePasses = 0;
+          priority = e.stack.length ? e.activeSide : null;
+        } else {
+          priority = other(priority);
+        }
+        this.renderStack();
+      }
+      if (e.stack.length > 0 && live()) {
+        pushLog("\u0421\u0442\u0435\u043A \u0434\u043E\u0441\u0442\u0438\u0433 \u043F\u0440\u0435\u0434\u0435\u043B\u0430 \u0446\u0435\u043F\u043E\u0447\u043A\u0438 \u043E\u0442\u0432\u0435\u0442\u043E\u0432 \u2014 \u043E\u0441\u0442\u0430\u0432\u0448\u0438\u0435\u0441\u044F \u044D\u0444\u0444\u0435\u043A\u0442\u044B \u0440\u0430\u0437\u0440\u0435\u0448\u0435\u043D\u044B \u0430\u0432\u0442\u043E\u043C\u0430\u0442\u0438\u0447\u0435\u0441\u043A\u0438", "phase");
+        let safety = 0;
+        while (e.stack.length > 0 && e.result === "Ongoing" /* Ongoing */ && safety++ < 64) e.resolveStackTop();
       }
       this.renderStack();
     }
@@ -23439,29 +24013,15 @@
       list.innerHTML = e.stack.map((en, i) => `<div class="stItem ${en.side === 0 /* Player */ ? "me" : "foe"}">${i === e.stack.length - 1 ? "\u25B6 " : ""}${en.side === 0 /* Player */ ? "\u0412\u044B" : "\u041F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A"}: ${esc(en.card.name)}</div>`).join("");
     }
     passInstant() {
-      document.body.classList.remove("ecPriority");
-      if (this.cdTimer) {
-        window.clearInterval(this.cdTimer);
-        this.cdTimer = 0;
-      }
-      if (this.instantTimer) {
-        window.clearTimeout(this.instantTimer);
-        this.instantTimer = 0;
-      }
-      this.engine?.passStack(0 /* Player */);
-      this.renderStack();
-      const res = this.instantPassResolve;
-      this.instantPassResolve = null;
-      this.engine?.closeInstantWindow();
-      this.renderAll();
-      if (res) res();
+      this.finishInstantWindow("passed");
     }
-    /** ИИ отвечает мгновенными заклинаниями в ваш ход (эвристика). */
+    /** ИИ отвечает мгновенными заклинаниями в ваш ход (эвристика); true = добавил карту в стек. */
     aiInstantResponse(label) {
-      if (this.net || !this.ai) return;
+      if (this.net || !this.ai) return false;
       const e = this.engine;
-      if (e.result !== "Ongoing" /* Ongoing */) return;
+      if (!e || e.result !== "Ongoing" /* Ongoing */) return false;
       const pl = e.p(1 /* Opponent */);
+      let acted = false;
       e.openInstantWindow(1 /* Opponent */);
       for (let i = pl.hand.length - 1; i >= 0; i--) {
         const c = e.db.get(pl.hand[i]);
@@ -23471,12 +24031,14 @@
         const want = (ops.includes("damageAllEnemyCreatures") || ops.includes("burnAllEnemies")) && myBoard.length >= 2 || ops.includes("heal") && pl.health <= 14 || ops.includes("freezeAllEnemies") && myBoard.some((u) => u.attack >= 4) || ops.includes("damage") && myBoard.some((u) => u.health <= ((c.effects ?? [])[0]?.value ?? 0));
         if (!want) continue;
         const tgt = ops.includes("damage") ? myBoard.find((u) => u.health <= ((c.effects ?? [])[0]?.value ?? 0)) : void 0;
-        e.playCard(1 /* Opponent */, i, tgt?.uid, tgt ? 0 /* Player */ : void 0);
+        if (!e.playCard(1 /* Opponent */, i, tgt?.uid, tgt ? 0 /* Player */ : void 0)) continue;
         this.setWho(`\u26A1 \u041E\u0442\u0432\u0435\u0442 \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430: ${label}`);
         this.renderAll();
+        acted = true;
         break;
       }
       e.closeInstantWindow();
+      return acted;
     }
     async aiTurn() {
       const e = this.engine;
@@ -23486,6 +24048,7 @@
       await this.playPhaseBanners(["Start" /* Start */, "Resource" /* Resource */]);
       this.renderAll();
       await this.responseWindow("\u043E\u0441\u043D\u043E\u0432\u043D\u0430\u044F \u0444\u0430\u0437\u0430 \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430");
+      await this.waitForStack();
       await sleep2(500 + Math.random() * 700);
       let guard = 0;
       while (e.phase === "Main" /* Main */ && e.result === "Ongoing" /* Ongoing */ && guard++ < 26 && this.running) {
@@ -23498,24 +24061,29 @@
         if (act.action.type === "endTurn") break;
         const ok = e.playAIFallback(act.action, 1 /* Opponent */);
         this.renderAll();
+        await this.waitForStack();
         await sleep2(420 + Math.random() * 220);
-        if (!ok) break;
+        if (!ok || e.result !== "Ongoing" /* Ongoing */) break;
       }
       await this.responseWindow("\u043F\u0435\u0440\u0435\u0434 \u0430\u0442\u0430\u043A\u043E\u0439 \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430");
+      await this.waitForStack();
       if (!this.running) return;
       await e.finishMainPhase();
       await this.responseWindow("\u043A\u043E\u043D\u0435\u0446 \u0445\u043E\u0434\u0430 \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430");
+      await this.waitForStack();
       this.setBusy(false);
       this.renderAll();
     }
     /* ------------------------- фазы / баннеры ------------------------- */
-    async playPhaseBanners(phases) {
+    async playPhaseBanners(phases, sessionId = this.sessionId) {
       for (const p of phases) {
+        if (sessionId !== this.sessionId || !this.running) return;
         this.renderPhaseTrack(p);
         await this.banner(PHASE_RU[p]);
+        if (sessionId !== this.sessionId || !this.running) return;
         await sleep2(140);
       }
-      this.renderPhaseTrack("Main" /* Main */);
+      if (sessionId === this.sessionId && this.running) this.renderPhaseTrack("Main" /* Main */);
     }
     async banner(text) {
       phaseFx(text);
@@ -23543,6 +24111,29 @@
       this.busy = v;
       $("busy").classList.toggle("show", v);
       this.updateButtons();
+    }
+    setFullControl(value) {
+      const blocked = !!this.net || this.launchMode === "tut";
+      if (value && blocked) {
+        const checkbox2 = document.getElementById("setFullControl");
+        if (checkbox2) checkbox2.checked = !!settings.fullControl;
+        this.flashHint(bi(
+          "\u041F\u043E\u043B\u043D\u044B\u0439 \u043A\u043E\u043D\u0442\u0440\u043E\u043B\u044C \u0434\u043E\u0441\u0442\u0443\u043F\u0435\u043D \u0432 \u043B\u043E\u043A\u0430\u043B\u044C\u043D\u044B\u0445 \u043C\u0430\u0442\u0447\u0430\u0445, \u043D\u043E \u043F\u043E\u043A\u0430 \u043D\u0435 \u0432 \u0441\u0435\u0442\u0438 \u0438 \u043E\u0431\u0443\u0447\u0435\u043D\u0438\u0438.",
+          "Full Control is available in local matches, but not yet in online matches or tutorials."
+        ));
+        this.updateButtons();
+        return;
+      }
+      settings.fullControl = !!value;
+      saveSettings();
+      const checkbox = document.getElementById("setFullControl");
+      if (checkbox) checkbox.checked = settings.fullControl;
+      this.updateButtons();
+      this.renderInstantDock();
+      this.flashHint(settings.fullControl ? bi(
+        "\u041F\u043E\u043B\u043D\u044B\u0439 \u043A\u043E\u043D\u0442\u0440\u043E\u043B\u044C \u0432\u043A\u043B\u044E\u0447\u0451\u043D: \u0430\u0432\u0442\u043E-\u043F\u0440\u0438\u043E\u0440\u0438\u0442\u0435\u0442 \u043D\u0435 \u043F\u0440\u043E\u043F\u0443\u0441\u0442\u0438\u0442 \u043E\u043A\u043D\u0430 \u043E\u0442\u043A\u043B\u0438\u043A\u0430.",
+        "Full Control on: Auto-Pass will not skip priority windows."
+      ) : bi("\u041F\u043E\u043B\u043D\u044B\u0439 \u043A\u043E\u043D\u0442\u0440\u043E\u043B\u044C \u0432\u044B\u043A\u043B\u044E\u0447\u0435\u043D.", "Full Control off."));
     }
     setWho(t) {
       $("whoTurn").textContent = t;
@@ -23682,6 +24273,8 @@
           if (attacker) streak(centerOf(attacker), centerOf(heroPanel, 0.42), "#ffd08a", 280);
           this.popEl(heroPanel.querySelector(".hbHp"));
           this.floatHero(rec.attackerSide === 0 /* Player */ ? 1 /* Opponent */ : 0 /* Player */, `-${rec.heroDamage}`, false);
+          heroDamageFx(rec.attackerSide === 0 /* Player */ ? "enemy" : "player", rec.heroDamage);
+          Audio_.heroHit(rec.heroDamage);
           await meleeImpact(
             centerOf(heroPanel),
             rec.attackerSide === 0 /* Player */ ? -90 : 90,
@@ -23692,22 +24285,30 @@
           vignettePulse(rec.attackerSide === 0 /* Player */ ? "#7a3a12" : "#d64545", Math.min(0.8, 0.28 + rec.heroDamage * 0.05));
           pushLog(`\u2694 \xAB${rec.attackerName}\xBB \u043D\u0430\u043D\u043E\u0441\u0438\u0442 ${rec.heroDamage} \u0443\u0440\u043E\u043D\u0430 \u0433\u0435\u0440\u043E\u044E`, "dmg");
         }
-        if (this.combatSnap) {
-          if (rec.defenderUid !== void 0 && rec.defenderAfter) {
-            this.combatSnap.units.set(rec.defenderUid, rec.defenderAfter.hp);
+        for (const hpEvent of rec.hpEvents ?? []) {
+          if (this.combatSnap) {
+            const before = this.combatSnap.hp[hpEvent.side];
+            this.combatSnap.hp[hpEvent.side] = hpEvent.kind === "damage" ? before - hpEvent.amount : before + hpEvent.amount;
           }
-          if (rec.attackerAfter) this.combatSnap.units.set(rec.attackerUid, rec.attackerAfter.hp);
-          if (rec.hitHero) {
-            const target = rec.attackerSide === 0 /* Player */ ? 1 /* Opponent */ : 0 /* Player */;
-            this.combatSnap.hp[target] = this.combatSnap.hp[target] - rec.heroDamage;
-          }
-          const healed = rec.lifestealAmount ?? 0;
-          if (rec.lifesteal && healed > 0) {
-            const cap0 = this.engine.p(rec.attackerSide).maxHealth;
-            this.combatSnap.hp[rec.attackerSide] = Math.min(cap0, this.combatSnap.hp[rec.attackerSide] + healed);
-            this.floatHero(rec.attackerSide, `+${healed}`, true);
-            healFx(centerOf(rec.attackerSide === 0 /* Player */ ? $("playerHero") : $("enemyHero"), 0.4));
+          if (hpEvent.kind === "damage") {
+            if (hpEvent.cue === "attack") continue;
+            this.floatHero(hpEvent.side, `-${hpEvent.amount}`, false);
+            heroDamageFx(hpEvent.side === 0 /* Player */ ? "player" : "enemy", hpEvent.amount);
+            Audio_.heroHit(hpEvent.amount);
+          } else {
+            this.floatHero(hpEvent.side, `+${hpEvent.amount}`, true);
+            healFx(centerOf(hpEvent.side === 0 /* Player */ ? $("playerHero") : $("enemyHero"), 0.4));
             Audio_.heal();
+          }
+        }
+        if (this.combatSnap) {
+          if (rec.unitsAfter) {
+            this.combatSnap.units.clear();
+            for (const unit of rec.unitsAfter) this.combatSnap.units.set(unit.uid, unit.hp);
+          }
+          if (rec.heroHpAfter) {
+            this.combatSnap.hp[0 /* Player */] = rec.heroHpAfter[0 /* Player */];
+            this.combatSnap.hp[1 /* Opponent */] = rec.heroHpAfter[1 /* Opponent */];
           }
         }
         if (rec.attackerDamage > 0 && attacker) this.floatUnit(rec.attackerUid, `-${rec.attackerDamage}`, false);
@@ -23771,6 +24372,7 @@
       if (!this.anyReadyAttacker()) setTimeout(() => this.closeCombatWindow(), 1100);
     }
     closeCombatWindow() {
+      if (!this.inCombatWindow || this.busy || this.stackBusy || this.net && !this.net.isReady()) return;
       this.setCombatStep(2);
       this.clearMassAttack(true);
       this.combatWindowDone?.();
@@ -23779,7 +24381,7 @@
     /** Пропустить бой без атак — как «не бить» в MTG, остаётся на усмотрение игрока. */
     skipCombat() {
       const e = this.engine;
-      if (!e || !this.inCombatWindow) return;
+      if (!e || !this.inCombatWindow || this.busy || this.stackBusy || this.net && !this.net.isReady()) return;
       e.manualCombatSkip = true;
       this.cancelAttack();
       this.flashHint("\u0411\u043E\u0439 \u043F\u0440\u043E\u043F\u0443\u0449\u0435\u043D \u2014 \u0445\u043E\u0434 \u0437\u0430\u0432\u0435\u0440\u0448\u0430\u0435\u0442\u0441\u044F \u0431\u0435\u0437 \u0430\u0442\u0430\u043A");
@@ -23809,7 +24411,61 @@
       const pool = (taunts.length ? taunts : en.creatures).filter((c2) => !c2.unblockableThisTurn && !(!c2.silenced && (c2.keywords ?? []).includes("Unblockable" /* Unblockable */)));
       return { uids: pool.map((c2) => c2.uid), hero: heroAllowed };
     }
+    showCombatForecast(attacker, targetUids, heroTarget) {
+      const e = this.engine;
+      if (!e) return;
+      this.clearCombatForecast();
+      const hasStatus = (c, type) => !c.silenced && c.statuses.some((s) => s.type === type && (type !== "Shield" /* Shield */ || s.value > 0));
+      const hasKeyword = (c, kw) => !c.silenced && c.keywords.includes(kw);
+      for (const uid of targetUids) {
+        const defender = e.findCreature(uid);
+        const node = this.unitNodes.get(uid);
+        if (!defender || !node) continue;
+        const shielded = hasStatus(defender, "Shield" /* Shield */);
+        const poisoned = hasStatus(defender, "Poison" /* Poison */);
+        const attackerShielded = hasStatus(attacker, "Shield" /* Shield */);
+        const attackerPoisoned = hasStatus(attacker, "Poison" /* Poison */);
+        const dealt = shielded ? 0 : poisoned ? Math.max(0, defender.health) : attacker.attack;
+        const targetDies = dealt > 0 && (poisoned || dealt >= defender.health);
+        const counter = defender.attack <= 0 || attackerShielded ? 0 : attackerPoisoned ? Math.max(defender.attack, attacker.health) : defender.attack;
+        const attackerDies = counter > 0 && counter >= attacker.health;
+        const trample = targetDies && !shielded && hasKeyword(attacker, "Trample" /* Trample */) ? Math.max(0, attacker.attack - Math.max(0, defender.health)) : 0;
+        const lifesteal = hasKeyword(attacker, "Lifesteal" /* Lifesteal */) && !shielded ? Math.min(Math.max(0, dealt), Math.max(0, defender.health)) + trample : 0;
+        const outcome = targetDies && attackerDies ? "trade" : targetDies ? "lethal" : attackerDies ? "danger" : "neutral";
+        const mainText = shielded ? bi("\u26E8 \u0429\u0438\u0442 \u043F\u043E\u0433\u043B\u043E\u0442\u0438\u0442 \u0443\u0434\u0430\u0440", "\u26E8 Shield absorbs the hit") : targetDies ? poisoned ? bi("\u2620 \u0423\u0411\u042C\u0401\u0422 \xB7 \u044F\u0434", "\u2620 LETHAL \xB7 poison") : bi("\u2694 \u0423\u0411\u042C\u0401\u0422", "\u2694 LETHAL") : bi(
+          `\u2212${Math.max(0, dealt)} HP \xB7 \u043E\u0441\u0442\u0430\u043D\u0435\u0442\u0441\u044F ${Math.max(0, defender.health - dealt)}`,
+          `\u2212${Math.max(0, dealt)} HP \xB7 ${Math.max(0, defender.health - dealt)} remaining`
+        );
+        const details = [
+          counter > 0 ? bi(`\u041E\u0442\u0432\u0435\u0442 \u2212${counter}${attackerDies ? " \xB7 \u043E\u043F\u0430\u0441\u043D\u043E" : ""}`, `Retaliation \u2212${counter}${attackerDies ? " \xB7 lethal" : ""}`) : attackerShielded ? bi("\u041E\u0442\u0432\u0435\u0442 \u043F\u043E\u0433\u043B\u043E\u0449\u0451\u043D \u0449\u0438\u0442\u043E\u043C", "Retaliation absorbed by Shield") : bi("\u041E\u0442\u0432\u0435\u0442\u043D\u043E\u0433\u043E \u0443\u0440\u043E\u043D\u0430 \u043D\u0435\u0442", "No retaliation"),
+          trample > 0 ? bi(`\u041F\u0440\u043E\u0440\u044B\u0432 \u2212${trample} \u0433\u0435\u0440\u043E\u044E`, `Trample \u2212${trample} to hero`) : "",
+          lifesteal > 0 ? bi(`\u0412\u0430\u043C\u043F\u0438\u0440\u0438\u0437\u043C +${lifesteal}`, `Lifesteal +${lifesteal}`) : ""
+        ].filter(Boolean).join(" \xB7 ");
+        const tag = document.createElement("span");
+        tag.className = `combatForecast ${outcome}`;
+        tag.setAttribute("role", "status");
+        tag.setAttribute("aria-label", `${defender.name}: ${mainText}. ${details}`);
+        tag.title = `${defender.name}: ${mainText}. ${details}`;
+        tag.innerHTML = `<b class="cfMain">${esc(mainText)}</b><small class="cfSub">${esc(details)}</small>`;
+        node.appendChild(tag);
+      }
+      if (heroTarget) {
+        const hero = $("enemyHero");
+        const tag = document.createElement("span");
+        const life = hasKeyword(attacker, "Lifesteal" /* Lifesteal */) ? ` \xB7 ${bi("\u0412\u0430\u043C\u043F\u0438\u0440\u0438\u0437\u043C", "Lifesteal")} +${attacker.attack} HP` : "";
+        tag.className = "heroCombatForecast";
+        tag.setAttribute("role", "status");
+        tag.setAttribute("aria-label", `${bi("\u0413\u0435\u0440\u043E\u0439 \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430", "Opponent hero")}: \u2212${attacker.attack} ${bi("\u0437\u0434\u043E\u0440\u043E\u0432\u044C\u044F", "health")}${life}`);
+        tag.title = bi("\u041F\u0440\u044F\u043C\u043E\u0439 \u0443\u0440\u043E\u043D \u0434\u043E \u044D\u0444\u0444\u0435\u043A\u0442\u043E\u0432 \u0437\u0430\u0449\u0438\u0442\u044B \u0433\u0435\u0440\u043E\u044F", "Face damage before hero protection");
+        tag.textContent = `\u2212${attacker.attack} HP${life}`;
+        hero.appendChild(tag);
+      }
+    }
+    clearCombatForecast() {
+      document.querySelectorAll(".combatForecast,.heroCombatForecast").forEach((x) => x.remove());
+    }
     beginAttack(uid) {
+      if (!this.inCombatWindow || this.busy || this.stackBusy || this.net && !this.net.isReady()) return;
       const e = this.engine;
       const c = e.findCreature(uid);
       if (!c || c.owner !== 0 /* Player */ || !e.canAttack(c)) {
@@ -23820,6 +24476,7 @@
       const t = this.attackTargetsFor(uid);
       for (const tu of t.uids) this.unitNodes.get(tu)?.classList.add("targetable");
       if (t.hero) $("enemyHero").classList.add("droppable");
+      this.showCombatForecast(c, t.uids, t.hero);
       const node = this.unitNodes.get(uid);
       node?.classList.add("attacking");
       this.aimStart(centerOf(node ?? $("playerHero"), 0.5));
@@ -23830,6 +24487,7 @@
       }
     }
     async resolveManualAttack(targetUid, targetHero) {
+      if (this.busy || this.stackBusy || this.net && !this.net.isReady()) return;
       const e = this.engine;
       const uid = this.pendingAttack;
       if (uid === null) return;
@@ -23858,7 +24516,7 @@
     /** v3.17: «Атака всеми» — по очереди берём каждое готовое существо,
      *  цель выбирает игрок вручную (клик по существу/герою). */
     startMassAttack() {
-      if (!this.inCombatWindow || this.busy) return;
+      if (!this.inCombatWindow || this.busy || this.stackBusy || this.net && !this.net.isReady()) return;
       const ready = this.readyAttackerUids();
       if (ready.length === 0) {
         this.flashHint("\u0413\u043E\u0442\u043E\u0432\u044B\u0445 \u043A \u0430\u0442\u0430\u043A\u0435 \u0441\u0443\u0449\u0435\u0441\u0442\u0432 \u043D\u0435\u0442");
@@ -23919,22 +24577,27 @@
           break;
         case "PlayerDamage" /* PlayerDamage */: {
           const amount = e.value ?? 0;
-          if (!this.inCombat()) {
+          const queuedWithAttack = this.combatBusy && !!this.engine?.isResolvingAttack;
+          if (!queuedWithAttack) {
+            if (!this.combatBusy && !this.inCombat() && e.text) pushLog(e.text, e.side === 0 /* Player */ ? "you" : "foe");
+            if (this.combatSnap && e.side !== void 0) this.combatSnap.hp[e.side] = this.engine?.p(e.side).health ?? this.combatSnap.hp[e.side];
             this.floatHero(e.side, `-${amount}`, false);
-            if (e.text) pushLog(e.text, e.side === 0 /* Player */ ? "you" : "foe");
+            heroDamageFx(e.side === 0 /* Player */ ? "player" : "enemy", amount);
+            if (e.fromSpell) spellImpact(centerOf(e.side === 0 /* Player */ ? $("playerHero") : $("enemyHero"), 0.4), e.sourceElement ?? "None", Math.min(2, 0.7 + amount * 0.14));
+            Audio_.heroHit(amount);
           }
-          heroDamageFx(e.side === 0 /* Player */ ? "player" : "enemy", amount);
-          if (e.fromSpell) spellImpact(centerOf(e.side === 0 /* Player */ ? $("playerHero") : $("enemyHero"), 0.4), e.sourceElement ?? "None", Math.min(2, 0.7 + amount * 0.14));
-          Audio_.heroHit(amount);
           break;
         }
-        case "PlayerHeal" /* PlayerHeal */:
-          if (!this.inCombat()) {
+        case "PlayerHeal" /* PlayerHeal */: {
+          const queuedWithAttack = this.combatBusy && !!this.engine?.isResolvingAttack;
+          if (!queuedWithAttack) {
+            if (this.combatSnap && e.side !== void 0) this.combatSnap.hp[e.side] = this.engine?.p(e.side).health ?? this.combatSnap.hp[e.side];
             this.floatHero(e.side, `+${e.value ?? 0}`, true);
             healFx(centerOf(e.side === 0 /* Player */ ? $("playerHero") : $("enemyHero"), 0.4));
             Audio_.heal();
           }
           break;
+        }
         case "CreatureDamaged" /* CreatureDamaged */: {
           const node = this.unitNodes.get(e.uid);
           if (e.absorbed) {
@@ -23995,12 +24658,7 @@
         }
         case "StackPushed" /* StackPushed */:
           this.renderStack();
-          if (!this.stackBusy) {
-            this.stackBusy = true;
-            void this.stackPump().finally(() => {
-              this.stackBusy = false;
-            });
-          }
+          this.startStackPump();
           break;
         case "StackResolved" /* StackResolved */:
           this.renderStack();
@@ -24065,18 +24723,8 @@
           this.renderPhaseTrack("Start" /* Start */);
           break;
         case "GameOver" /* GameOver */: {
-          if (this.instantTimer) {
-            window.clearTimeout(this.instantTimer);
-            this.instantTimer = 0;
-          }
-          if (this.cdTimer) {
-            window.clearInterval(this.cdTimer);
-            this.cdTimer = 0;
-          }
+          this.finishInstantWindow("cancelled", false);
           document.body.classList.remove("ecPriority");
-          const ri = this.instantPassResolve;
-          this.instantPassResolve = null;
-          ri?.();
           this.turnDone?.();
           this.combatWindowDone?.();
           break;
@@ -24084,7 +24732,7 @@
         default:
           break;
       }
-      if (!this.combatBusy) this.renderStats();
+      if (!this.combatBusy || (e.type === "PlayerDamage" /* PlayerDamage */ || e.type === "PlayerHeal" /* PlayerHeal */) && !this.engine?.isResolvingAttack) this.renderStats();
     }
     /** Во время «Битвы» числа урона рисует animateCombat — не дублируем. */
     inCombat() {
@@ -24314,8 +24962,16 @@
       const open = e.instantWindow === 0 /* Player */;
       dock.classList.toggle("hidden", !open);
       if (open) {
-        const lbl = dock.querySelector("#instantLabel");
-        if (lbl) lbl.textContent = this.instantLabel || "\u0445\u043E\u0434 \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430";
+        const step = this.instantLabel || bi("\u0445\u043E\u0434 \u043F\u0440\u043E\u0442\u0438\u0432\u043D\u0438\u043A\u0430", "opponent's turn");
+        const fullControl = settings.fullControl && !this.net && this.launchMode !== "tut";
+        const canReply = e.p(0 /* Player */).hand.some((_, i) => {
+          const result = e.canPlay(0 /* Player */, i);
+          return result.ok && result.card?.subtype === "Instant" /* Instant */;
+        });
+        const sub = dock.querySelector("#instantSub");
+        if (sub) {
+          sub.textContent = fullControl && !canReply ? `${bi("\u041F\u043E\u043B\u043D\u044B\u0439 \u043A\u043E\u043D\u0442\u0440\u043E\u043B\u044C \u043E\u0441\u0442\u0430\u043D\u043E\u0432\u0438\u043B \u0438\u0433\u0440\u0443:", "Full Control stopped the game:")} ${step}. ${bi("\u041D\u0430\u0436\u043C\u0438\u0442\u0435 \xAB\u041F\u0435\u0440\u0435\u0434\u0430\u0442\u044C \u043F\u0440\u0438\u043E\u0440\u0438\u0442\u0435\u0442\xBB, \u0447\u0442\u043E\u0431\u044B \u043F\u0440\u043E\u0434\u043E\u043B\u0436\u0438\u0442\u044C.", "Press Pass Priority to continue.")}` : fullControl ? `${step}. ${bi("\u0421\u044B\u0433\u0440\u0430\u0439\u0442\u0435 \u043C\u0433\u043D\u043E\u0432\u0435\u043D\u043D\u043E\u0435 \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0435 \u0438\u043B\u0438 \u043F\u0435\u0440\u0435\u0434\u0430\u0439\u0442\u0435 \u043F\u0440\u0438\u043E\u0440\u0438\u0442\u0435\u0442. \u0410\u0432\u0442\u043E-\u043F\u0440\u0438\u043E\u0440\u0438\u0442\u0435\u0442 \u043F\u0440\u0438\u043E\u0441\u0442\u0430\u043D\u043E\u0432\u043B\u0435\u043D.", "Play an instant or pass priority. Auto-Pass is suspended.")}` : `${step}: ${bi("\u043C\u0433\u043D\u043E\u0432\u0435\u043D\u043D\u044B\u0435 \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u044F \u0438\u0437 \u0440\u0443\u043A\u0438 \u0438\u0433\u0440\u0430\u044E\u0442\u0441\u044F \u0441\u0435\u0439\u0447\u0430\u0441.", "instants in hand can be played now.")}`;
+        }
       }
     }
     renderAll() {
@@ -24411,25 +25067,28 @@
       const node = el("div", "unit f-" + c.faction);
       node.dataset.uid = String(c.uid);
       node.dataset.cardId = c.cardId;
-      {
-        const PIPS = { Taunt: "\u26E8", Lifesteal: "\u2665", Trample: "\u21C9", Windfury: "\u224B", Unblockable: "\u25CC" };
-        const card2 = this.engine?.db.get(c.cardId);
-        const pips = (card2?.keywords ?? []).map((k) => PIPS[k] ? `<span class="pip" title="${kwName(k)}">${PIPS[k]}</span>` : "").join("");
-        if (pips) node.insertAdjacentHTML("beforeend", `<div class="pips">${pips}</div>`);
-        const FICO = { Aurites: "\u2726", Necrus: "\u2620", Terramorph: "\u26F0", Pyromancer: "\u2668", Ethereal: "\u263E", Neutral: "\u25C8" };
-        node.insertAdjacentHTML("afterbegin", `<span class="facIco" title="${factionName(c.faction)}">${FICO[c.faction] ?? "\u25C8"}</span>`);
-      }
+      const PIPS = { Taunt: "\u26E8", Vigilance: "\u25C9", Lifesteal: "\u2665", Trample: "\u21C9", Windfury: "\u224B", Unblockable: "\u25CC" };
+      const FICO = { Aurites: "\u2726", Necrus: "\u2620", Terramorph: "\u26F0", Pyromancer: "\u2668", Ethereal: "\u263E", Neutral: "\u25C8" };
+      const pips = (c.silenced ? [] : c.keywords).map((k) => PIPS[k] ? `<span class="pip" title="${esc(kwName(k))}">${PIPS[k]}</span>` : "").join("");
+      const factionIcon = `<span class="facIco" title="${esc(factionName(c.faction))}">${FICO[c.faction] ?? "\u25C8"}</span>`;
       node.dataset.side = String(c.owner);
       const mine = c.owner === 0 /* Player */;
-      const canAtk = mine && this.engine.canAttack(c);
+      const vigilance = !c.silenced && c.keywords.includes("Vigilance" /* Vigilance */);
+      const tapped = typeof c.tapped === "boolean" ? c.tapped : c.attacksThisTurn > 0;
+      const ownerTurn = this.engine.activeSide === c.owner;
+      const canAtk = mine && ownerTurn && this.engine.canAttack(c);
       const maxAttacks = c.keywords.includes("Windfury" /* Windfury */) ? 2 : 1;
       const attacksRemaining = Math.max(0, maxAttacks - c.attacksThisTurn);
       const attackMarkTitle = c.attacksThisTurn > 0 ? `\u0411\u0443\u0440\u044F: \u043C\u043E\u0436\u0435\u0442 \u0430\u0442\u0430\u043A\u043E\u0432\u0430\u0442\u044C \u0435\u0449\u0451 ${attacksRemaining} \u0440\u0430\u0437` : "\u0413\u043E\u0442\u043E\u0432\u043E \u043A \u0430\u0442\u0430\u043A\u0435";
       const attackMark = canAtk ? `<span class="attackReadyMark${c.attacksThisTurn > 0 ? " again" : ""}" title="${esc(attackMarkTitle)}" aria-label="${esc(attackMarkTitle)}">${c.attacksThisTurn > 0 ? `\u0415\u0449\u0451 ${attacksRemaining}` : "\u2694"}</span>` : "";
       if (canAtk) node.classList.add("ready");
-      if (mine && !canAtk) node.classList.add("exhausted");
-      if (c.attacksThisTurn > 0) node.classList.add("tapped");
-      const nowTap = c.attacksThisTurn > 0;
+      if (mine && ownerTurn && !canAtk) node.classList.add("exhausted");
+      if (tapped) node.classList.add("tapped");
+      if (vigilance) node.classList.add("vigilant");
+      node.dataset.tapped = String(tapped);
+      node.dataset.tapState = tapped ? "tapped" : vigilance ? "vigilant" : "ready";
+      if (tapped || vigilance) node.setAttribute("aria-label", `${cardName(card)} \xB7 ${tapped ? bi("\u043F\u043E\u0432\u0451\u0440\u043D\u0443\u0442\u043E \u0434\u043E \u043D\u0430\u0447\u0430\u043B\u0430 \u0441\u043B\u0435\u0434\u0443\u044E\u0449\u0435\u0433\u043E \u0432\u0430\u0448\u0435\u0433\u043E \u0445\u043E\u0434\u0430", "tapped until the start of your next turn") : bi("\u0411\u0434\u0438\u0442\u0435\u043B\u044C\u043D\u043E\u0441\u0442\u044C: \u043D\u0435 \u043F\u043E\u0432\u043E\u0440\u0430\u0447\u0438\u0432\u0430\u0435\u0442\u0441\u044F \u043F\u043E\u0441\u043B\u0435 \u0430\u0442\u0430\u043A\u0438", "Vigilance: stays untapped after attacking")}`);
+      const nowTap = tapped;
       const wasTap = this.prevTapped.get(c.uid);
       if (wasTap === true && !nowTap) {
         node.classList.add("untapAnim");
@@ -24445,8 +25104,10 @@
       }
       this.prevTapped.set(c.uid, nowTap);
       if (c.frozen) node.classList.add("frozenUnit");
-      if (c.unblockableThisTurn) node.classList.add("unblockable");
-      if (c.statuses.some((st) => st.type === "Shield" /* Shield */)) node.classList.add("shielded");
+      const unblockable = c.unblockableThisTurn || !c.silenced && c.keywords.includes("Unblockable" /* Unblockable */);
+      if (unblockable) node.classList.add("unblockable");
+      const shieldCharges = c.silenced ? 0 : c.statuses.filter((st) => st.type === "Shield" /* Shield */).reduce((n, st) => n + Math.max(0, st.value), 0);
+      if (shieldCharges > 0) node.classList.add("shielded");
       if ((card.keywords ?? []).includes("Taunt" /* Taunt */)) node.classList.add("taunt");
       const badges = [];
       for (const s of c.statuses) {
@@ -24455,17 +25116,21 @@
         const duration = s.turnsLeft < 0 ? "\u043F\u043E\u0441\u0442\u043E\u044F\u043D\u043D\u043E" : `${s.turnsLeft} \u0445\u043E\u0434.`;
         badges.push(`<span class="badge ${b.cls}" title="${b.title} \xB7 ${duration}">${b.ico}${s.value > 1 ? s.value : ""}</span>`);
       }
-      for (const kw of c.keywords ?? []) {
+      for (const kw of c.silenced ? [] : c.keywords ?? []) {
         const b = KW_BADGE[kw];
-        if (b) badges.push(`<span class="badge kw" title="${b.title}">${b.ico}</span>`);
+        if (b) badges.push(`<span class="badge kw" title="${esc(isEN() ? KW_BADGE_EN[kw] ?? b.title : b.title)}">${b.ico}</span>`);
       }
+      const tapBadge = tapped ? `<span class="tapStateBadge" role="img" aria-label="${esc(bi("\u041F\u043E\u0432\u0435\u0440\u043D\u0443\u0442\u043E \u0434\u043E \u0432\u0430\u0448\u0435\u0433\u043E \u0441\u043B\u0435\u0434\u0443\u044E\u0449\u0435\u0433\u043E \u0445\u043E\u0434\u0430", "Tapped until your next turn"))}" title="${esc(bi("\u0410\u0442\u0430\u043A\u043E\u0432\u0430\u043B\u043E \xB7 \u0440\u0430\u0437\u0432\u0435\u0440\u043D\u0451\u0442\u0441\u044F \u0432 \u043D\u0430\u0447\u0430\u043B\u0435 \u0432\u0430\u0448\u0435\u0433\u043E \u0441\u043B\u0435\u0434\u0443\u044E\u0449\u0435\u0433\u043E \u0445\u043E\u0434\u0430", "Attacked \xB7 untaps at the start of your next turn"))}">\u21BB</span>` : "";
       node.innerHTML = `
       <div class="badges">${badges.join("")}</div>
       <div class="ubody">
         <div class="uart">${artSvg(card, 104, 134)}</div>
+        ${factionIcon}${pips ? `<div class="pips">${pips}</div>` : ""}
+        ${unblockable ? '<span class="stealthVeil" role="img" aria-label="\u041D\u0435\u0443\u043B\u043E\u0432\u0438\u043C\u043E\u0441\u0442\u044C" title="\u041D\u0435\u0443\u043B\u043E\u0432\u0438\u043C\u043E\u0441\u0442\u044C \u2014 \u043D\u0435\u043B\u044C\u0437\u044F \u0432\u044B\u0431\u0440\u0430\u0442\u044C \u0446\u0435\u043B\u044C\u044E \u0430\u0442\u0430\u043A\u0438"><i class="veilSigil">\u25CC</i></span>' : ""}
+        ${shieldCharges > 0 ? `<span class="shieldBubble" role="img" aria-label="\u0411\u043E\u0436\u0435\u0441\u0442\u0432\u0435\u043D\u043D\u044B\u0439 \u0449\u0438\u0442 \xB7 \u0437\u0430\u0440\u044F\u0434\u043E\u0432: ${shieldCharges}" title="\u0411\u043E\u0436\u0435\u0441\u0442\u0432\u0435\u043D\u043D\u044B\u0439 \u0449\u0438\u0442 \xB7 \u0437\u0430\u0440\u044F\u0434\u043E\u0432: ${shieldCharges}"><i aria-hidden="true">\u26E8</i><b>${shieldCharges}</b></span>` : ""}
         <div class="uname">${cardName(card)}</div>
         <div class="stats"><span class="atk">${c.attack}</span><span class="hp${c.health <= 0 ? " lethal" : ""}">${Math.max(0, this.displayHpOf(c.uid, c.health))}</span></div>
-      </div>${attackMark}`;
+      </div>${attackMark}${tapBadge}`;
       const ft = this.dmgFlash.get(c.uid);
       if (ft && Date.now() - ft < 500) {
         const hpEl = node.querySelector(".hp");
@@ -24484,16 +25149,35 @@
     renderRunes(side, host) {
       host.innerHTML = "";
       const pl = this.engine.p(side);
+      const paintRune = (chip, faction) => {
+        const colors = paletteOf(faction);
+        chip.style.setProperty("--rune-primary", colors.primary);
+        chip.style.setProperty("--rune-secondary", colors.secondary);
+        chip.style.setProperty("--rune-accent", colors.accent);
+      };
       for (const r of pl.runes) {
         const chip = el("div", "runeChip");
-        chip.innerHTML = `<span class="sig">${FACTION_SIGIL[r.faction]}</span><span>${r.name}</span>` + (r.turnsLeft > 0 ? `<span style="color:var(--muted)">\xB7 ${r.turnsLeft}\u231B</span>` : '<span style="color:var(--gold-dim)">\xB7 \u221E</span>');
+        paintRune(chip, r.faction);
+        chip.dataset.cardId = r.cardId;
+        const permanent = r.turnsLeft < 0;
+        const duration = permanent ? "\u041F\u043E\u0441\u0442\u043E\u044F\u043D\u043D\u0430\u044F \u0440\u0443\u043D\u0430" : `\u0415\u0449\u0451 ${r.turnsLeft} ${plural(r.turnsLeft, "\u0445\u043E\u0434", "\u0445\u043E\u0434\u0430", "\u0445\u043E\u0434\u043E\u0432")}`;
+        chip.setAttribute("aria-label", `${cardName(r.data)} \xB7 ${duration}`);
+        chip.innerHTML = `<span class="runeSigil" aria-hidden="true">${FACTION_SIGIL[r.faction] ?? "\u2726"}</span>
+        <span class="runeCopy"><b>${esc(cardName(r.data))}</b><small>${duration}</small></span>
+        <span class="runeClock" aria-hidden="true">${permanent ? "\u221E" : `\u231B ${r.turnsLeft}`}</span>`;
         chip.addEventListener("mouseenter", (ev) => showTooltip(r.data, ev.clientX, ev.clientY));
         chip.addEventListener("mouseleave", hideTooltip);
         host.appendChild(chip);
       }
       for (const rt of pl.rituals) {
         const chip = el("div", "runeChip ritualChip");
-        chip.innerHTML = `<span class="sig">\u29D7</span><span>${rt.name}</span><span style="color:var(--muted)">\xB7 \u0440\u0438\u0442\u0443\u0430\u043B ${rt.turnsLeft}\u231B</span>`;
+        paintRune(chip, rt.data.faction);
+        chip.dataset.cardId = rt.data.id;
+        const duration = `\u0421\u0440\u0430\u0431\u043E\u0442\u0430\u0435\u0442 \u0447\u0435\u0440\u0435\u0437 ${rt.turnsLeft} ${plural(rt.turnsLeft, "\u0445\u043E\u0434", "\u0445\u043E\u0434\u0430", "\u0445\u043E\u0434\u043E\u0432")}`;
+        chip.setAttribute("aria-label", `${cardName(rt.data)} \xB7 ${duration}`);
+        chip.innerHTML = `<span class="runeSigil" aria-hidden="true">\u29D7</span>
+        <span class="runeCopy"><b>${esc(cardName(rt.data))}</b><small>\u0420\u0438\u0442\u0443\u0430\u043B \xB7 ${duration}</small></span>
+        <span class="runeClock" aria-hidden="true">\u231B ${rt.turnsLeft}</span>`;
         chip.addEventListener("mouseenter", (ev) => showTooltip(rt.data, ev.clientX, ev.clientY));
         chip.addEventListener("mouseleave", hideTooltip);
         host.appendChild(chip);
@@ -24503,6 +25187,15 @@
       }
     }
     /* --------------------- рука: веер + drag&drop --------------------- */
+    canPlayAtPriority(card, e) {
+      if (this.net && !this.net.isReady()) return false;
+      const instant = card.type === "Spell" /* Spell */ && card.subtype === "Instant" /* Instant */;
+      if (e.instantWindow !== null && e.instantWindow !== 0 /* Player */) return false;
+      if (this.stackBusy || e.stack.length > 0 || e.instantWindow !== null) {
+        return instant && e.instantWindow === 0 /* Player */;
+      }
+      return true;
+    }
     renderHand() {
       const host = $("hand");
       host.innerHTML = "";
@@ -24514,7 +25207,7 @@
         host.appendChild(el("div", "", '<span style="font-size:.7rem;color:#3f4457;letter-spacing:.14em">\u0440\u0443\u043A\u0430 \u043F\u0443\u0441\u0442\u0430</span>'));
         return;
       }
-      const myMain = e.activeSide === 0 /* Player */ && e.phase === "Main" /* Main */ && !this.busy && this.running;
+      const myMain = e.activeSide === 0 /* Player */ && e.phase === "Main" /* Main */ && !this.busy && this.running && !this.stackBusy && e.stack.length === 0 && e.instantWindow === null;
       const maxAngle = Math.min(12, n * 2.1);
       const cw = Math.min(168, Math.max(96, Math.min(window.innerHeight * 0.15, window.innerWidth * 0.11)));
       const overlap = Math.round(Math.max(-cw * 0.44, cw * 0.8 - n * cw * 0.12));
@@ -24531,10 +25224,11 @@
         node.style.zIndex = String(10 + i);
         const chk = e.canPlay(0 /* Player */, i);
         const isInstant = card.type === "Spell" /* Spell */ && card.subtype === "Instant" /* Instant */;
-        const playable = chk.ok;
+        const priorityOk = this.canPlayAtPriority(card, e);
+        const playable = chk.ok && priorityOk;
         if (!playable) {
           node.classList.add("unplayable");
-          const why = chk.reason ?? (isInstant ? "\u041D\u0435\u0434\u043E\u0441\u0442\u0430\u0442\u043E\u0447\u043D\u043E \u043C\u0430\u043D\u044B" : !myMain ? "\u041D\u0435 \u0432\u0430\u0448\u0430 \u043E\u0441\u043D\u043E\u0432\u043D\u0430\u044F \u0444\u0430\u0437\u0430" : "\u041D\u0435\u043B\u044C\u0437\u044F \u0440\u0430\u0437\u044B\u0433\u0440\u0430\u0442\u044C");
+          const why = !priorityOk ? "\u0421\u0442\u0435\u043A \u0440\u0430\u0437\u0440\u0435\u0448\u0430\u0435\u0442\u0441\u044F \u2014 \u0434\u043E\u0436\u0434\u0438\u0442\u0435\u0441\u044C \u043F\u0440\u0438\u043E\u0440\u0438\u0442\u0435\u0442\u0430" : chk.reason ?? (isInstant ? "\u041D\u0435\u0434\u043E\u0441\u0442\u0430\u0442\u043E\u0447\u043D\u043E \u043C\u0430\u043D\u044B" : !myMain ? "\u041D\u0435 \u0432\u0430\u0448\u0430 \u043E\u0441\u043D\u043E\u0432\u043D\u0430\u044F \u0444\u0430\u0437\u0430" : "\u041D\u0435\u043B\u044C\u0437\u044F \u0440\u0430\u0437\u044B\u0433\u0440\u0430\u0442\u044C");
           node.appendChild(el("div", "whyNot", why));
           node.title = why;
         } else if (isInstant && !myMain) {
@@ -24617,7 +25311,7 @@
         ghost.remove();
         node.classList.remove("dragging");
         this.clearHighlights();
-        const drop = this.resolveDrop(ev.clientX, ev.clientY, card);
+        const drop = this.resolveDrop(ev.clientX, ev.clientY, card, index);
         if (drop.ok) await this.playCard(index, drop.uid, drop.side);
         else this.flashHint(drop.reason ?? "\u041D\u0435\u0434\u043E\u043F\u0443\u0441\u0442\u0438\u043C\u0430\u044F \u0446\u0435\u043B\u044C \u2014 \u043A\u0430\u0440\u0442\u0430 \u0432\u0435\u0440\u043D\u0443\u043B\u0430\u0441\u044C \u0432 \u0440\u0443\u043A\u0443");
         this.renderAll();
@@ -24627,6 +25321,10 @@
         if (this.busy || !this.running) return;
         const e0 = this.engine;
         const isInstant0 = card.type === "Spell" /* Spell */ && card.subtype === "Instant" /* Instant */;
+        if (!this.canPlayAtPriority(card, e0)) {
+          this.flashHint("\u0414\u043E\u0436\u0434\u0438\u0442\u0435\u0441\u044C \u0441\u0432\u043E\u0435\u0433\u043E \u043F\u0440\u0438\u043E\u0440\u0438\u0442\u0435\u0442\u0430 \u0432 \u0441\u0442\u0435\u043A\u0435");
+          return;
+        }
         if (!isInstant0 && (e0.activeSide !== 0 /* Player */ || e0.phase !== "Main" /* Main */)) return;
         if (!isInstant0 && e0.instantWindow !== null && e0.instantWindow !== 0 /* Player */) return;
         if (sx || sy) {
@@ -24643,6 +25341,10 @@
         if (this.busy || !this.running) return;
         const e = this.engine;
         const isInstantDown = card.type === "Spell" /* Spell */ && card.subtype === "Instant" /* Instant */;
+        if (!this.canPlayAtPriority(card, e)) {
+          this.flashHint("\u0414\u043E\u0436\u0434\u0438\u0442\u0435\u0441\u044C \u0441\u0432\u043E\u0435\u0433\u043E \u043F\u0440\u0438\u043E\u0440\u0438\u0442\u0435\u0442\u0430 \u0432 \u0441\u0442\u0435\u043A\u0435");
+          return;
+        }
         if (!isInstantDown && (e.activeSide !== 0 /* Player */ || e.phase !== "Main" /* Main */)) return;
         if (!isInstantDown && e.instantWindow !== null && e.instantWindow !== 0 /* Player */) return;
         const chk = e.canPlay(0 /* Player */, index);
@@ -24696,7 +25398,7 @@
         this.autoToken = "";
         return;
       }
-      const myMain = this.running && !this.busy && e.activeSide === 0 /* Player */ && e.phase === "Main" /* Main */ && !this.pendingTarget;
+      const myMain = this.running && !this.busy && (!this.net || this.net.isReady()) && !this.stackBusy && e.stack.length === 0 && e.instantWindow === null && e.activeSide === 0 /* Player */ && e.phase === "Main" /* Main */ && !this.pendingTarget;
       let idle = false;
       if (myMain) {
         const pl2 = e.p(0 /* Player */);
@@ -24717,7 +25419,7 @@
     }
     autoTurnFire() {
       const e = this.engine;
-      const myMain = e && this.running && !this.busy && e.activeSide === 0 /* Player */ && e.phase === "Main" /* Main */ && !this.pendingTarget;
+      const myMain = e && this.running && !this.busy && (!this.net || this.net.isReady()) && !this.stackBusy && e.stack.length === 0 && e.instantWindow === null && e.activeSide === 0 /* Player */ && e.phase === "Main" /* Main */ && !this.pendingTarget;
       if (!myMain || !this.autoToken) {
         if (this.autoTimer !== null) {
           window.clearInterval(this.autoTimer);
@@ -24739,26 +25441,34 @@
       pushLog("\u21BB \u0410\u0432\u0442\u043E: \u043D\u0435\u0442 \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0439 \u2014 \u0445\u043E\u0434 \u043F\u0435\u0440\u0435\u0434\u0430\u043D", "phase");
       this.endTurnNow();
     }
-    /** Аватар героя из папки художника art_raw/heroes/<Faction>/: тянется и масштабируется оттуда. */
-    setPortrait(hostId, faction) {
+    /** Герой игрока берётся из отдельной папки deck_heroes; соперник использует базовый портрет фракции. */
+    setPortrait(hostId, faction, heroId = faction) {
       const host = $(hostId);
       if (!host) return;
       const img = document.createElement("img");
+      const sources = [.../* @__PURE__ */ new Set([
+        `/deck-heroes/${encodeURIComponent(heroId)}`,
+        `/heroes/${encodeURIComponent(faction)}`
+      ])];
+      let sourceIndex = 0;
       img.alt = "";
-      img.src = `/heroes/${encodeURIComponent(faction)}`;
+      img.src = sources[sourceIndex];
       img.addEventListener("error", () => {
+        sourceIndex += 1;
+        if (sourceIndex < sources.length) {
+          img.src = sources[sourceIndex];
+          return;
+        }
         host.innerHTML = `<span class="sigFall">${FACTION_SIGIL[faction] ?? "\u2726"}</span>`;
       });
       host.innerHTML = "";
       host.appendChild(img);
     }
     renderGraveZone(side, host, count) {
+      void side;
       const want = Math.min(3, count);
       if (host.querySelectorAll(".cardback").length !== want) {
-        host.innerHTML = Array.from({ length: want }, () => '<div class="cardback"></div>').join("") + `<span class="gcount">${count}</span>`;
-      } else {
-        const gc = host.querySelector(".gcount");
-        if (gc) gc.textContent = String(count);
+        host.innerHTML = Array.from({ length: want }, () => '<div class="cardback"></div>').join("");
       }
     }
     openGrave(side) {
@@ -24795,13 +25505,16 @@
     }
     clearHighlights() {
       this.aimStop();
+      this.clearCombatForecast();
       document.querySelectorAll(".targetable").forEach((x) => x.classList.remove("targetable"));
       document.querySelectorAll(".droppable").forEach((x) => x.classList.remove("droppable"));
       document.querySelectorAll(".unit").forEach((x) => x.style.outline = "");
     }
-    resolveDrop(x, y, card) {
+    resolveDrop(x, y, card, handIndex) {
       const e = this.engine;
       document.querySelectorAll(".unit").forEach((u) => u.style.outline = "");
+      const currentCheck = e.canPlay(0 /* Player */, handIndex);
+      if (!currentCheck.ok) return { ok: false, reason: currentCheck.reason ?? "\u041D\u0435\u043B\u044C\u0437\u044F \u0440\u0430\u0437\u044B\u0433\u0440\u0430\u0442\u044C" };
       const under = document.elementFromPoint(x, y);
       if (card.target === "None" /* None */) return { ok: true };
       const unit = under?.closest?.(".unit");
@@ -24834,6 +25547,10 @@
       if (index < 0 || index >= pl.hand.length) return;
       const card = db.get(pl.hand[index]);
       if (!card) return;
+      if (!this.canPlayAtPriority(card, e)) {
+        this.flashHint("\u0414\u043E\u0436\u0434\u0438\u0442\u0435\u0441\u044C \u0441\u0432\u043E\u0435\u0433\u043E \u043F\u0440\u0438\u043E\u0440\u0438\u0442\u0435\u0442\u0430 \u0432 \u0441\u0442\u0435\u043A\u0435");
+        return;
+      }
       const node = this.handNodes[index];
       if (node) {
         hideZoom();
@@ -24850,6 +25567,10 @@
     }
     async onClickCard(index, card, reason) {
       const e = this.engine;
+      if (!e || !this.canPlayAtPriority(card, e)) {
+        this.flashHint("\u0414\u043E\u0436\u0434\u0438\u0442\u0435\u0441\u044C \u0441\u0432\u043E\u0435\u0433\u043E \u043F\u0440\u0438\u043E\u0440\u0438\u0442\u0435\u0442\u0430 \u0432 \u0441\u0442\u0435\u043A\u0435");
+        return;
+      }
       const chk = e.canPlay(0 /* Player */, index);
       if (!chk.ok) {
         this.flashHint(chk.reason ?? reason ?? "\u041D\u0435\u043B\u044C\u0437\u044F \u0440\u0430\u0437\u044B\u0433\u0440\u0430\u0442\u044C");
@@ -24861,7 +25582,7 @@
       }
       const valid = e.validTargets(0 /* Player */, card);
       if (valid.length === 0) {
-        await this.playCard(index);
+        this.flashHint("\u041D\u0435\u0442 \u0434\u043E\u043F\u0443\u0441\u0442\u0438\u043C\u043E\u0439 \u0446\u0435\u043B\u0438");
         return;
       }
       this.flashHint(`\u0412\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u0446\u0435\u043B\u044C \u0434\u043B\u044F \xAB${card.name}\xBB\u2026 (Esc / \u041F\u041A\u041C \u2014 \u043E\u0442\u043C\u0435\u043D\u0430, \u0446\u0435\u043B\u044C \u2014 \u0441\u0432\u043E\u044F \u0438\u043B\u0438 \u0447\u0443\u0436\u0430\u044F)`);
@@ -24896,6 +25617,7 @@
         if (node?.classList.contains("targetable")) this.pendingTarget(uid, side);
         return;
       }
+      if (this.busy || this.stackBusy || this.net && !this.net.isReady() || (this.engine?.stack.length ?? 0) > 0) return;
       if (this.pendingAttack !== null) {
         if (side === 1 /* Opponent */ && this.unitNodes.get(uid)?.classList.contains("targetable")) {
           void this.resolveManualAttack(uid, false);
@@ -24908,36 +25630,24 @@
     }
     async playCard(index, uid, side) {
       const e = this.engine;
+      if (!e || this.busy || !this.running) return;
       const pl = e.p(0 /* Player */);
       const card = db.get(pl.hand[index]);
-      const node = this.handNodes[index];
-      if (node && card) {
-        const r = node.getBoundingClientRect();
-        const ghost = el("div", "card flying");
-        ghost.innerHTML = node.innerHTML;
-        ghost.style.width = r.width + "px";
-        ghost.style.height = r.height + "px";
-        ghost.style.left = r.left + "px";
-        ghost.style.top = r.top + "px";
-        document.body.appendChild(ghost);
-        node.style.opacity = "0";
-        const dest = (card.type === "Creature" /* Creature */ || card.type === "Rune" /* Rune */ ? $("playerBoard") : $("enemyBoard")).getBoundingClientRect();
-        await sleep2(16);
-        ghost.style.transform = `translate(${dest.left + dest.width / 2 - (r.left + r.width / 2)}px, ${dest.top + 26 - r.top}px) scale(.5) rotate(-5deg)`;
-        ghost.style.opacity = "0.1";
-        setTimeout(() => ghost.remove(), 330);
-      }
+      if (!card || !this.canPlayAtPriority(card, e)) return;
+      const isInstant = card.type === "Spell" /* Spell */ && card.subtype === "Instant" /* Instant */;
       const played = e.playCard(0 /* Player */, index, uid, side);
       if (!played) this.flashHint("\u0414\u0432\u0438\u0436\u043E\u043A \u043E\u0442\u043A\u043B\u043E\u043D\u0438\u043B \u0440\u043E\u0437\u044B\u0433\u0440\u044B\u0448");
       else {
+        if (isInstant && e.instantWindow === 0 /* Player */) this.finishInstantWindow("acted");
         this.netAct("play", { index, uid, side });
-        Audio_.cardPlay(card?.cost ?? 3);
-        const zone = card && (card.type === "Creature" /* Creature */ || card.type === "Rune" /* Rune */) ? $("playerBoard") : $("enemyBoard");
-        screenFlash(paletteOf(card?.faction ?? "Neutral" /* Neutral */).primary, 0.1, 200);
-        impactRing(centerOf(zone), paletteOf(card?.faction ?? "Neutral" /* Neutral */).secondary, 120);
+        Audio_.cardPlay(card.cost ?? 3);
+        const zone = card.type === "Creature" /* Creature */ || card.type === "Rune" /* Rune */ ? $("playerBoard") : $("enemyBoard");
+        screenFlash(paletteOf(card.faction).primary, 0.1, 200);
+        impactRing(centerOf(zone), paletteOf(card.faction).secondary, 120);
       }
       this.renderAll();
-      await sleep2(280);
+      await this.waitForStack();
+      await sleep2(120);
     }
     manaDeny(reason) {
       if (!reason || !/ман/i.test(reason)) return;
@@ -24972,37 +25682,72 @@
       const e = this.engine;
       if (!e) return;
       this.autoTurnPlan();
-      const myMain = this.running && !this.busy && e.activeSide === 0 /* Player */ && e.phase === "Main" /* Main */;
+      const connected = !this.net || this.net.isReady();
+      const stackOpen = this.stackBusy || e.stack.length > 0;
+      const myMain = this.running && !this.busy && connected && !stackOpen && e.instantWindow === null && e.activeSide === 0 /* Player */ && e.phase === "Main" /* Main */;
       btn("btnEndTurn").disabled = !myMain;
       btn("btnSkip").disabled = !myMain;
       const echo = e.canUseEcho(0 /* Player */);
       btn("btnEcho").disabled = !(myMain && echo.ok);
       btn("btnEcho").textContent = echo.ok ? `\u25C8 \u042D\u0445\u043E: \u043F\u043E\u0432\u0442\u043E\u0440\u0438\u0442\u044C \xAB${echo.card.name}\xBB (\u043E\u0447\u043A\u043E\u0432 ${e.p(0 /* Player */).echoPoints})` : "\u25C8 \u0418\u0441\u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u0442\u044C \u042D\u0445\u043E";
       btn("btnEcho").title = echo.reason ?? "\u0411\u0435\u0441\u043F\u043B\u0430\u0442\u043D\u043E \u043F\u043E\u0432\u0442\u043E\u0440\u0438\u0442\u044C \u043F\u043E\u0441\u043B\u0435\u0434\u043D\u0435\u0435 \u0440\u0430\u0437\u044B\u0433\u0440\u0430\u043D\u043D\u043E\u0435 \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0435 (\u043E\u0434\u0438\u043D \u0440\u0430\u0437 \u0437\u0430 \u0438\u0433\u0440\u0443)";
+      const fc = btn("btnFullControl");
+      const fullControlUnavailable = !!this.net || this.launchMode === "tut";
+      const fullControlActive = !!settings.fullControl && !fullControlUnavailable;
+      fc.classList.toggle("on", fullControlActive);
+      fc.setAttribute("aria-pressed", String(fullControlActive));
+      fc.disabled = !this.running || fullControlUnavailable;
+      fc.textContent = settings.fullControl ? fullControlUnavailable ? bi("\u25C9 \u041F\u043E\u043B\u043D\u044B\u0439 \u043A\u043E\u043D\u0442\u0440\u043E\u043B\u044C: \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u0435\u043D", "\u25C9 Full Control: unavailable") : bi("\u25C9 \u041F\u043E\u043B\u043D\u044B\u0439 \u043A\u043E\u043D\u0442\u0440\u043E\u043B\u044C: \u0412\u041A\u041B", "\u25C9 Full Control: ON") : bi("\u25EF \u041F\u043E\u043B\u043D\u044B\u0439 \u043A\u043E\u043D\u0442\u0440\u043E\u043B\u044C", "\u25EF Full Control");
+      fc.title = fullControlUnavailable ? bi(
+        "\u041F\u0430\u0443\u0437\u044B Full Control \u0434\u043E\u0441\u0442\u0443\u043F\u043D\u044B \u0432 \u043B\u043E\u043A\u0430\u043B\u044C\u043D\u044B\u0445 \u043C\u0430\u0442\u0447\u0430\u0445; \u0441\u0435\u0442\u0435\u0432\u043E\u0439 \u043F\u0440\u0438\u043E\u0440\u0438\u0442\u0435\u0442 \u0438 \u043E\u0431\u0443\u0447\u0435\u043D\u0438\u0435 \u043F\u043E\u043A\u0430 \u0440\u0430\u0431\u043E\u0442\u0430\u044E\u0442 \u043F\u043E \u0441\u0432\u043E\u0438\u043C \u043F\u0440\u0430\u0432\u0438\u043B\u0430\u043C.",
+        "Full Control stops are available in local matches; online priority and tutorials use their own flow for now."
+      ) : bi(
+        "\u041E\u0441\u0442\u0430\u043D\u0430\u0432\u043B\u0438\u0432\u0430\u0442\u044C \u043F\u0440\u0438\u043E\u0440\u0438\u0442\u0435\u0442 \u0432 \u043A\u0430\u0436\u0434\u043E\u043C \u043E\u043A\u043D\u0435 \u043E\u0442\u043A\u043B\u0438\u043A\u0430, \u0434\u0430\u0436\u0435 \u0435\u0441\u043B\u0438 \u043D\u0435\u0442 \u0434\u043E\u0441\u0442\u0443\u043F\u043D\u044B\u0445 \u043C\u0433\u043D\u043E\u0432\u0435\u043D\u043D\u044B\u0445 \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0439. \u041F\u0435\u0440\u0435\u043A\u0440\u044B\u0432\u0430\u0435\u0442 \u0430\u0432\u0442\u043E-\u043F\u0440\u0438\u043E\u0440\u0438\u0442\u0435\u0442.",
+        "Stop at every priority window, even with no playable instants. Overrides Auto-Pass."
+      );
       const ab = btn("btnAutoBattle");
       ab.classList.toggle("inv", !this.inCombatWindow);
-      ab.disabled = !this.inCombatWindow;
+      ab.disabled = !this.inCombatWindow || !connected || stackOpen;
       const sc = btn("btnSkipCombat");
       sc.classList.toggle("inv", !this.inCombatWindow);
-      sc.disabled = !this.inCombatWindow;
+      sc.disabled = !this.inCombatWindow || !connected || stackOpen;
       const aa = btn("btnAttackAll");
       aa.classList.toggle("inv", !this.inCombatWindow);
-      aa.disabled = !this.inCombatWindow || this.busy || (this.engine ? this.readyAttackerUids().length === 0 : true);
+      aa.disabled = !this.inCombatWindow || !connected || stackOpen || this.busy || (this.engine ? this.readyAttackerUids().length === 0 : true);
+      const hint = $("actionHint");
+      if (!connected) {
+        this.clearThinkWatch();
+        hint.style.color = "";
+        hint.textContent = "\u{1F4E1} \u0421\u0432\u044F\u0437\u044C \u0441 \u043C\u0430\u0442\u0447\u0435\u043C \u043F\u043E\u0442\u0435\u0440\u044F\u043D\u0430 \u2014 \u0436\u0434\u0451\u043C \u043F\u0435\u0440\u0435\u043F\u043E\u0434\u043A\u043B\u044E\u0447\u0435\u043D\u0438\u044F\u2026";
+        return;
+      }
+      if (stackOpen) {
+        this.clearThinkWatch();
+        hint.style.color = "";
+        hint.textContent = e.instantWindow === 0 /* Player */ ? "\u26A1 \u0412\u0430\u0448 \u043F\u0440\u0438\u043E\u0440\u0438\u0442\u0435\u0442: \u0441\u044B\u0433\u0440\u0430\u0439\u0442\u0435 \u043C\u0433\u043D\u043E\u0432\u0435\u043D\u043D\u043E\u0435 \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0435 \u0438\u043B\u0438 \u043D\u0430\u0436\u043C\u0438\u0442\u0435 \xAB\u041F\u0430\u0441\xBB" : "\u0420\u0430\u0437\u0440\u0435\u0448\u0430\u0435\u0442\u0441\u044F \u0441\u0442\u0435\u043A \u2014 \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u044F \u0432\u043E\u0437\u043E\u0431\u043D\u043E\u0432\u044F\u0442\u0441\u044F \u0441\u0440\u0430\u0437\u0443 \u043F\u043E\u0441\u043B\u0435 \u044D\u0444\u0444\u0435\u043A\u0442\u0430";
+        return;
+      }
+      if (e.instantWindow === 0 /* Player */) {
+        this.clearThinkWatch();
+        hint.style.color = "";
+        hint.textContent = "\u26A1 \u0412\u0430\u0448 \u043F\u0440\u0438\u043E\u0440\u0438\u0442\u0435\u0442: \u043C\u0433\u043D\u043E\u0432\u0435\u043D\u043D\u043E\u0435 \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0435 \u0438\u043B\u0438 \xAB\u041F\u0430\u0441\xBB";
+        return;
+      }
       if (this.inCombatWindow) {
         const n = this.readyAttackerUids().length;
         if (!this.massAttack) {
-          $("actionHint").textContent = n > 0 ? `\u2694 \u0424\u0430\u0437\u0430 \u0431\u043E\u044F: ${n} \u0433\u043E\u0442\u043E\u0432\u044B\u0445 \u043A \u0430\u0442\u0430\u043A\u0435 \xB7 \u043A\u043B\u0438\u043A \u043F\u043E \u0441\u0432\u043E\u0435\u043C\u0443 \u2192 \u0446\u0435\u043B\u044C \xB7 \xAB\u0410\u0442\u0430\u043A\u0430 \u0432\u0441\u0435\u043C\u0438\xBB \u2014 \u0432\u0441\u0435 \u043F\u043E\u0434\u0440\u044F\u0434` : "\u0424\u0430\u0437\u0430 \u0431\u043E\u044F: \u043D\u0435\u0447\u0435\u043C \u0430\u0442\u0430\u043A\u043E\u0432\u0430\u0442\u044C \u2014 \xAB\u041F\u0440\u043E\u043F\u0443\u0441\u0442\u0438\u0442\u044C \u0431\u043E\u0439\xBB \u0438\u043B\u0438 Space";
+          hint.textContent = n > 0 ? `\u2694 \u0424\u0430\u0437\u0430 \u0431\u043E\u044F: ${n} \u0433\u043E\u0442\u043E\u0432\u044B\u0445 \u043A \u0430\u0442\u0430\u043A\u0435 \xB7 \u043A\u043B\u0438\u043A \u043F\u043E \u0441\u0432\u043E\u0435\u043C\u0443 \u2192 \u0446\u0435\u043B\u044C \xB7 \xAB\u0410\u0442\u0430\u043A\u0430 \u0432\u0441\u0435\u043C\u0438\xBB \u2014 \u0432\u0441\u0435 \u043F\u043E\u0434\u0440\u044F\u0434` : "\u0424\u0430\u0437\u0430 \u0431\u043E\u044F: \u043D\u0435\u0447\u0435\u043C \u0430\u0442\u0430\u043A\u043E\u0432\u0430\u0442\u044C \u2014 \xAB\u041F\u0440\u043E\u043F\u0443\u0441\u0442\u0438\u0442\u044C \u0431\u043E\u0439\xBB \u0438\u043B\u0438 Space";
         }
         this.armThinkWatch();
         return;
       }
-      if ($("actionHint").style.color) return;
+      if (hint.style.color) return;
       if (this.thinkOn) {
-        const still = this.running && !this.busy && e?.activeSide === 0 /* Player */ && e?.phase === "Main" /* Main */;
+        const still = this.running && !this.busy && connected && !stackOpen && e.instantWindow === null && e.activeSide === 0 /* Player */ && e.phase === "Main" /* Main */;
         if (still) return;
         this.clearThinkWatch();
       }
-      $("actionHint").textContent = myMain ? "\u041F\u0435\u0440\u0435\u0442\u0430\u0449\u0438\u0442\u0435 \u043A\u0430\u0440\u0442\u0443 \u043D\u0430 \u043F\u043E\u043B\u0435 \u0438\u043B\u0438 \u043D\u0430 \u0446\u0435\u043B\u044C \xB7 \u041F\u0440\u043E\u0431\u0435\u043B \u2014 \u0437\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u044C \u0445\u043E\u0434 \xB7 E \u2014 \u042D\u0445\u043E" : "\u041E\u0436\u0438\u0434\u0430\u043D\u0438\u0435\u2026";
+      hint.textContent = myMain ? "\u041F\u0435\u0440\u0435\u0442\u0430\u0449\u0438\u0442\u0435 \u043A\u0430\u0440\u0442\u0443 \u043D\u0430 \u043F\u043E\u043B\u0435 \u0438\u043B\u0438 \u043D\u0430 \u0446\u0435\u043B\u044C \xB7 \u041F\u0440\u043E\u0431\u0435\u043B \u2014 \u0437\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u044C \u0445\u043E\u0434 \xB7 E \u2014 \u042D\u0445\u043E" : "\u041E\u0436\u0438\u0434\u0430\u043D\u0438\u0435\u2026";
       this.armThinkWatch();
     }
     /* ---------------- v3.17.3: подсказка при долгом раздумье ----------------
@@ -25020,7 +25765,7 @@
         const h = $("actionHint");
         if (h.textContent?.startsWith("\u{1F4A1}")) {
           const e = this.engine;
-          const myMain = this.running && !this.busy && e?.activeSide === 0 /* Player */ && e?.phase === "Main" /* Main */;
+          const myMain = this.running && !this.busy && (!this.net || this.net.isReady()) && !this.stackBusy && !!e && e.stack.length === 0 && e.instantWindow === null && e.activeSide === 0 /* Player */ && e.phase === "Main" /* Main */;
           h.textContent = myMain ? "\u041F\u0435\u0440\u0435\u0442\u0430\u0449\u0438\u0442\u0435 \u043A\u0430\u0440\u0442\u0443 \u043D\u0430 \u043F\u043E\u043B\u0435 \u0438\u043B\u0438 \u043D\u0430 \u0446\u0435\u043B\u044C \xB7 \u041F\u0440\u043E\u0431\u0435\u043B \u2014 \u0437\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u044C \u0445\u043E\u0434 \xB7 E \u2014 \u042D\u0445\u043E" : "\u041E\u0436\u0438\u0434\u0430\u043D\u0438\u0435\u2026";
         }
       }
@@ -25028,7 +25773,7 @@
     armThinkWatch() {
       this.clearThinkWatch();
       const e = this.engine;
-      const myMain = this.running && !this.busy && e?.activeSide === 0 /* Player */ && e?.phase === "Main" /* Main */;
+      const myMain = this.running && !this.busy && (!this.net || this.net.isReady()) && !this.stackBusy && !!e && e.stack.length === 0 && e.instantWindow === null && e.activeSide === 0 /* Player */ && e.phase === "Main" /* Main */;
       if (!myMain || this.tutLesson) {
         return;
       }
@@ -25045,7 +25790,7 @@
       this.thinkTimer = window.setTimeout(() => {
         this.thinkTimer = null;
         const eng = this.engine;
-        const still = this.running && !this.busy && eng?.activeSide === 0 /* Player */ && eng?.phase === "Main" /* Main */;
+        const still = this.running && !this.busy && (!this.net || this.net.isReady()) && !this.stackBusy && !!eng && eng.stack.length === 0 && eng.instantWindow === null && eng.activeSide === 0 /* Player */ && eng.phase === "Main" /* Main */;
         if (!still || this.tutLesson) return;
         const cards = [...document.querySelectorAll("#hand .card")].filter((n) => !n.classList.contains("unplayable") && !n.classList.contains("tilting"));
         if (cards.length === 0) {
@@ -25068,9 +25813,9 @@
           return;
         }
       }
-      this.ropeStop();
       const e = this.engine;
-      if (!e || this.busy || e.activeSide !== 0 /* Player */ || e.phase !== "Main" /* Main */) return;
+      if (!e || this.busy || this.stackBusy || e.stack.length > 0 || e.instantWindow !== null || this.net && !this.net.isReady() || e.activeSide !== 0 /* Player */ || e.phase !== "Main" /* Main */) return;
+      this.ropeStop();
       this.turnDone?.();
     }
     /* ------------------------ обучение: уроки ------------------------ */
@@ -25083,11 +25828,13 @@
     tutCheck() {
       if (!this.tutLesson || !this.tutOk()) return;
       const n = this.tutLesson;
+      const introTrial = !meta.introComplete;
       this.tutLesson = 0;
       this.tutCleanup();
       tutCoachHide();
       meta.tutStage = Math.max(meta.tutStage ?? 0, n);
-      meta.tutDone = true;
+      meta.tutDone = introTrial ? meta.tutStage >= LESSONS.length : true;
+      if (introTrial) meta.introStep = 3;
       const rw = n === 3 ? 150 : 100;
       const first = !(meta.tutClaims ?? []).includes(n);
       if (first) {
@@ -25096,7 +25843,14 @@
       }
       metaSave();
       tutGatePractice();
-      showToast(`\u{1F393} ${LESSONS[n - 1].ru} \u0432\u044B\u043F\u043E\u043B\u043D\u0435\u043D!${first ? ` +\u{1FA99}${rw}` : ""}` + (n >= 4 && !meta.tutReward ? " \xB7 \u0417\u0430\u0431\u0435\u0440\u0438\u0442\u0435 \u043D\u0430\u0433\u0440\u0430\u0434\u0443 \u0432 \u043C\u0435\u043D\u044E \xAB\u{1F393} \u041E\u0431\u0443\u0447\u0435\u043D\u0438\u0435\xBB" : ""));
+      const nextText = introTrial ? n < LESSONS.length ? ` \xB7 \u0421\u043B\u0435\u0434\u043E\u043C: ${LESSONS[n].ru}` : " \xB7 \u0412\u0441\u0435 \u0438\u0441\u043F\u044B\u0442\u0430\u043D\u0438\u044F \u043F\u0440\u043E\u0439\u0434\u0435\u043D\u044B \u2014 \u0432\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u0441\u0442\u0430\u0440\u0442\u043E\u0432\u0443\u044E \u043A\u043E\u043B\u043E\u0434\u0443" : n >= 4 && !meta.tutReward ? " \xB7 \u0417\u0430\u0431\u0435\u0440\u0438\u0442\u0435 \u043D\u0430\u0433\u0440\u0430\u0434\u0443 \u0432 \u043C\u0435\u043D\u044E \xAB\u{1F393} \u041E\u0431\u0443\u0447\u0435\u043D\u0438\u0435\xBB" : "";
+      showToast(`\u{1F393} ${LESSONS[n - 1].ru} \u0432\u044B\u043F\u043E\u043B\u043D\u0435\u043D!${first ? ` +\u{1FA99}${rw}` : ""}${nextText}`);
+      if (introTrial) {
+        this.setBusy(true);
+        window.setTimeout(() => {
+          if (!meta.introComplete && this.engine && this.tutLesson === 0) openHomeScreen();
+        }, 650);
+      }
     }
     /* -------- спека «6. Обучение»: пошаговые уроки (20 шагов, зеркало tutorial.json) -------- */
     /** Карта урока сыграна (телеметрия или кладбище) — для шагов «разыграйте X». */
@@ -25202,7 +25956,7 @@
     /** Публичное использование Эха. */
     async useEchoNow() {
       const e = this.engine;
-      if (!e || this.busy || e.activeSide !== 0 /* Player */ || e.phase !== "Main" /* Main */) return;
+      if (!e || this.busy || this.stackBusy || e.stack.length > 0 || e.instantWindow !== null || this.net && !this.net.isReady() || e.activeSide !== 0 /* Player */ || e.phase !== "Main" /* Main */) return;
       const chk = e.canUseEcho(0 /* Player */);
       if (!chk.ok) {
         this.flashHint(chk.reason ?? "\u042D\u0445\u043E \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u043D\u043E");
@@ -25273,6 +26027,9 @@
       const e = this.engine, net = this.net;
       net.onNeedSync = () => {
         if (this.engine) net.send({ k: "sync", st: this.engine.exportState() });
+      };
+      net.onSync = (m) => {
+        if (this.engine) this.netApply(m.st);
       };
       pushLog(`\u2694 \u041E\u043D\u043B\u0430\u0439\u043D-\u043C\u0430\u0442\u0447: \u0432\u044B \u043F\u0440\u043E\u0442\u0438\u0432 ${net.opp.name} (${FACTION_RU[this.enemyFaction]}) \xB7 ${net.mode === "ranked" ? "\u0440\u0435\u0439\u0442\u0438\u043D\u0433\u043E\u0432\u044B\u0439" : net.mode === "friendly" ? "\u0434\u0440\u0443\u0436\u0435\u0441\u043A\u0438\u0439" : "\u043E\u0431\u044B\u0447\u043D\u044B\u0439"}`, "big");
       this.setWho("\u041F\u043E\u0434\u0433\u043E\u0442\u043E\u0432\u043A\u0430 \u043C\u0430\u0442\u0447\u0430\u2026");
@@ -25345,6 +26102,8 @@
           } else if (m.k === "sync") {
             this.netApply(st);
             if (e.activeSide === 0 /* Player */) break;
+          } else if (m.k === "syncApplied") {
+            if (e.activeSide === 0 /* Player */) break;
           }
         } catch (err) {
           console.warn("[net] replay", m.k, err);
@@ -25367,6 +26126,25 @@
         if (this.net === net) this.net = null;
         void onlineRefreshAfterMatch();
       }, 4e3);
+    }
+    /** Связь матча потеряна/восстановлена: блокируем ввод до синхронизации сокета. */
+    onNetConnection(connected) {
+      const net = this.net;
+      if (!net || net.isReady() !== connected || net.overInfo || !connected && net.closed) return;
+      if (connected) {
+        pushLog("\u{1F4E1} \u0421\u0432\u044F\u0437\u044C \u0441 \u043C\u0430\u0442\u0447\u0435\u043C \u0432\u043E\u0441\u0441\u0442\u0430\u043D\u043E\u0432\u043B\u0435\u043D\u0430", "phase");
+        showToast("\u{1F4E1} \u0421\u043E\u0435\u0434\u0438\u043D\u0435\u043D\u0438\u0435 \u0432\u043E\u0441\u0441\u0442\u0430\u043D\u043E\u0432\u043B\u0435\u043D\u043E");
+      } else {
+        pushLog("\u{1F4E1} \u0421\u0432\u044F\u0437\u044C \u043F\u043E\u0442\u0435\u0440\u044F\u043D\u0430 \u2014 \u0436\u0434\u0451\u043C \u043F\u0435\u0440\u0435\u043F\u043E\u0434\u043A\u043B\u044E\u0447\u0435\u043D\u0438\u044F", "big");
+        showToast("\u{1F4E1} \u0421\u0432\u044F\u0437\u044C \u043F\u043E\u0442\u0435\u0440\u044F\u043D\u0430 \u2014 \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u044F \u0432\u0440\u0435\u043C\u0435\u043D\u043D\u043E \u043F\u0440\u0438\u043E\u0441\u0442\u0430\u043D\u043E\u0432\u043B\u0435\u043D\u044B");
+        this.ropeStop();
+        if (this.pendingTarget) {
+          this.pendingTarget(null, null);
+          this.pendingTarget = null;
+          this.clearHighlights();
+        }
+      }
+      this.renderAll();
     }
     /** Сервер завершил матч (сдача / обрыв / сверка итогов). */
     netServerOver(winnerSeat, reason) {
@@ -25609,6 +26387,11 @@
     tutDone: false,
     campaign: {},
     starter: false,
+    introComplete: false,
+    starterDecksUnlocked: false,
+    introStep: 0,
+    introFaction: "Aurites",
+    introFactionsSeen: [],
     backsOwned: ["classic"],
     backEq: "classic",
     questDate: todayStr(),
@@ -25638,6 +26421,8 @@
     borderlessEquipped: [],
     borderlessEventWins: 0,
     borderlessEventClaimed: false,
+    deckHeroesOwned: [],
+    deckHeroes: {},
     tablesOwned: [],
     runesOwned: [],
     friends: [],
@@ -25674,6 +26459,10 @@
       if (raw) {
         const saved = JSON.parse(raw);
         meta = { ...freshMeta(), ...saved };
+        if (!Object.prototype.hasOwnProperty.call(saved, "introComplete")) {
+          meta.introComplete = true;
+          meta.starterDecksUnlocked = true;
+        }
         if (saved.gems == null) meta.gems = 100;
         if (saved.freeOpens == null) meta.freeOpens = 0;
         if (saved.premOpens == null) meta.premOpens = 0;
@@ -25694,8 +26483,30 @@
     if (meta.foilTokens == null) meta.foilTokens = 0;
     if (meta.premOpens == null) meta.premOpens = 0;
     if (!meta.tutClaims) meta.tutClaims = [];
+    if (!Array.isArray(meta.replays)) meta.replays = [];
+    if (!Number.isInteger(meta.introStep) || meta.introStep < 0 || meta.introStep > 3) meta.introStep = 0;
+    if (!FACTION_IDS.includes(meta.introFaction)) meta.introFaction = "Aurites";
+    if (!Array.isArray(meta.introFactionsSeen)) meta.introFactionsSeen = [];
+    if (meta.tutReward) {
+      meta.introComplete = true;
+      meta.starterDecksUnlocked = true;
+    }
+    if (meta.introComplete) meta.starterDecksUnlocked = true;
     if (!Array.isArray(meta.borderlessOwned)) meta.borderlessOwned = [];
     if (!Array.isArray(meta.borderlessEquipped)) meta.borderlessEquipped = [];
+    if (!Array.isArray(meta.deckHeroesOwned)) meta.deckHeroesOwned = [];
+    meta.deckHeroesOwned = [...new Set(meta.deckHeroesOwned.filter((id) => {
+      const hero = DECK_HERO_BY_ID.get(id);
+      return !!hero && hero.tier !== "standard";
+    }))];
+    if (!meta.deckHeroes || typeof meta.deckHeroes !== "object" || Array.isArray(meta.deckHeroes)) meta.deckHeroes = {};
+    const safeDeckHeroes = {};
+    for (const [deckId, heroId] of Object.entries(meta.deckHeroes)) {
+      if (/^[A-Za-z0-9_-]{1,120}$/.test(deckId) && typeof heroId === "string" && DECK_HERO_BY_ID.has(heroId)) {
+        safeDeckHeroes[deckId] = heroId;
+      }
+    }
+    meta.deckHeroes = safeDeckHeroes;
     if (!Number.isFinite(meta.borderlessEventWins)) meta.borderlessEventWins = 0;
     if (typeof meta.borderlessEventClaimed !== "boolean") meta.borderlessEventClaimed = false;
     if (Date.now() > meta.seasonStart + SEASON_MS) {
@@ -25725,6 +26536,11 @@
     }
     scheduleSync();
   }
+  function requireStarterDeckUnlock() {
+    if (meta.starterDecksUnlocked) return true;
+    openIntroFlow();
+    return false;
+  }
   function syncQuestPeriods() {
     let changed = false;
     const today = todayStr();
@@ -25743,6 +26559,38 @@
     return changed;
   }
   metaLoad();
+  function defaultDeckHeroForFaction(faction) {
+    return deckHeroesForFaction(faction).find((hero) => hero.tier === "standard");
+  }
+  function isDeckHeroUnlocked(heroId) {
+    const hero = DECK_HERO_BY_ID.get(heroId);
+    return !!hero && (hero.tier === "standard" || (meta.deckHeroesOwned ?? []).includes(heroId));
+  }
+  function resolveDeckHero(heroId, faction) {
+    const selected = heroId ? DECK_HERO_BY_ID.get(heroId) : void 0;
+    if (selected && selected.faction === faction && isDeckHeroUnlocked(selected.id)) return selected;
+    return defaultDeckHeroForFaction(faction);
+  }
+  function deckHeroForDeck(deckId, faction) {
+    return resolveDeckHero(meta.deckHeroes?.[deckId], faction);
+  }
+  function deckHeroIdForDeck(deckId, faction) {
+    return deckHeroForDeck(deckId, faction)?.id;
+  }
+  function saveDeckHeroSelection(deckId, faction, heroId, shouldSave = true) {
+    const hero = DECK_HERO_BY_ID.get(heroId);
+    if (!hero || hero.faction !== faction || !isDeckHeroUnlocked(heroId)) return false;
+    meta.deckHeroes = { ...meta.deckHeroes ?? {}, [deckId]: hero.id };
+    if (shouldSave) metaSave();
+    return true;
+  }
+  function forgetDeckHeroSelection(deckId) {
+    if (!meta.deckHeroes?.[deckId]) return;
+    const next = { ...meta.deckHeroes };
+    delete next[deckId];
+    meta.deckHeroes = next;
+    metaSave();
+  }
   var BORDERLESS_BOOSTER_CHANCE = 1e-3;
   var BORDERLESS_EVENT_WINS = 3;
   function hasBorderless(id) {
@@ -25792,12 +26640,45 @@
   };
   window.ecToggleBorderless = (id) => toggleBorderless(id);
   window.ecBorderlessOwned = () => [...meta.borderlessOwned ?? []];
-  var META_API = () => `http://${window.location.hostname}:8081`;
+  var CLIENT_RUNTIME_CONFIG = window.EC_CONFIG ?? {};
+  var clientUrlParams = new URLSearchParams(window.location.search);
+  function storedClientUrl(key) {
+    try {
+      return window.localStorage.getItem(key)?.trim() ?? "";
+    } catch {
+      return "";
+    }
+  }
+  function normalizedApiBase(raw) {
+    if (!raw) return "";
+    try {
+      const u = new URL(raw, window.location.href);
+      if (u.protocol !== "http:" && u.protocol !== "https:" || u.username || u.password) return "";
+      if (window.location.protocol === "https:" && u.protocol !== "https:") return "";
+      return u.href.replace(/\/+$/, "");
+    } catch {
+      return "";
+    }
+  }
+  var META_API = () => {
+    const configured = clientUrlParams.get("api") || storedClientUrl("ec_meta_api") || CLIENT_RUNTIME_CONFIG.metaApiBase || "";
+    const base = normalizedApiBase(configured);
+    if (base) return base;
+    if (window.location.protocol === "https:") return window.location.origin;
+    return `${window.location.protocol || "http:"}//${window.location.hostname || "localhost"}:8081`;
+  };
+  var MATCH_HTTP_API = () => {
+    const configured = clientUrlParams.get("matchApi") || storedClientUrl("ec_match_api") || CLIENT_RUNTIME_CONFIG.matchApiBase || "";
+    const base = normalizedApiBase(configured);
+    if (base) return base;
+    if (window.location.protocol === "https:") return window.location.origin;
+    return `${window.location.protocol || "http:"}//${window.location.hostname || "localhost"}:8080`;
+  };
   var AUTH_KEY = "ec_auth_v1";
   function authGet() {
     try {
       const a = JSON.parse(window.localStorage.getItem(AUTH_KEY) || "null");
-      return a && a.accessToken ? a : null;
+      return a && typeof a.accessToken === "string" && typeof a.refreshToken === "string" ? a : null;
     } catch {
       return null;
     }
@@ -25813,33 +26694,110 @@
     }
   }
   var authRefreshing = null;
+  var AUTH_REFRESH_LOCK = "ec_auth_refresh_lock_v1";
+  function waitMs(ms) {
+    return new Promise((resolve) => window.setTimeout(resolve, ms));
+  }
+  async function authRefreshRequest(tokens) {
+    const ctl = new AbortController();
+    const timeout = window.setTimeout(() => ctl.abort(), 1e4);
+    try {
+      const r = await window.fetch(`${META_API()}/api/auth/refresh`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        signal: ctl.signal,
+        body: JSON.stringify({ refreshToken: tokens.refreshToken }),
+        cache: "no-store"
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        if (r.status === 401) {
+          authSet(null);
+          authExpired();
+        }
+        return false;
+      }
+      if (!j.accessToken || !j.refreshToken) return false;
+      authSet(j);
+      return true;
+    } catch {
+      return false;
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  }
+  async function authRefreshExclusive(initialRefreshToken) {
+    const underLock = async () => {
+      const latest2 = authGet();
+      if (!latest2) return false;
+      if (latest2.refreshToken !== initialRefreshToken && Number.isFinite(latest2.exp) && latest2.exp > Date.now() + 3e4) return true;
+      return authRefreshRequest(latest2);
+    };
+    const locks = navigator.locks;
+    if (locks?.request) {
+      try {
+        return await locks.request(AUTH_REFRESH_LOCK, underLock);
+      } catch {
+      }
+    }
+    const owner = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    const deadline = Date.now() + 18e3;
+    const store = () => {
+      try {
+        return window.localStorage;
+      } catch {
+        return null;
+      }
+    };
+    const storage = store();
+    if (!storage) return underLock();
+    while (Date.now() < deadline) {
+      const latest2 = authGet();
+      if (!latest2) return false;
+      if (latest2.refreshToken !== initialRefreshToken && Number.isFinite(latest2.exp) && latest2.exp > Date.now() + 3e4) return true;
+      let lease = null;
+      try {
+        lease = JSON.parse(storage.getItem(AUTH_REFRESH_LOCK) || "null");
+      } catch {
+        lease = null;
+      }
+      if (!lease || !lease.owner || (lease.exp ?? 0) < Date.now() || lease.owner === owner) {
+        try {
+          storage.setItem(AUTH_REFRESH_LOCK, JSON.stringify({ owner, exp: Date.now() + 15e3 }));
+        } catch {
+          return underLock();
+        }
+        await waitMs(35 + Math.random() * 35);
+        let verifyLease = null;
+        try {
+          verifyLease = JSON.parse(storage.getItem(AUTH_REFRESH_LOCK) || "null");
+        } catch {
+          verifyLease = null;
+        }
+        if (verifyLease?.owner === owner) {
+          try {
+            return await underLock();
+          } finally {
+            try {
+              const current = JSON.parse(storage.getItem(AUTH_REFRESH_LOCK) || "null");
+              if (current?.owner === owner) storage.removeItem(AUTH_REFRESH_LOCK);
+            } catch {
+            }
+          }
+        }
+      }
+      await waitMs(45 + Math.random() * 65);
+    }
+    const latest = authGet();
+    return !!latest && latest.refreshToken !== initialRefreshToken && latest.exp > Date.now();
+  }
   function authRefresh() {
     const a = authGet();
     if (!a) return Promise.resolve(false);
     if (authRefreshing) return authRefreshing;
-    authRefreshing = (async () => {
-      try {
-        const r = await window.fetch(`${META_API()}/api/auth/refresh`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ refreshToken: a.refreshToken })
-        });
-        const j = await r.json().catch(() => ({}));
-        if (!r.ok) {
-          if (r.status === 401) {
-            authSet(null);
-            authExpired();
-          }
-          return false;
-        }
-        authSet(j);
-        return true;
-      } catch {
-        return false;
-      } finally {
-        authRefreshing = null;
-      }
-    })();
+    authRefreshing = authRefreshExclusive(a.refreshToken).finally(() => {
+      authRefreshing = null;
+    });
     return authRefreshing;
   }
   function authExpired() {
@@ -25849,12 +26807,13 @@
     try {
       syncAccountRow();
       showToast("\u{1F512} \u0421\u0435\u0441\u0441\u0438\u044F \u0438\u0441\u0442\u0435\u043A\u043B\u0430 \u2014 \u0432\u043E\u0439\u0434\u0438\u0442\u0435 \u0441\u043D\u043E\u0432\u0430");
+      authGateCheck();
     } catch {
     }
   }
   async function authFetch(url, init = {}) {
     let a = authGet();
-    if (a && a.exp - Date.now() < 3e4) {
+    if (a && (!Number.isFinite(a.exp) || a.exp - Date.now() < 3e4)) {
       await authRefresh();
       a = authGet();
     }
@@ -25881,8 +26840,15 @@
   });
   var metaApiOldWarned = false;
   var syncInFlight = null;
+  var syncPending = false;
+  var profileSyncPaused = false;
+  var profileMigrationNick = "";
   function syncProfile() {
-    if (syncInFlight) return syncInFlight;
+    if (profileSyncPaused) return Promise.resolve();
+    if (syncInFlight) {
+      syncPending = true;
+      return syncInFlight;
+    }
     const run = (async () => {
       if (typeof window.fetch !== "function" || !meta.pid) return;
       try {
@@ -25939,13 +26905,20 @@
             tutDone: !!meta.tutDone,
             tutReward: meta.tutReward ?? "",
             tutClaims: meta.tutClaims ?? [],
+            introComplete: !!meta.introComplete,
+            starterDecksUnlocked: !!meta.starterDecksUnlocked,
+            introStep: meta.introStep ?? 0,
+            introFaction: meta.introFaction ?? "Aurites",
+            introFactionsSeen: meta.introFactionsSeen ?? [],
             cosmetics: {
               backs: meta.backsOwned ?? [],
               tables: meta.tablesOwned ?? [],
               runes: meta.runesOwned ?? [],
               backEq: meta.backEq ?? "classic",
               tableSkin: meta.tableSkin ?? "classic",
-              runeSkin: meta.runeSkin ?? "classic"
+              runeSkin: meta.runeSkin ?? "classic",
+              deckHeroesOwned: meta.deckHeroesOwned ?? [],
+              deckHeroes: meta.deckHeroes ?? {}
             },
             questDate: meta.questDate,
             wquestWeek: meta.wquestWeek,
@@ -26011,7 +26984,12 @@
     })();
     syncInFlight = run;
     void run.finally(() => {
-      if (syncInFlight === run) syncInFlight = null;
+      if (syncInFlight !== run) return;
+      syncInFlight = null;
+      if (syncPending) {
+        syncPending = false;
+        scheduleSync();
+      }
     });
     return run;
   }
@@ -26578,6 +27556,7 @@
       st.classList.remove("hasSealed", "opening");
       renderPackSlots(slots);
       pendingPack = null;
+      renderPackInventory();
     }, 560);
   }
   function attachVolumetric(root = document) {
@@ -26756,8 +27735,9 @@
     }
   }
   function selectStoredBooster(kind) {
-    if (pendingPack || document.getElementById("packStage")?.classList.contains("hasResults")) {
-      showToast("\u0422\u0438\u043F \u0431\u0443\u0441\u0442\u0435\u0440\u0430 \u043D\u0435\u043B\u044C\u0437\u044F \u043C\u0435\u043D\u044F\u0442\u044C \u043F\u043E\u0441\u043B\u0435 \u0432\u0441\u043A\u0440\u044B\u0442\u0438\u044F \u043A\u0430\u0440\u0442");
+    const stage = document.getElementById("packStage");
+    if (pendingPack || stage?.classList.contains("opening")) {
+      showToast("\u0414\u043E\u0436\u0434\u0438\u0442\u0435\u0441\u044C \u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043D\u0438\u044F \u0432\u0441\u043A\u0440\u044B\u0442\u0438\u044F \u0431\u0443\u0441\u0442\u0435\u0440\u0430");
       return false;
     }
     const available = kind === "booster" ? meta.freeOpens ?? 0 : meta.premOpens ?? 0;
@@ -26791,18 +27771,20 @@
     ];
     const total = standard + premium;
     const packStage = document.getElementById("packStage");
-    const selectionLocked = !!pendingPack || !!packStage?.classList.contains("opening") || !!packStage?.classList.contains("hasResults");
+    const opening = !!packStage?.classList.contains("opening");
+    const selectionLocked = !!pendingPack || opening;
+    const hasResults = !!packStage?.classList.contains("hasResults");
     const totalNode = document.getElementById("boosterCountTotal");
     if (totalNode) totalNode.textContent = String(total);
     host.innerHTML = packs.map((p) => `<button type="button" class="boosterInvCard${p.count > 0 ? " has-stock" : ""}${pendingPackKind === p.packKind ? " selected" : ""}" data-pack="${p.kind}" ${p.count <= 0 || selectionLocked ? "disabled" : ""}
-      aria-pressed="${pendingPackKind === p.packKind}" aria-label="${selectionLocked ? "\u0421\u043D\u0430\u0447\u0430\u043B\u0430 \u0437\u0430\u043A\u0440\u043E\u0439\u0442\u0435 \u043F\u0440\u043E\u0441\u043C\u043E\u0442\u0440 \u0443\u0436\u0435 \u0432\u0441\u043A\u0440\u044B\u0442\u044B\u0445 \u043A\u0430\u0440\u0442" : p.count > 0 ? `\u0412\u044B\u0431\u0440\u0430\u0442\u044C ${p.title}, \u0432 \u0437\u0430\u043F\u0430\u0441\u0435 ${p.count}; \u0441\u043F\u0438\u0441\u0430\u043D\u0438\u0435 \u043F\u0440\u0438 \u0432\u0441\u043A\u0440\u044B\u0442\u0438\u0438` : `${p.title}, \u043D\u0435\u0442 \u0432 \u0437\u0430\u043F\u0430\u0441\u0435`}">
+      aria-pressed="${pendingPackKind === p.packKind}" aria-label="${selectionLocked ? "\u0421\u043D\u0430\u0447\u0430\u043B\u0430 \u0434\u043E\u0436\u0434\u0438\u0442\u0435\u0441\u044C \u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043D\u0438\u044F \u0432\u0441\u043A\u0440\u044B\u0442\u0438\u044F" : p.count > 0 ? `\u0412\u044B\u0431\u0440\u0430\u0442\u044C ${p.title}, \u0432 \u0437\u0430\u043F\u0430\u0441\u0435 ${p.count}${hasResults ? "; \u043C\u043E\u0436\u043D\u043E \u0432\u0441\u043A\u0440\u044B\u0442\u044C \u0441\u043B\u0435\u0434\u0443\u044E\u0449\u0438\u0439 \u0431\u0443\u0441\u0442\u0435\u0440" : "; \u0437\u0430\u043F\u0430\u0441 \u0441\u043F\u0438\u0448\u0435\u0442\u0441\u044F \u043F\u0440\u0438 \u0432\u0441\u043A\u0440\u044B\u0442\u0438\u0438"}` : `${p.title}, \u043D\u0435\u0442 \u0432 \u0437\u0430\u043F\u0430\u0441\u0435`}">
       <span class="boosterInvVisual">
         <span class="boosterInvFallback" aria-hidden="true"><b>${p.sigil}</b><small>${p.mark}</small></span>
         ${cosmImg("offers", p.art, "boosterInvArt")}
         <span class="boosterInvCount">\xD7${p.count}</span>
       </span>
       <span class="boosterInvCopy"><strong>${p.title}</strong><small>${p.sub}</small>
-        <span class="boosterInvOpen">${p.count > 0 ? pendingPackKind === p.packKind ? "\u0412\u044B\u0431\u0440\u0430\u043D\u043E \xB7 \u043D\u0430\u0436\u043C\u0438\u0442\u0435 \u043F\u0430\u0447\u043A\u0443 \u0434\u043B\u044F \u0432\u0441\u043A\u0440\u044B\u0442\u0438\u044F" : "\u0412\u044B\u0431\u0440\u0430\u0442\u044C \xB7 \u0437\u0430\u043F\u0430\u0441 \u0441\u043F\u0438\u0448\u0435\u0442\u0441\u044F \u043F\u0440\u0438 \u0432\u0441\u043A\u0440\u044B\u0442\u0438\u0438 \u2192" : "\u041D\u0435\u0442 \u0432 \u0437\u0430\u043F\u0430\u0441\u0435"}</span></span>
+        <span class="boosterInvOpen">${p.count > 0 ? selectionLocked ? "\u0412\u0441\u043A\u0440\u044B\u0442\u0438\u0435\u2026" : hasResults ? "\u0412\u044B\u0431\u0440\u0430\u0442\u044C \u0441\u043B\u0435\u0434\u0443\u044E\u0449\u0438\u0439 \u0431\u0443\u0441\u0442\u0435\u0440 \u2192" : pendingPackKind === p.packKind ? "\u0412\u044B\u0431\u0440\u0430\u043D\u043E \xB7 \u043D\u0430\u0436\u043C\u0438\u0442\u0435 \u043F\u0430\u0447\u043A\u0443 \u0434\u043B\u044F \u0432\u0441\u043A\u0440\u044B\u0442\u0438\u044F" : "\u0412\u044B\u0431\u0440\u0430\u0442\u044C \xB7 \u0437\u0430\u043F\u0430\u0441 \u0441\u043F\u0438\u0448\u0435\u0442\u0441\u044F \u043F\u0440\u0438 \u0432\u0441\u043A\u0440\u044B\u0442\u0438\u0438 \u2192" : "\u041D\u0435\u0442 \u0432 \u0437\u0430\u043F\u0430\u0441\u0435"}</span></span>
     </button>`).join("");
     host.querySelectorAll(".boosterInvArt").forEach((img) => {
       const markArt = () => img.closest(".boosterInvVisual")?.classList.add("hasArt");
@@ -26902,7 +27884,7 @@
     const bpr = $("btnPackPrem");
     if (bpr) {
       const stage = document.getElementById("packStage");
-      bpr.disabled = (meta.premOpens ?? 0) <= 0 || !!pendingPack || !!stage?.classList.contains("opening") || !!stage?.classList.contains("hasResults");
+      bpr.disabled = (meta.premOpens ?? 0) <= 0 || !!pendingPack || !!stage?.classList.contains("opening");
       bpr.textContent = `\u{1F31F} \u041F\u0440\u0435\u043C\u0438\u0443\u043C-\u0431\u0443\u0441\u0442\u0435\u0440 \xB7 \xD7${meta.premOpens ?? 0}`;
     }
     const bc = $("btnCollection");
@@ -26954,7 +27936,17 @@
     const all = [];
     for (const d of deckList) {
       if (d.id === "Starter") continue;
-      all.push({ id: d.id, name: d.name, faction: d.faction, cards: d.cards.slice(), format: d.format, updated: 0, isPrecon: true });
+      if (d.format === STARTER_DECK_FORMAT && !meta.starterDecksUnlocked) continue;
+      all.push({
+        id: d.id,
+        name: d.name,
+        faction: d.faction,
+        cards: d.cards.slice(),
+        format: d.format,
+        heroId: deckHeroIdForDeck(d.id, d.faction) ?? d.faction,
+        updated: 0,
+        isPrecon: true
+      });
     }
     for (const c of loadCustomDecks()) {
       all.push({
@@ -26963,6 +27955,7 @@
         faction: c.faction,
         cards: c.cards.slice(),
         avatarCardId: c.avatarCardId,
+        heroId: deckHeroIdForDeck(c.id, c.faction) ?? c.faction,
         updated: c.updated ?? 0,
         isPrecon: false
       });
@@ -27043,9 +28036,11 @@
     grid.appendChild(addBox);
     for (const d of all) {
       const isSel = decksSelectedId === d.id;
+      const deckHero = resolveDeckHero(d.heroId, d.faction);
       const box = document.createElement("div");
       box.className = "deckBox" + (isSel ? " sel" : "");
       box.dataset.deckId = d.id;
+      box.dataset.heroId = deckHero?.id ?? "";
       box.tabIndex = 0;
       box.setAttribute("role", "group");
       box.setAttribute("aria-label", `\u041A\u043E\u043B\u043E\u0434\u0430 \xAB${d.name}\xBB, ${FACTION_RU[d.faction] ?? d.faction}, ${d.cards.length} \u043A\u0430\u0440\u0442. \u041D\u0430\u0436\u043C\u0438\u0442\u0435 Enter, \u0447\u0442\u043E\u0431\u044B \u0432\u044B\u0431\u0440\u0430\u0442\u044C.`);
@@ -27056,14 +28051,14 @@
       const artCard = avatarCard ?? suggestedAvatar;
       const artFaction = artCard?.faction ?? d.faction;
       const artId = artCard?.id ?? d.id;
-      const cardArtUrl = `/art/${encodeURIComponent(artFaction)}/${encodeURIComponent(artId)}.png`;
+      const cardArtUrl = artCard ? cardArtworkUrl(artCard) : `/art/${encodeURIComponent(artFaction)}/${encodeURIComponent(artId)}.png`;
       const fallbackSig = FACTION_SIGIL[d.faction] ?? "\u2726";
       const deckArtUrl = `img/decks/${encodeURIComponent(d.id)}.png`;
       const artHtml = avatarCard ? `<img class="deckAvatarImg" src="${cardArtUrl}" alt="" loading="lazy" decoding="async" onerror="this.style.display='none'">` : `<img class="deckPresetArt" src="${deckArtUrl}" alt="" loading="lazy" decoding="async" onerror="this.style.display='none';if(this.nextElementSibling)this.nextElementSibling.style.display='block'"><img class="deckCardArtFallback" src="${cardArtUrl}" alt="" loading="lazy" decoding="async" style="display:none" onerror="this.style.display='none'">`;
       const avatarTag = avatarCard ? `<span class="deckAvatarTag" title="\u041E\u0431\u043B\u043E\u0436\u043A\u0430: ${esc(cardName(avatarCard))}">\u{1F3B4} ${esc(cardName(avatarCard))}</span>` : "";
       const artEdit = !d.isPrecon ? `<button class="deckArtEdit deckArtGear" type="button" title="\u0418\u0437\u043C\u0435\u043D\u0438\u0442\u044C \u0430\u0440\u0442 \u043A\u043E\u043B\u043E\u0434\u044B" aria-label="\u0418\u0437\u043C\u0435\u043D\u0438\u0442\u044C \u0430\u0440\u0442 \u043A\u043E\u043B\u043E\u0434\u044B \xAB${esc(d.name)}\xBB" data-deck-art-edit="${esc(d.id)}">${GEAR_SVG}</button>` : "";
       box.dataset.avatarCardId = avatarCard?.id ?? "";
-      box.title = avatarCard ? `${d.name} \xB7 \u043E\u0431\u043B\u043E\u0436\u043A\u0430: ${cardName(avatarCard)}` : d.name;
+      box.title = `${d.name}${avatarCard ? ` \xB7 \u043E\u0431\u043B\u043E\u0436\u043A\u0430: ${cardName(avatarCard)}` : ""} \xB7 \u0433\u0435\u0440\u043E\u0439: ${deckHero?.name ?? FACTION_RU[d.faction] ?? d.faction}`;
       const deckArtClass = `deckArt f-${d.faction}`;
       const facSet = /* @__PURE__ */ new Set();
       facSet.add(d.faction);
@@ -27171,7 +28166,7 @@
       const fallback = el("span", "deckArtChoiceFallback", FACTION_SIGIL[card.faction] ?? "\u25C7");
       media.appendChild(fallback);
       const image = document.createElement("img");
-      image.src = `/art/${encodeURIComponent(card.faction)}/${encodeURIComponent(card.id)}.png`;
+      image.src = cardArtworkUrl(card);
       image.alt = "";
       image.loading = "lazy";
       image.decoding = "async";
@@ -27221,6 +28216,155 @@
       if (avatarSelect) avatarSelect.value = card.id;
       renderDeckAvatarPreview();
     }, null);
+  }
+  var deckHeroPickerContext = null;
+  var deckHeroPickerReturnFocus = null;
+  function closeDeckHeroPicker() {
+    document.getElementById("deckHeroPickerModal")?.classList.add("hidden");
+    deckHeroPickerContext = null;
+    const focus = deckHeroPickerReturnFocus;
+    deckHeroPickerReturnFocus = null;
+    if (focus?.isConnected) {
+      focus.focus();
+      return;
+    }
+    const deckPickerButton = document.getElementById("btnDecksHero");
+    if (deckPickerButton && !deckPickerButton.disabled) {
+      deckPickerButton.focus();
+      return;
+    }
+    document.getElementById("btnDbHeroPicker")?.focus();
+  }
+  function renderDeckHeroPickerGrid() {
+    const context = deckHeroPickerContext;
+    const grid = document.getElementById("deckHeroPickerGrid");
+    const wallet = document.getElementById("deckHeroWallet");
+    if (!context || !grid) return;
+    grid.replaceChildren();
+    if (wallet) wallet.textContent = `\u0411\u0430\u043B\u0430\u043D\u0441: \u{1FA99} ${fmtNum(shardsGet())} \xB7 \u0433\u0435\u0440\u043E\u0439 \u0437\u0430 \u043C\u043E\u043D\u0435\u0442\u044B \u2014 ${fmtNum(DECK_HERO_COIN_PRICE)}. \u041F\u043B\u0430\u0442\u0451\u0436\u043D\u044B\u0435 \u0441\u043F\u0438\u0441\u0430\u043D\u0438\u044F \u043F\u043E\u043A\u0430 \u043E\u0442\u043A\u043B\u044E\u0447\u0435\u043D\u044B.`;
+    const options = deckHeroesForFaction(context.faction);
+    if (!options.length) {
+      const empty = el("div", "deckHeroPickerEmpty", "\u0414\u043B\u044F \u044D\u0442\u043E\u0439 \u0444\u0440\u0430\u043A\u0446\u0438\u0438 \u043F\u043E\u043A\u0430 \u043D\u0435\u0442 \u0433\u0435\u0440\u043E\u0435\u0432.");
+      grid.appendChild(empty);
+      return;
+    }
+    for (const hero of options) {
+      const unlocked2 = isDeckHeroUnlocked(hero.id);
+      const selected = hero.id === context.selectedId;
+      const option = el("article", `deckHeroOption tier-${hero.tier}${selected ? " isSelected" : ""}${unlocked2 ? " isUnlocked" : " isLocked"}`);
+      option.dataset.heroId = hero.id;
+      option.setAttribute("role", "listitem");
+      const tierLabel = hero.tier === "standard" ? "\u0421\u0422\u0410\u041D\u0414\u0410\u0420\u0422\u041D\u042B\u0419" : hero.tier === "coin" ? "\u0417\u0410 \u0418\u0413\u0420\u041E\u0412\u042B\u0415 \u041C\u041E\u041D\u0415\u0422\u042B" : "\u0414\u041E\u041D\u0410\u0422\u041D\u0410\u042F \u0412\u0418\u0422\u0420\u0418\u041D\u0410";
+      const detail = hero.tier === "standard" ? "\u0414\u043E\u0441\u0442\u0443\u043F\u0435\u043D \u0441\u0440\u0430\u0437\u0443" : hero.tier === "coin" ? `\u041F\u043E\u0441\u0442\u043E\u044F\u043D\u043D\u043E\u0435 \u043E\u0442\u043A\u0440\u044B\u0442\u0438\u0435 \xB7 ${fmtNum(DECK_HERO_COIN_PRICE)} \u{1FA99}` : "\u041F\u043B\u0430\u0442\u0451\u0436\u043D\u044B\u0439 \u043F\u0440\u043E\u0432\u0430\u0439\u0434\u0435\u0440 \u0435\u0449\u0451 \u043D\u0435 \u043F\u043E\u0434\u043A\u043B\u044E\u0447\u0451\u043D";
+      option.innerHTML = `<div class="deckHeroOptionPortrait"><img class="deckHeroOptionArt" alt="${esc(hero.name)}" loading="lazy" decoding="async">
+        <span class="deckHeroTier">${tierLabel}</span></div>
+      <div class="deckHeroOptionInfo"><b class="deckHeroOptionName">${esc(hero.name)}</b>
+        <span class="deckHeroOptionFaction">${esc(FACTION_RU[hero.faction] ?? hero.faction)}</span>
+        <span class="deckHeroOptionDetail">${esc(detail)}</span>
+        ${selected ? '<span class="deckHeroSelectedMark">\u2713 \u0413\u0415\u0420\u041E\u0419 \u041A\u041E\u041B\u041E\u0414\u042B</span>' : ""}</div>`;
+      artChain(option.querySelector(".deckHeroOptionArt"), deckHeroArtUrls(hero.id, context.faction));
+      const action = document.createElement("button");
+      action.type = "button";
+      action.className = "deckHeroAction";
+      action.dataset.heroId = hero.id;
+      action.dataset.heroAction = hero.tier === "coin" && !unlocked2 ? "buy" : "select";
+      if (selected && unlocked2) {
+        action.textContent = "\u0412\u044B\u0431\u0440\u0430\u043D";
+        action.disabled = true;
+      } else if (hero.tier === "donation" && !unlocked2) {
+        action.textContent = "\u0421\u043A\u043E\u0440\u043E \xB7 \u0434\u043E\u043D\u0430\u0442";
+        action.disabled = true;
+        action.title = "\u041F\u043E\u043A\u0443\u043F\u043A\u0430 \u043F\u043E\u044F\u0432\u0438\u0442\u0441\u044F \u043F\u043E\u0441\u043B\u0435 \u043F\u043E\u0434\u043A\u043B\u044E\u0447\u0435\u043D\u0438\u044F \u043F\u043B\u0430\u0442\u0451\u0436\u043D\u043E\u0439 \u0441\u0438\u0441\u0442\u0435\u043C\u044B; \u0434\u0435\u043D\u044C\u0433\u0438 \u043D\u0435 \u0441\u043F\u0438\u0441\u044B\u0432\u0430\u044E\u0442\u0441\u044F";
+      } else if (hero.tier === "coin" && !unlocked2 && shardsGet() < DECK_HERO_COIN_PRICE) {
+        action.textContent = `\u041D\u0443\u0436\u043D\u043E ${fmtNum(DECK_HERO_COIN_PRICE)} \u{1FA99}`;
+        action.disabled = true;
+        action.title = "\u041D\u0435\u0434\u043E\u0441\u0442\u0430\u0442\u043E\u0447\u043D\u043E \u0438\u0433\u0440\u043E\u0432\u044B\u0445 \u043C\u043E\u043D\u0435\u0442";
+      } else if (hero.tier === "coin" && !unlocked2) {
+        action.textContent = `\u041A\u0443\u043F\u0438\u0442\u044C \xB7 ${fmtNum(DECK_HERO_COIN_PRICE)} \u{1FA99}`;
+        action.title = `\u041E\u0442\u043A\u0440\u044B\u0442\u044C \u0433\u0435\u0440\u043E\u044F \u0437\u0430 ${fmtNum(DECK_HERO_COIN_PRICE)} \u0438\u0433\u0440\u043E\u0432\u044B\u0445 \u043C\u043E\u043D\u0435\u0442 \u0438 \u0432\u044B\u0431\u0440\u0430\u0442\u044C \u0434\u043B\u044F \u044D\u0442\u043E\u0439 \u043A\u043E\u043B\u043E\u0434\u044B`;
+      } else {
+        action.textContent = "\u0412\u044B\u0431\u0440\u0430\u0442\u044C \u0433\u0435\u0440\u043E\u044F";
+        action.title = `\u0412\u044B\u0431\u0440\u0430\u0442\u044C \xAB${hero.name}\xBB \u0434\u043B\u044F \u043A\u043E\u043B\u043E\u0434\u044B \xAB${context.deckName}\xBB`;
+      }
+      option.appendChild(action);
+      action.addEventListener("click", () => {
+        const current = deckHeroPickerContext;
+        if (!current) return;
+        const latestHero = DECK_HERO_BY_ID.get(hero.id);
+        if (!latestHero || latestHero.faction !== current.faction) return;
+        if (latestHero.tier === "coin" && !isDeckHeroUnlocked(latestHero.id)) {
+          if (shardsGet() < DECK_HERO_COIN_PRICE) {
+            renderDeckHeroPickerGrid();
+            return;
+          }
+          shardsAdd(-DECK_HERO_COIN_PRICE);
+          meta.deckHeroesOwned = [.../* @__PURE__ */ new Set([...meta.deckHeroesOwned ?? [], latestHero.id])];
+          metaSave();
+          renderShards();
+          const picked3 = current.onSelect(latestHero.id);
+          if (picked3 === false) {
+            shardsAdd(DECK_HERO_COIN_PRICE);
+            meta.deckHeroesOwned = (meta.deckHeroesOwned ?? []).filter((id) => id !== latestHero.id);
+            metaSave();
+            renderShards();
+            renderDeckHeroPickerGrid();
+            showToast("\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u043D\u0430\u0437\u043D\u0430\u0447\u0438\u0442\u044C \u0433\u0435\u0440\u043E\u044F; \u043F\u043E\u043A\u0443\u043F\u043A\u0430 \u043E\u0442\u043C\u0435\u043D\u0435\u043D\u0430");
+            return;
+          }
+          renderDeckGrid();
+          updateDecksFooter();
+          buildMenu(false);
+          closeDeckHeroPicker();
+          showToast(`\xAB${latestHero.name}\xBB \u043E\u0442\u043A\u0440\u044B\u0442 \u0437\u0430 ${fmtNum(DECK_HERO_COIN_PRICE)} \u{1FA99} \u0438 \u0432\u044B\u0431\u0440\u0430\u043D \u0434\u043B\u044F \u043A\u043E\u043B\u043E\u0434\u044B`);
+          return;
+        }
+        if (!isDeckHeroUnlocked(latestHero.id)) return;
+        const picked2 = current.onSelect(latestHero.id);
+        if (picked2 === false) return;
+        Audio_.uiClick();
+        renderDeckGrid();
+        updateDecksFooter();
+        buildMenu(false);
+        closeDeckHeroPicker();
+        showToast(`\u0413\u0435\u0440\u043E\u0439 \xAB${latestHero.name}\xBB \u0432\u044B\u0431\u0440\u0430\u043D \u0434\u043B\u044F \u043A\u043E\u043B\u043E\u0434\u044B`);
+      });
+      grid.appendChild(option);
+    }
+  }
+  function openDeckHeroPicker(faction, deckName, selectedId, onSelect, returnFocus = null) {
+    const modal = document.getElementById("deckHeroPickerModal");
+    const title = document.getElementById("deckHeroPickerTitle");
+    const hint = document.getElementById("deckHeroPickerHint");
+    if (!modal || !title || !hint || !FACTION_IDS.includes(faction)) return;
+    deckHeroPickerReturnFocus = returnFocus ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+    const hero = resolveDeckHero(selectedId, faction);
+    deckHeroPickerContext = { faction, deckName, selectedId: hero?.id ?? faction, onSelect };
+    title.textContent = deckName ? `\u0413\u0435\u0440\u043E\u0439 \u043A\u043E\u043B\u043E\u0434\u044B \xAB${deckName}\xBB` : "\u0412\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u0433\u0435\u0440\u043E\u044F \u043A\u043E\u043B\u043E\u0434\u044B";
+    hint.textContent = `${FACTION_RU[faction]} \xB7 \u0434\u043E\u0441\u0442\u0443\u043F\u043D\u044B \u0442\u043E\u043B\u044C\u043A\u043E \u0433\u0435\u0440\u043E\u0438 \u044D\u0442\u043E\u0439 \u0444\u0440\u0430\u043A\u0446\u0438\u0438. \u041F\u043E\u0440\u0442\u0440\u0435\u0442 \u0433\u0435\u0440\u043E\u044F \u0445\u0440\u0430\u043D\u0438\u0442\u0441\u044F \u043E\u0442\u0434\u0435\u043B\u044C\u043D\u043E \u043E\u0442 \u043A\u0430\u0440\u0442\u043E\u0447\u043D\u043E\u0439 \u043E\u0431\u043B\u043E\u0436\u043A\u0438.`;
+    renderDeckHeroPickerGrid();
+    modal.classList.remove("hidden");
+    document.getElementById("btnDeckHeroPickerClose")?.focus();
+  }
+  function openSavedDeckHeroPicker(deckId, returnFocus = null) {
+    const deck = getAllDecksForGrid().find((item) => item.id === deckId);
+    if (!deck || !FACTION_IDS.includes(deck.faction)) {
+      showToast("\u041A\u043E\u043B\u043E\u0434\u0430 \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D\u0430");
+      return;
+    }
+    openDeckHeroPicker(deck.faction, deck.name, deck.heroId, (heroId) => {
+      const ok = saveDeckHeroSelection(deck.id, deck.faction, heroId);
+      if (!ok) return false;
+      return true;
+    }, returnFocus);
+  }
+  function openEditorDeckHeroPicker() {
+    if (!editing) return;
+    const heroId = resolveDeckHero(editing.heroId, editing.faction)?.id ?? editing.faction;
+    openDeckHeroPicker(editing.faction, editing.name || "\u041D\u043E\u0432\u0430\u044F \u043A\u043E\u043B\u043E\u0434\u0430", heroId, (selectedId) => {
+      if (!editing || !saveDeckHeroSelectionForEditor(selectedId)) return false;
+      renderDeckHeroPreview();
+      return true;
+    }, document.getElementById("btnDbHeroPicker"));
   }
   function deckPlayProblem(deck) {
     const minimum = MIN_DECK_SIZE;
@@ -27279,11 +28423,17 @@
     const info = document.getElementById("decksSelInfo");
     const btnEdit = document.getElementById("btnDecksEdit");
     const btnPlayDeck = document.getElementById("btnDecksPlay");
+    const btnHero = document.getElementById("btnDecksHero");
     const btnExp = document.getElementById("btnDecksExport");
     const btnClone = document.getElementById("btnDecksClone");
     const btnDel = document.getElementById("btnDecksDelete");
-    if (info) info.textContent = sel2 ? `${sel2.name} \xB7 ${FACTION_RU[sel2.faction] ?? sel2.faction} \xB7 ${sel2.cards.length} \u043A\u0430\u0440\u0442` : "\u0412\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u043A\u043E\u043B\u043E\u0434\u0443";
+    const selectedHero = sel2 ? resolveDeckHero(sel2.heroId, sel2.faction) : void 0;
+    if (info) info.textContent = sel2 ? `${sel2.name} \xB7 ${FACTION_RU[sel2.faction] ?? sel2.faction} \xB7 ${sel2.cards.length} \u043A\u0430\u0440\u0442 \xB7 ${selectedHero?.name ?? "\u0433\u0435\u0440\u043E\u0439 \u043D\u0435 \u0432\u044B\u0431\u0440\u0430\u043D"}` : "\u0412\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u043A\u043E\u043B\u043E\u0434\u0443";
     if (btnEdit) btnEdit.disabled = !sel2;
+    if (btnHero) {
+      btnHero.disabled = !sel2 || !deckHeroesForFaction(sel2.faction).length;
+      btnHero.title = sel2 && selectedHero ? `\u0413\u0435\u0440\u043E\u0439 \u043A\u043E\u043B\u043E\u0434\u044B: ${selectedHero.name} \xB7 \u0441\u043C\u0435\u043D\u0438\u0442\u044C` : "\u0412\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u043A\u043E\u043B\u043E\u0434\u0443";
+    }
     if (btnPlayDeck) {
       const problem = sel2 ? deckPlayProblem(sel2) : null;
       btnPlayDeck.disabled = !sel2 || !!problem;
@@ -27305,6 +28455,7 @@
     }
   }
   function openDecksScreen() {
+    if (!requireStarterDeckUnlock()) return;
     setAppRoute("decks");
     $("menu").classList.add("hidden");
     $("homeScreen")?.classList.add("hidden");
@@ -27398,12 +28549,48 @@
   document.getElementById("deckArtPickerModal")?.addEventListener("click", (ev) => {
     if (ev.target === document.getElementById("deckArtPickerModal")) closeDeckArtPicker();
   });
+  document.getElementById("btnDeckHeroPickerClose")?.addEventListener("click", closeDeckHeroPicker);
+  document.getElementById("btnDeckHeroPickerDone")?.addEventListener("click", closeDeckHeroPicker);
+  document.getElementById("deckHeroPickerModal")?.addEventListener("click", (ev) => {
+    if (ev.target === document.getElementById("deckHeroPickerModal")) closeDeckHeroPicker();
+  });
+  document.getElementById("deckHeroPickerModal")?.addEventListener("keydown", (ev) => {
+    const key = ev.key;
+    if (key === "Escape") {
+      ev.preventDefault();
+      ev.stopPropagation();
+      closeDeckHeroPicker();
+      return;
+    }
+    if (key !== "Tab") return;
+    const modal = document.getElementById("deckHeroPickerModal");
+    if (!modal) return;
+    const focusable = [...modal.querySelectorAll("button:not(:disabled)")].filter((node) => !node.hidden && node.getAttribute("aria-hidden") !== "true");
+    if (!focusable.length) {
+      ev.preventDefault();
+      modal.focus();
+      return;
+    }
+    const first = focusable[0], last = focusable[focusable.length - 1];
+    if (ev.shiftKey && document.activeElement === first) {
+      ev.preventDefault();
+      last.focus();
+    } else if (!ev.shiftKey && document.activeElement === last) {
+      ev.preventDefault();
+      first.focus();
+    }
+  });
   document.getElementById("btnDecksClose")?.addEventListener("click", () => {
     Audio_.uiClick();
     navigateApp("back");
   });
   document.getElementById("btnDecksPlay")?.addEventListener("click", () => {
     if (decksSelectedId) launchDeckForBattle(decksSelectedId);
+  });
+  document.getElementById("btnDecksHero")?.addEventListener("click", (ev) => {
+    if (!decksSelectedId) return;
+    Audio_.uiClick();
+    openSavedDeckHeroPicker(decksSelectedId, ev.currentTarget);
   });
   document.getElementById("btnDecksCollection")?.addEventListener("click", () => {
     Audio_.uiClick();
@@ -27455,6 +28642,7 @@
     const newId = `custom-${Date.now().toString(36)}`;
     const copy = { id: newId, name: `${src.name} (\u043A\u043E\u043F\u0438\u044F)`, faction: src.faction, cards: src.cards.slice(), avatarCardId: src.avatarCardId ?? suggestedDeckArt(src.cards)?.id ?? src.cards[0], updated: Date.now() };
     upsertCustomDeck(copy);
+    saveDeckHeroSelection(newId, src.faction, src.heroId);
     decksSelectedId = newId;
     renderDeckGrid();
     showToast(`\u041A\u043B\u043E\u043D: ${copy.name}`);
@@ -27468,6 +28656,7 @@
     }
     if (!window.confirm(`\u0423\u0434\u0430\u043B\u0438\u0442\u044C \u043A\u043E\u043B\u043E\u0434\u0443 \xAB${sel2.name}\xBB?`)) return;
     deleteCustomDeck(sel2.id);
+    forgetDeckHeroSelection(sel2.id);
     decksSelectedId = null;
     renderDeckGrid();
     showToast("\u041A\u043E\u043B\u043E\u0434\u0430 \u0443\u0434\u0430\u043B\u0435\u043D\u0430");
@@ -27483,7 +28672,8 @@
       name: sel2.name,
       faction: sel2.faction,
       counts,
-      avatarCardId: sel2.avatarCardId ?? null
+      avatarCardId: sel2.avatarCardId ?? null,
+      heroId: sel2.heroId
     };
     openCollectionScreen();
     const tabB = document.getElementById("tabBuilder");
@@ -27504,13 +28694,19 @@
   window.closeDecksScreen = closeDecksScreen;
   window.renderDeckGrid = renderDeckGrid;
   function openHomeScreen() {
+    setAppRoute("home");
     if (!$("battle").classList.contains("hidden")) {
+      const leavingTutorial = battle.tutLesson > 0 || battle.launchMode === "tut";
       battle.tutCleanup();
       battle.stop();
+      if (leavingTutorial) {
+        battle.tutLesson = 0;
+        battle.launchMode = "menu";
+        battle.practice = false;
+      }
       $("battle").classList.add("hidden");
     }
     $("gameover").classList.add("hidden");
-    setAppRoute("home");
     Audio_.uiClick();
     buildMenu(false);
     $("decksScreen")?.classList.add("hidden");
@@ -27525,6 +28721,7 @@
     $("menu").classList.remove("hidden");
     document.querySelectorAll(".topTab").forEach((el2) => el2.classList.toggle("active", el2.dataset.tab === "home"));
     syncTopWallet();
+    if (!meta.introComplete) openIntroFlow();
   }
   function closeHomeScreen() {
     document.getElementById("homeScreen")?.classList.add("hidden");
@@ -27668,7 +28865,6 @@
   }
   function launchEvent(def) {
     if (def.launch === "campaign") {
-      $("eventsScreen").classList.add("hidden");
       openCampaign();
       return;
     }
@@ -27809,9 +29005,11 @@
     }
     document.getElementById("eventsScreen")?.classList.add("eventsV3");
     updateQuestCountdowns();
+    animateUiSurface(grid, "ecSubpanelEnter", 240);
   }
   window.ecEvents = () => EVENT_DEFS.map((d) => ({ id: d.id, ...eventState(d) }));
   function openEventsScreen() {
+    if (!requireStarterDeckUnlock()) return;
     setAppRoute("events");
     $("menu").classList.add("hidden");
     $("homeScreen")?.classList.add("hidden");
@@ -28018,7 +29216,11 @@
         const fb = avaEl.querySelector(".ecOppFallback");
         if (fb) fb.textContent = isRnd ? "?" : FACTION_SIGIL[foeFac] ?? "?";
         if (isRnd) oppImg.style.opacity = "0";
-        else artChain(oppImg, [`/art/${foeFac}/${HUB_ART[foeFac]}.png`, `img/menu_${foeFac.toLowerCase()}.jpg`]);
+        else {
+          const foeHub = HUB_ART[foeFac] ? db.get(HUB_ART[foeFac]) : void 0;
+          const foeArtUrl = foeHub ? cardArtworkUrl(foeHub) : `/art/${foeFac}/${HUB_ART[foeFac]}.png`;
+          artChain(oppImg, [foeArtUrl, `img/menu_${foeFac.toLowerCase()}.jpg`]);
+        }
       }
     }
     const practice = !!document.getElementById("chkPractice")?.checked;
@@ -28062,11 +29264,18 @@
   }
   function buildMenu(showTour = true) {
     const customs = loadCustomDecks();
-    const validSelected = menuSelectedDeckId && (deckById.has(menuSelectedDeckId) || customs.some((d) => d.id === menuSelectedDeckId));
-    if (!validSelected) {
-      menuSelectedDeckId = starterDeckForFaction(picked)?.id ?? picked;
+    if (!meta.starterDecksUnlocked) {
+      menuSelectedDeckId = null;
       saveMenuDeck();
+    } else {
+      const validSelected = menuSelectedDeckId && (deckById.has(menuSelectedDeckId) || customs.some((d) => d.id === menuSelectedDeckId));
+      if (!validSelected) {
+        menuSelectedDeckId = starterDeckForFaction(picked)?.id ?? picked;
+        saveMenuDeck();
+      }
     }
+    const selectedCustomDeck = customs.find((deck) => deck.id === menuSelectedDeckId);
+    const heroDeckIdForFaction = (faction) => selectedCustomDeck?.faction === faction ? selectedCustomDeck.id : starterDeckForFaction(faction)?.id ?? faction;
     const mh = $("menuHeroes");
     if (mh) {
       mh.innerHTML = FACTION_IDS.map((f) => `<div class="heroChip${f === picked ? " sel" : ""}" data-f="${f}" role="button" tabindex="0"
@@ -28078,10 +29287,13 @@
       mh.querySelectorAll(".heroChip").forEach((chip) => {
         const f = chip.dataset.f;
         const i = f ? FACTION_IDS.indexOf(f) : -1;
-        if (f && i >= 0) artChain(
-          chip.querySelector(".orbIcon"),
-          [`/heroes/${f}`, `img/ico_fac_${i}.png`]
-        );
+        if (f && i >= 0) {
+          const hero = deckHeroForDeck(heroDeckIdForFaction(f), f);
+          chip.dataset.heroId = hero?.id ?? f;
+          chip.title = `${FACTION_RU[f]} \xB7 \u0433\u0435\u0440\u043E\u0439 ${hero?.name ?? FACTION_RU[f]} \u2014 \u0431\u044B\u0441\u0442\u0440\u043E \u0432\u044B\u0431\u0440\u0430\u0442\u044C \u0444\u0440\u0430\u043A\u0446\u0438\u044E`;
+          chip.setAttribute("aria-label", `\u0411\u044B\u0441\u0442\u0440\u044B\u0439 \u0432\u044B\u0431\u043E\u0440 \u0444\u0440\u0430\u043A\u0446\u0438\u0438 ${FACTION_RU[f]}, \u0433\u0435\u0440\u043E\u0439 ${hero?.name ?? FACTION_RU[f]}`);
+          artChain(chip.querySelector(".orbIcon"), deckHeroArtUrls(hero?.id ?? f, f));
+        }
       });
     }
     const host = $("playerFactions");
@@ -28089,41 +29301,41 @@
     for (let i = 0; i < FACTION_IDS.length; i++) {
       const f = FACTION_IDS[i];
       const hub = HUB_CARD[f] ?? { name: FACTION_RU[f], cls: "", atk: 5, hp: 15, lvl: 1 };
-      const lvl = hub.lvl + Math.floor((meta.facW[f] ?? 0) / 10);
       const node = el("div", "fcard" + (f === picked ? " sel" : ""));
       node.setAttribute("data-f", f);
       node.setAttribute("data-sigil", FACTION_SIGIL[f] ?? "\u25C8");
       node.setAttribute("data-faction", f);
+      const starterHero = deckHeroForDeck(starterDeckForFaction(f)?.id ?? f, f);
+      const heroTitle = starterHero?.name ?? hub.name;
       node.innerHTML = `<div class="fcardArt">
         <span class="fcardArtPh" aria-hidden="true"><img src="img/ico_fac_${i}.png" alt="" onerror="this.style.display='none'"></span>
-        <img class="fcardArtImg" src="" alt="" loading="lazy">
+        <img class="fcardArtImg" src="" alt="" loading="lazy" decoding="async">
         <div class="fcardArtGrad"></div>
-        <div class="fcardFacBadge"><img src="img/ico_fac_${i}.png" alt="${HUB_ELEM_RU[f] ?? ""}" onerror="this.style.display='none'"></div>
-        <span class="fcardLvl">\u0423\u0440. ${lvl}</span>
       </div>
       <div class="fcardBody">
-        <div class="fname">${esc(hub.name)}</div>
+        <div class="fname">${esc(heroTitle)}</div>
         <div class="fclass">${esc(hub.cls)}</div>
-        <div class="fcardSig"><img src="img/ico_fac_${i}.png" alt="" onerror="this.style.display='none'"></div>
-      </div>
-      <div class="fcardStats"><span class="fsAtk" title="\u0423\u0441\u043B\u043E\u0432\u043D\u0430\u044F \u0430\u0442\u0430\u043A\u0430 \u0430\u0440\u0445\u0435\u0442\u0438\u043F\u0430">${hub.atk}</span><span class="fsHp" title="\u0423\u0441\u043B\u043E\u0432\u043D\u043E\u0435 \u0437\u0434\u043E\u0440\u043E\u0432\u044C\u0435 \u0430\u0440\u0445\u0435\u0442\u0438\u043F\u0430">${hub.hp}</span></div>
-      <span class="fcardCheck" title="\u0412\u0430\u0448\u0430 \u0444\u0440\u0430\u043A\u0446\u0438\u044F">\u2713</span>`;
-      node.title = "\u041A\u043B\u0438\u043A \u2014 \u043F\u043E\u0434\u0440\u043E\u0431\u043D\u043E\u0441\u0442\u0438 \u043E \u0444\u0440\u0430\u043A\u0446\u0438\u0438 (\u043E\u043F\u0438\u0441\u0430\u043D\u0438\u0435, \u043C\u0435\u0445\u0430\u043D\u0438\u043A\u0430, \u0441\u043E\u0432\u0435\u0442\u044B, \u043F\u0440\u0438\u043C\u0435\u0440\u044B \u043A\u0430\u0440\u0442)";
+      </div>`;
+      node.title = `\u0413\u0435\u0440\u043E\u0439: ${heroTitle} \xB7 \u043A\u043B\u0438\u043A \u2014 \u043E\u043F\u0438\u0441\u0430\u043D\u0438\u0435 \u0438 \u0432\u044B\u0431\u043E\u0440 \u0444\u0440\u0430\u043A\u0446\u0438\u0438`;
       node.addEventListener("click", () => {
         Audio_.uiClick();
         openFactionModal(f);
       });
       host.appendChild(node);
-      artChain(node.querySelector(".fcardArtImg"), hubArtUrls(f));
+      artChain(
+        node.querySelector(".fcardArtImg"),
+        deckHeroArtUrls(starterHero?.id ?? f, f)
+      );
     }
     if (customs.length) {
       const label = el("div", "menuDeckSectionTitle", "\u041C\u041E\u0418 \u041A\u041E\u041B\u041E\u0414\u042B \xB7 \u0412\u042B\u0411\u0415\u0420\u0418\u0422\u0415 \u0421\u041E\u0425\u0420\u0410\u041D\u0401\u041D\u041D\u0423\u042E \u041A\u041E\u041B\u041E\u0414\u0423");
       host.appendChild(label);
       for (const deck of customs) {
         const f = deck.faction;
+        const customDeckHero = deckHeroForDeck(deck.id, f);
         const avatar = deck.avatarCardId && deck.cards.includes(deck.avatarCardId) ? db.get(deck.avatarCardId) : void 0;
         const artCard = avatar ?? suggestedDeckArt(deck.cards);
-        const artUrls = artCard ? [`/art/${encodeURIComponent(artCard.faction)}/${encodeURIComponent(artCard.id)}.png`, `/heroes/${encodeURIComponent(f)}`] : [`/heroes/${encodeURIComponent(f)}`, `img/menu_${f.toLowerCase()}.jpg`];
+        const artUrls = artCard ? [cardArtworkUrl(artCard), `/heroes/${encodeURIComponent(f)}`] : [`/heroes/${encodeURIComponent(f)}`, `img/menu_${f.toLowerCase()}.jpg`];
         const node = el("div", "fcard customDeckCard" + (deck.id === menuSelectedDeckId ? " sel" : ""));
         node.dataset.deckId = deck.id;
         node.dataset.f = f;
@@ -28131,7 +29343,7 @@
         node.dataset.format = "constructed";
         node.setAttribute("role", "button");
         node.setAttribute("tabindex", "0");
-        node.setAttribute("aria-label", `\u0412\u044B\u0431\u0440\u0430\u0442\u044C \u043A\u043E\u043B\u043E\u0434\u0443 \xAB${deck.name}\xBB, ${deck.cards.length} \u043A\u0430\u0440\u0442`);
+        node.setAttribute("aria-label", `\u0412\u044B\u0431\u0440\u0430\u0442\u044C \u043A\u043E\u043B\u043E\u0434\u0443 \xAB${deck.name}\xBB, ${deck.cards.length} \u043A\u0430\u0440\u0442; \u0433\u0435\u0440\u043E\u0439 ${customDeckHero?.name ?? FACTION_RU[f] ?? f}`);
         node.innerHTML = `<div class="fcardArt">
           <span class="fcardArtPh" aria-hidden="true"><img src="" alt=""></span>
           <img class="fcardArtImg" src="" alt="" loading="lazy" decoding="async">
@@ -28147,7 +29359,7 @@
         const ph = node.querySelector(".fcardArtPh img");
         artChain(ph, [`/heroes/${encodeURIComponent(f)}`, `img/ico_fac_${FACTION_IDS.indexOf(f)}.png`]);
         artChain(node.querySelector(".fcardArtImg"), artUrls);
-        node.title = `\u0412\u044B\u0431\u0440\u0430\u0442\u044C \u043A\u043E\u043B\u043E\u0434\u0443 \xAB${deck.name}\xBB \xB7 ${deck.cards.length} \u043A\u0430\u0440\u0442`;
+        node.title = `\u0412\u044B\u0431\u0440\u0430\u0442\u044C \u043A\u043E\u043B\u043E\u0434\u0443 \xAB${deck.name}\xBB \xB7 ${deck.cards.length} \u043A\u0430\u0440\u0442 \xB7 \u0433\u0435\u0440\u043E\u0439: ${customDeckHero?.name ?? FACTION_RU[f] ?? f}`;
         node.addEventListener("click", () => selectMainMenuDeck(deck.id));
         node.addEventListener("keydown", (ev) => {
           const key = ev.key;
@@ -28180,14 +29392,22 @@
     }
     renderShards();
     tutGatePractice();
-    if (showTour && !meta.tutDone) window.setTimeout(() => tourShow(), 400);
+    if (showTour && meta.introComplete && !meta.tutDone) window.setTimeout(() => tourShow(), 400);
     const cnt = $("menuCardCount");
     if (cnt) cnt.textContent = String(ALL_CARDS.length);
-    sel("deckPick").innerHTML = deckList.filter((d) => d.id !== "Starter").map((d) => `<option value="${esc(d.id)}">${esc(d.name)} \xB7 ${d.format === STARTER_DECK_FORMAT ? "\u0441\u0442\u0430\u0440\u0442\u043E\u0432\u0430\u044F" : "Constructed"} (${d.cards.length})</option>`).join("") + (customs.length ? `<optgroup label="\u041C\u043E\u0438 \u043A\u043E\u043B\u043E\u0434\u044B">${customs.map((d) => `<option value="${esc(d.id)}">${esc(d.name)} (${d.cards.length} \u043A\u0430\u0440\u0442)</option>`).join("")}</optgroup>` : "");
-    sel("deckPick").value = menuSelectedDeckId ?? "";
-    if (!sel("deckPick").value) {
-      menuSelectedDeckId = starterDeckForFaction(picked)?.id ?? picked;
-      sel("deckPick").value = menuSelectedDeckId;
+    const deckPicker = sel("deckPick");
+    if (!meta.starterDecksUnlocked) {
+      deckPicker.innerHTML = '<option value="">\u{1F512} \u0421\u0442\u0430\u0440\u0442\u043E\u0432\u044B\u0435 \u043A\u043E\u043B\u043E\u0434\u044B \u043E\u0442\u043A\u0440\u043E\u044E\u0442\u0441\u044F \u043F\u043E\u0441\u043B\u0435 \u0432\u0441\u0442\u0443\u043F\u0438\u0442\u0435\u043B\u044C\u043D\u044B\u0445 \u0438\u0441\u043F\u044B\u0442\u0430\u043D\u0438\u0439</option>';
+      deckPicker.value = "";
+      deckPicker.disabled = true;
+    } else {
+      deckPicker.disabled = false;
+      deckPicker.innerHTML = deckList.filter((d) => d.id !== "Starter").map((d) => `<option value="${esc(d.id)}">${esc(d.name)} \xB7 ${d.format === STARTER_DECK_FORMAT ? "\u0441\u0442\u0430\u0440\u0442\u043E\u0432\u0430\u044F" : "Constructed"} (${d.cards.length})</option>`).join("") + (customs.length ? `<optgroup label="\u041C\u043E\u0438 \u043A\u043E\u043B\u043E\u0434\u044B">${customs.map((d) => `<option value="${esc(d.id)}">${esc(d.name)} (${d.cards.length} \u043A\u0430\u0440\u0442)</option>`).join("")}</optgroup>` : "");
+      deckPicker.value = menuSelectedDeckId ?? "";
+      if (!deckPicker.value) {
+        menuSelectedDeckId = starterDeckForFaction(picked)?.id ?? picked;
+        deckPicker.value = menuSelectedDeckId;
+      }
     }
     applyMenuBg();
     updatePlayGate();
@@ -28196,6 +29416,10 @@
     renderHomeQuests();
   }
   function selectMainMenuDeck(deckId) {
+    if (!meta.starterDecksUnlocked) {
+      openIntroFlow();
+      return;
+    }
     const deck = resolveDeck(deckId, deckList);
     if (!deck) return;
     menuSelectedDeckId = deckId;
@@ -29411,13 +30635,22 @@
   });
   function updatePlayGate() {
     const b = btn("btnPlay");
+    const ph = document.getElementById("playHint");
+    if (!meta.starterDecksUnlocked && battle.tutLesson <= 0) {
+      b.disabled = true;
+      b.title = "\u0421\u043D\u0430\u0447\u0430\u043B\u0430 \u043F\u0440\u043E\u0439\u0434\u0438\u0442\u0435 \u0432\u0441\u0442\u0443\u043F\u0438\u0442\u0435\u043B\u044C\u043D\u0443\u044E \u0438\u0441\u0442\u043E\u0440\u0438\u044E \u0438 \u0447\u0435\u0442\u044B\u0440\u0435 \u0443\u0447\u0435\u0431\u043D\u044B\u0435 \u0441\u0442\u044B\u0447\u043A\u0438";
+      if (ph) {
+        ph.hidden = false;
+        ph.textContent = "\u{1F393} \u0421\u044E\u0436\u0435\u0442\u043D\u044B\u0439 \u043F\u0440\u043E\u043B\u043E\u0433 \u043E\u0431\u044F\u0437\u0430\u0442\u0435\u043B\u0435\u043D: \u0437\u043D\u0430\u043A\u043E\u043C\u0441\u0442\u0432\u043E \u0441 \u0426\u0438\u0442\u0430\u0434\u0435\u043B\u044C\u044E \u2192 4 \u0431\u043E\u0435\u0432\u044B\u0445 \u0438\u0441\u043F\u044B\u0442\u0430\u043D\u0438\u044F \u2192 5 \u0441\u0442\u0430\u0440\u0442\u043E\u0432\u044B\u0445 \u043A\u043E\u043B\u043E\u0434.";
+      }
+      return;
+    }
     const id = sel("deckPick").value;
     const deck = resolveDeck(id, deckList);
     const problem = deck ? deckPlayProblem(deck) : "\u043A\u043E\u043B\u043E\u0434\u0430 \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D\u0430";
     const problems = problem ? [problem] : [];
     b.disabled = problems.length > 0;
     b.title = problems.length > 0 ? `\u041A\u043E\u043B\u043E\u0434\u0430 \u043D\u0435 \u0441\u043E\u0431\u0440\u0430\u043D\u0430: ${problems[0]}` : "\u041D\u0430\u0447\u0430\u0442\u044C \u0431\u043E\u0439";
-    const ph = document.getElementById("playHint");
     if (ph) {
       if (problems.length > 0) {
         ph.hidden = false;
@@ -29451,7 +30684,7 @@
       if (typeof window.fetch !== "function") return null;
       const ctl = new AbortController();
       const timer = window.setTimeout(() => ctl.abort(), 700);
-      const r = await window.fetch(`http://${window.location.hostname}:8080/api/match/start`, {
+      const r = await window.fetch(`${MATCH_HTTP_API()}/api/match/start`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         signal: ctl.signal,
@@ -29533,6 +30766,10 @@
     loadImg(0);
   }
   btn("btnPlay").addEventListener("click", () => {
+    if (!meta.starterDecksUnlocked && battle.tutLesson <= 0) {
+      openIntroFlow();
+      return;
+    }
     audioUnlock();
     musicStart();
     Audio_.uiClick();
@@ -29541,9 +30778,11 @@
       battle.net = null;
     }
     battle.lastWasNet = false;
-    applyBattleBg(picked);
-    battle.playerFaction = picked;
-    battle.playerDeckId = sel("deckPick").value;
+    const trainingMatch = battle.tutLesson > 0;
+    const starter = starterDeckForFaction("Aurites" /* Aurites */);
+    battle.playerFaction = trainingMatch ? "Aurites" /* Aurites */ : picked;
+    battle.playerDeckId = trainingMatch ? starter?.id ?? "Aurites" /* Aurites */ : sel("deckPick").value;
+    applyBattleBg(battle.playerFaction);
     const fromMenu = battle.launchMode === "menu";
     if (battle.launchMode !== "event") battle.eventId = null;
     if (fromMenu) {
@@ -29558,13 +30797,14 @@
       battle.campNode = null;
       battle.eventId = null;
     }
-    battle.launchMode = "menu";
+    battle.launchMode = trainingMatch ? "tut" : "menu";
     void (async () => {
       battle.matchId = fromMenu ? await requestMatchStart() : null;
       battle.start().catch((err) => reportFatal("start", err));
     })();
   });
   btn("btnEndTurn").addEventListener("click", () => battle.endTurnNow());
+  btn("btnFullControl").addEventListener("click", () => battle.setFullControl(!settings.fullControl));
   for (const [hid, sd] of [["playerHero", 0 /* Player */], ["enemyHero", 1 /* Opponent */]]) {
     $(hid).addEventListener("click", () => {
       if (battle.pendingTarget && $(hid).classList.contains("droppable")) {
@@ -29585,6 +30825,12 @@
     if (ev.target === $("graveModal")) $("graveModal").classList.add("hidden");
   });
   document.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape" && !$("replayModal").classList.contains("hidden")) {
+      ev.preventDefault();
+      ev.stopImmediatePropagation();
+      closeReplay();
+      return;
+    }
     if (ev.key === "Escape" && !$("factionModal").classList.contains("hidden")) {
       closeFactionModal();
       return;
@@ -29621,6 +30867,7 @@
       "gameover",
       "cardModal",
       "graveModal",
+      "introModal",
       "journalModal",
       "replayModal",
       "factionModal",
@@ -30147,13 +31394,14 @@
     }
     if (profTab === "hist") {
       bodyHtml = meta.history.slice(0, 20).map((h) => {
-        const rp = (meta.replays ?? []).some((r) => r.ts === h.ts);
-        return `<div class="jl ${h.win ? "you" : "foe"}">${h.win ? "\u2714 \u041F\u043E\u0431\u0435\u0434\u0430" : "\u2718 \u041F\u043E\u0440\u0430\u0436\u0435\u043D\u0438\u0435"} \xB7 \u0437\u0430 ${FACTION_RU[h.fac]}
-        \xB7 vs ${esc(h.foe ?? "\u0418\u0418")}${h.efac ? ` (${FACTION_RU[h.efac]})` : ""} \xB7 ${h.turns} \u0445.
-        \xB7 ${new Date(h.ts).toLocaleDateString("ru-RU")}${h.practice ? " \xB7 \u0442\u0440\u0435\u043D\u0438\u0440\u043E\u0432\u043A\u0430" : ""}
-        ${rp ? `<button class="btn replayBtn" data-ts="${h.ts}" style="padding:.1rem .5rem;font-size:.64rem;margin-left:.4rem">\u25B6 \u0420\u0435\u043F\u043B\u0435\u0439</button>` : ""}</div>`;
+        const replay = (meta.replays ?? []).find((r) => r.ts === h.ts);
+        const facName = FACTION_RU[h.fac] ?? h.fac;
+        return `<div class="jl ${h.win ? "you" : "foe"} replayHistoryRow"><span>${h.win ? "\u2714 \u041F\u043E\u0431\u0435\u0434\u0430" : "\u2718 \u041F\u043E\u0440\u0430\u0436\u0435\u043D\u0438\u0435"} \xB7 \u0437\u0430 ${esc(facName)}
+        \xB7 vs ${esc(h.foe ?? "\u0418\u0418")}${h.efac ? ` (${esc(FACTION_RU[h.efac] ?? h.efac)})` : ""} \xB7 ${h.turns} \u0445.
+        \xB7 ${new Date(h.ts).toLocaleDateString("ru-RU")}${h.practice ? " \xB7 \u0442\u0440\u0435\u043D\u0438\u0440\u043E\u0432\u043A\u0430" : ""}</span>
+        ${replay ? `<button class="btn replayBtn${replay.stats ? " hasRecap" : ""}" data-ts="${h.ts}" aria-label="\u041E\u0442\u043A\u0440\u044B\u0442\u044C \u0440\u0430\u0437\u0431\u043E\u0440 \u043C\u0430\u0442\u0447\u0430">${replay.stats ? "\u2727 \u0420\u0430\u0437\u0431\u043E\u0440" : "\u25B6 \u0420\u0435\u043F\u043B\u0435\u0439"}</button>` : ""}</div>`;
       }).join("") || '<div class="jl">\u041C\u0430\u0442\u0447\u0435\u0439 \u0435\u0449\u0451 \u043D\u0435 \u0431\u044B\u043B\u043E</div>';
-      bodyHtml += '<div class="jl" style="opacity:.7">\u0420\u0435\u043F\u043B\u0435\u0438 \u0445\u0440\u0430\u043D\u044F\u0442\u0441\u044F \u043B\u043E\u043A\u0430\u043B\u044C\u043D\u043E (3 \u043F\u043E\u0441\u043B\u0435\u0434\u043D\u0438\u0445): \u043B\u043E\u0433 \u0441\u043E\u0431\u044B\u0442\u0438\u0439 \u0434\u0432\u0438\u0436\u043A\u0430 \u0441 \u0440\u0430\u0437\u0431\u0438\u0432\u043A\u043E\u0439 \u043F\u043E \u0445\u043E\u0434\u0430\u043C.</div>';
+      bodyHtml += '<div class="rpHistoryFoot"><b>\u0420\u0435\u043F\u043B\u0435\u0438 \u0445\u0440\u0430\u043D\u044F\u0442\u0441\u044F \u043B\u043E\u043A\u0430\u043B\u044C\u043D\u043E \xB7 3 \u043F\u043E\u0441\u043B\u0435\u0434\u043D\u0438\u0445</b><span>\u041D\u043E\u0432\u044B\u0435 \u043C\u0430\u0442\u0447\u0438 \u043F\u043E\u043B\u0443\u0447\u0430\u044E\u0442 \u0441\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u0447\u0435\u0441\u043A\u0443\u044E \u0441\u0432\u043E\u0434\u043A\u0443 \u0438 \u0444\u0438\u043B\u044C\u0442\u0440\u0443\u0435\u043C\u0443\u044E \u0445\u0440\u043E\u043D\u043E\u043B\u043E\u0433\u0438\u044E.</span></div>';
     }
     if (profTab === "fr") {
       const rows = (meta.friends ?? []).map((f) => {
@@ -30174,6 +31422,7 @@
     updateQuestCountdowns();
     syncProfile();
     $("profileModal").classList.remove("hidden");
+    animateUiSurface($("profBody"), "ecSubpanelEnter", 240);
   }
   document.addEventListener("click", (ev) => {
     const target = ev.target;
@@ -30210,37 +31459,310 @@
       showToast("\u0420\u0443\u0431\u0430\u0448\u043A\u0430 \u0441\u0431\u0440\u043E\u0448\u0435\u043D\u0430 \u043D\u0430 \u043A\u043B\u0430\u0441\u0441\u0438\u043A\u0443");
     }
   });
+  var REPLAY_KIND_LABEL = {
+    play: "\u0420\u043E\u0437\u044B\u0433\u0440\u044B\u0448",
+    combat: "\u0411\u043E\u0439",
+    effect: "\u042D\u0444\u0444\u0435\u043A\u0442",
+    resource: "\u0420\u0435\u0441\u0443\u0440\u0441",
+    system: "\u0421\u043E\u0431\u044B\u0442\u0438\u0435"
+  };
+  var REPLAY_KIND_GLYPH = {
+    play: "\u2726",
+    combat: "\u2694",
+    effect: "\u2727",
+    resource: "\u25C8",
+    system: "\u2022"
+  };
+  var REPLAY_EVENT_KIND = {
+    ["CardPlayed" /* CardPlayed */]: "play",
+    ["CreatureSummoned" /* CreatureSummoned */]: "play",
+    ["SpellCast" /* SpellCast */]: "play",
+    ["SpellCopied" /* SpellCopied */]: "play",
+    ["RunePlayed" /* RunePlayed */]: "play",
+    ["RitualPlaced" /* RitualPlaced */]: "play",
+    ["RitualResolved" /* RitualResolved */]: "play",
+    ["StackPushed" /* StackPushed */]: "play",
+    ["StackResolved" /* StackResolved */]: "play",
+    ["CreatureAttacks" /* CreatureAttacks */]: "combat",
+    ["CreatureDamaged" /* CreatureDamaged */]: "combat",
+    ["CreatureHealed" /* CreatureHealed */]: "combat",
+    ["CreatureDeath" /* CreatureDeath */]: "combat",
+    ["PlayerDamage" /* PlayerDamage */]: "combat",
+    ["PlayerHeal" /* PlayerHeal */]: "combat",
+    ["PlayerDeath" /* PlayerDeath */]: "combat",
+    ["StatusApplied" /* StatusApplied */]: "effect",
+    ["StatusExpired" /* StatusExpired */]: "effect",
+    ["CreatureSilenced" /* CreatureSilenced */]: "effect",
+    ["CreatureBounced" /* CreatureBounced */]: "effect",
+    ["CreatureStolen" /* CreatureStolen */]: "effect",
+    ["CardStolen" /* CardStolen */]: "effect",
+    ["CardDrawn" /* CardDrawn */]: "resource",
+    ["CardBurned" /* CardBurned */]: "resource",
+    ["CardDiscarded" /* CardDiscarded */]: "resource",
+    ["ManaChanged" /* ManaChanged */]: "resource",
+    ["EchoGained" /* EchoGained */]: "resource",
+    ["EchoSpent" /* EchoSpent */]: "resource",
+    ["RuneTick" /* RuneTick */]: "resource",
+    ["RuneExpired" /* RuneExpired */]: "resource"
+  };
+  var activeReplay = null;
+  var activeReplayLines = [];
+  var replayPlaybackLines = [];
+  var replayTimer = 0;
+  var replayIndex = 0;
+  var replayReturnFocus = null;
+  function replayEventText(event) {
+    if (typeof event.text === "string" && event.text.trim()) return event.text.trim();
+    const card = event.cardName ? `\xAB${event.cardName}\xBB` : "";
+    const value = Number.isFinite(event.value) ? Number(event.value) : 0;
+    switch (event.type) {
+      case "CardPlayed" /* CardPlayed */:
+        return `\u0420\u0430\u0437\u044B\u0433\u0440\u0430\u043D\u0430 \u043A\u0430\u0440\u0442\u0430 ${card || "\u0431\u0435\u0437 \u043D\u0430\u0437\u0432\u0430\u043D\u0438\u044F"}`;
+      case "CreatureSummoned" /* CreatureSummoned */:
+        return `${card || "\u0421\u0443\u0449\u0435\u0441\u0442\u0432\u043E"} \u043F\u0440\u0438\u0437\u0432\u0430\u043D\u043E \u043D\u0430 \u043F\u043E\u043B\u0435`;
+      case "SpellCast" /* SpellCast */:
+        return `\u0420\u0430\u0437\u044B\u0433\u0440\u0430\u043D\u043E \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0435 ${card || ""}`.trim();
+      case "SpellCopied" /* SpellCopied */:
+        return `\u0417\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0435 ${card || ""} \u043F\u043E\u0432\u0442\u043E\u0440\u0435\u043D\u043E`.trim();
+      case "RunePlayed" /* RunePlayed */:
+        return `\u0423\u0441\u0442\u0430\u043D\u043E\u0432\u043B\u0435\u043D\u0430 \u0440\u0443\u043D\u0430 ${card || ""}`.trim();
+      case "RitualPlaced" /* RitualPlaced */:
+        return `\u041D\u0430\u0447\u0430\u0442 \u0440\u0438\u0442\u0443\u0430\u043B ${card || ""}`.trim();
+      case "CreatureAttacks" /* CreatureAttacks */:
+        return `${card || "\u0421\u0443\u0449\u0435\u0441\u0442\u0432\u043E"} \u0430\u0442\u0430\u043A\u0443\u0435\u0442`;
+      case "CreatureDamaged" /* CreatureDamaged */:
+        return event.absorbed ? `${card || "\u0421\u0443\u0449\u0435\u0441\u0442\u0432\u043E"} \u043F\u043E\u043B\u043D\u043E\u0441\u0442\u044C\u044E \u0437\u0430\u0449\u0438\u0449\u0435\u043D\u043E \u0449\u0438\u0442\u043E\u043C` : `${card || "\u0421\u0443\u0449\u0435\u0441\u0442\u0432\u043E"} \u043F\u043E\u043B\u0443\u0447\u0430\u0435\u0442 ${value} \u0443\u0440\u043E\u043D\u0430`;
+      case "CreatureHealed" /* CreatureHealed */:
+        return `${card || "\u0421\u0443\u0449\u0435\u0441\u0442\u0432\u043E"} \u0432\u043E\u0441\u0441\u0442\u0430\u043D\u0430\u0432\u043B\u0438\u0432\u0430\u0435\u0442 ${value} \u0437\u0434\u043E\u0440\u043E\u0432\u044C\u044F`;
+      case "CreatureDeath" /* CreatureDeath */:
+        return `${card || "\u0421\u0443\u0449\u0435\u0441\u0442\u0432\u043E"} \u043F\u043E\u0433\u0438\u0431\u0430\u0435\u0442`;
+      case "PlayerDamage" /* PlayerDamage */:
+        return `\u0413\u0435\u0440\u043E\u0439 \u043F\u043E\u043B\u0443\u0447\u0430\u0435\u0442 ${value} \u0443\u0440\u043E\u043D\u0430`;
+      case "PlayerHeal" /* PlayerHeal */:
+        return `\u0413\u0435\u0440\u043E\u0439 \u0432\u043E\u0441\u0441\u0442\u0430\u043D\u0430\u0432\u043B\u0438\u0432\u0430\u0435\u0442 ${value} \u0437\u0434\u043E\u0440\u043E\u0432\u044C\u044F`;
+      case "CardDrawn" /* CardDrawn */:
+        return `\u0412\u0437\u044F\u0442\u0430 \u043A\u0430\u0440\u0442\u0430${card ? ` ${card}` : ""}`;
+      case "ManaChanged" /* ManaChanged */:
+        return `\u041C\u0430\u043D\u0430 \u0438\u0437\u043C\u0435\u043D\u0435\u043D\u0430: ${value}`;
+      case "EchoGained" /* EchoGained */:
+        return "\u041F\u043E\u043B\u0443\u0447\u0435\u043D\u043E \u042D\u0445\u043E";
+      case "EchoSpent" /* EchoSpent */:
+        return `\u041F\u043E\u0442\u0440\u0430\u0447\u0435\u043D\u043E \u042D\u0445\u043E${card ? ` \xB7 ${card}` : ""}`;
+      case "GameOver" /* GameOver */:
+        return event.result === "Draw" /* Draw */ ? "\u041C\u0430\u0442\u0447 \u0437\u0430\u0432\u0435\u0440\u0448\u0438\u043B\u0441\u044F \u043D\u0438\u0447\u044C\u0435\u0439" : "\u041C\u0430\u0442\u0447 \u0437\u0430\u0432\u0435\u0440\u0448\u0451\u043D";
+      default:
+        return card;
+    }
+  }
+  function normalizeReplayLine(raw) {
+    if (Array.isArray(raw)) {
+      const turn2 = Number(raw[0]);
+      return { turn: Number.isFinite(turn2) ? Math.max(0, Math.floor(turn2)) : 0, text: String(raw[1] ?? "") };
+    }
+    const item = raw;
+    const turn = Number(item?.turn);
+    const type = typeof item?.type === "string" ? item.type : void 0;
+    return {
+      turn: Number.isFinite(turn) ? Math.max(0, Math.floor(turn)) : 0,
+      text: typeof item?.text === "string" ? item.text : "",
+      type,
+      side: item?.side === 0 /* Player */ || item?.side === 1 /* Opponent */ ? item.side : void 0,
+      cardName: typeof item?.cardName === "string" ? item.cardName : void 0,
+      value: Number.isFinite(item?.value) ? Number(item?.value) : void 0,
+      absorbed: typeof item?.absorbed === "boolean" ? item.absorbed : void 0
+    };
+  }
+  function replayKind(line) {
+    if (line.type && REPLAY_EVENT_KIND[line.type]) return REPLAY_EVENT_KIND[line.type];
+    const text = line.text.toLocaleLowerCase();
+    if (/(атака|атакует|урон|погиб|восстанавливает|щит|герой получает)/i.test(text)) return "combat";
+    if (/(немот|эффект|статус|накладыва|снимает|оглуш|яд|горени)/i.test(text)) return "effect";
+    if (/(разыгран|разыгрывает|заклинан|призван|существо|ритуал|установлена руна|повторяет)/i.test(text)) return "play";
+    if (/(мана|эха|руна|добрал|взята карта|сброс|сгорела)/i.test(text)) return "resource";
+    return "system";
+  }
+  function replayStatValue(value) {
+    return typeof value === "number" && Number.isFinite(value) ? value : null;
+  }
+  function replayNum(value) {
+    return value === null ? "\u2014" : new Intl.NumberFormat("ru-RU").format(value);
+  }
+  function replayStatCard(label, key, record) {
+    const you = replayStatValue(record.stats?.player?.[key]);
+    const foe = replayStatValue(record.stats?.opponent?.[key]);
+    return `<article class="rpStat"><small>${label}</small>
+    <div class="rpStatNums"><b>${replayNum(you)}</b><i>:</i><b>${replayNum(foe)}</b></div>
+    <div class="rpStatSides"><span>\u0412\u044B</span><span>\u0421\u043E\u043F\u0435\u0440\u043D\u0438\u043A</span></div></article>`;
+  }
+  function replayHasDetailedStats(record) {
+    const keys = ["damageDealt", "cardsPlayed", "creaturesSummoned", "spellsCast", "runesPlayed", "healingDone", "kills", "echoGained", "echoUsed"];
+    return keys.some((key) => replayStatValue(record.stats?.player?.[key]) !== null || replayStatValue(record.stats?.opponent?.[key]) !== null);
+  }
+  function replaySummaryHtml(record) {
+    const playerFaction = FACTION_RU[record.fac] ?? record.fac ?? "\u041D\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043D\u043E";
+    const opponentFaction = record.opponentFaction ? FACTION_RU[record.opponentFaction] ?? record.opponentFaction : "";
+    const matchup = `<section class="rpMatchup" aria-label="\u0423\u0447\u0430\u0441\u0442\u043D\u0438\u043A\u0438 \u043C\u0430\u0442\u0447\u0430">
+    <div class="rpSeat rpSeatYou"><small>\u0412\u0410\u0428\u0410 \u0424\u0420\u0410\u041A\u0426\u0418\u042F</small><b>${esc(playerFaction)}</b><span>\u0418\u0433\u0440\u043E\u043A</span></div>
+    <div class="rpVs" aria-hidden="true"><i></i><b>VS</b><i></i></div>
+    <div class="rpSeat rpSeatFoe"><small>\u0421\u041E\u041F\u0415\u0420\u041D\u0418\u041A</small><b>${esc(record.foe || "\u0421\u043E\u043F\u0435\u0440\u043D\u0438\u043A")}</b><span>${esc(opponentFaction || "\u0424\u0440\u0430\u043A\u0446\u0438\u044F \u043D\u0435 \u0441\u043E\u0445\u0440\u0430\u043D\u0435\u043D\u0430")}</span></div>
+  </section>`;
+    if (!replayHasDetailedStats(record)) return `${matchup}
+    <div class="rpLegacyNote"><b>\u0422\u0435\u043A\u0441\u0442\u043E\u0432\u044B\u0439 \u0440\u0435\u043F\u043B\u0435\u0439</b><span>\u042D\u0442\u043E\u0442 \u043C\u0430\u0442\u0447 \u0441\u043E\u0445\u0440\u0430\u043D\u0451\u043D \u0434\u043E \u043E\u0431\u043D\u043E\u0432\u043B\u0435\u043D\u0438\u044F \u0441\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043A\u0438. \u0425\u0440\u043E\u043D\u043E\u043B\u043E\u0433\u0438\u044F \u0434\u043E\u0441\u0442\u0443\u043F\u043D\u0430; \u043F\u043E\u0434\u0440\u043E\u0431\u043D\u044B\u0435 \u043F\u043E\u043A\u0430\u0437\u0430\u0442\u0435\u043B\u0438 \u043F\u043E\u044F\u0432\u044F\u0442\u0441\u044F \u0432 \u043D\u043E\u0432\u044B\u0445 \u043C\u0430\u0442\u0447\u0430\u0445.</span></div>`;
+    const player = record.stats?.player;
+    const foe = record.stats?.opponent;
+    const echoText = (side) => `${replayNum(replayStatValue(side?.echoGained))} / ${replayNum(replayStatValue(side?.echoUsed))}`;
+    const duration = replayStatValue(record.stats?.durationSecs);
+    return `${matchup}<div class="replayStatsGrid" aria-label="\u0421\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043A\u0430 \u043C\u0430\u0442\u0447\u0430">
+    <article class="rpStat rpStatWide"><small>\u0414\u041B\u0418\u0422\u0415\u041B\u042C\u041D\u041E\u0421\u0422\u042C</small><div class="rpStatNums"><b>${duration === null ? "\u2014" : `${Math.floor(duration / 60)}:${String(Math.floor(duration % 60)).padStart(2, "0")}`}</b></div><div class="rpStatSides"><span>\u0440\u0435\u0430\u043B\u044C\u043D\u043E\u0435 \u0432\u0440\u0435\u043C\u044F</span></div></article>
+    ${replayStatCard("\u0423\u0420\u041E\u041D", "damageDealt", record)}
+    ${replayStatCard("\u041A\u0410\u0420\u0422 \u0421\u042B\u0413\u0420\u0410\u041D\u041E", "cardsPlayed", record)}
+    ${replayStatCard("\u0421\u0423\u0429\u0415\u0421\u0422\u0412 \u041F\u0420\u0418\u0417\u0412\u0410\u041D\u041E", "creaturesSummoned", record)}
+    ${replayStatCard("\u0417\u0410\u041A\u041B\u0418\u041D\u0410\u041D\u0418\u0419", "spellsCast", record)}
+    ${replayStatCard("\u0418\u0421\u0426\u0415\u041B\u0415\u041D\u0418\u0415", "healingDone", record)}
+    ${replayStatCard("\u0420\u0423\u041D", "runesPlayed", record)}
+    ${replayStatCard("\u0423\u0411\u0418\u0419\u0421\u0422\u0412", "kills", record)}
+    <article class="rpStat rpEchoStat"><small>\u042D\u0425\u041E \xB7 \u041F\u041E\u041B\u0423\u0427\u0415\u041D\u041E / \u0418\u0421\u041F\u041E\u041B\u042C\u0417\u041E\u0412\u0410\u041D\u041E</small><div class="rpEchoPair"><b>${echoText(player)}</b><b>${echoText(foe)}</b></div><div class="rpStatSides"><span>\u0412\u044B</span><span>\u0421\u043E\u043F\u0435\u0440\u043D\u0438\u043A</span></div></article>
+  </div>`;
+  }
+  function stopReplayPlayback(reset) {
+    if (replayTimer) {
+      window.clearInterval(replayTimer);
+      replayTimer = 0;
+    }
+    if (reset) {
+      replayIndex = 0;
+      replayPlaybackLines = [];
+      document.querySelectorAll("#replayBody .rpLine").forEach((line) => {
+        line.classList.remove("replayNow");
+        line.removeAttribute("aria-current");
+      });
+    }
+    const playButton = document.getElementById("btnReplayPlay");
+    if (playButton) {
+      playButton.textContent = "\u25B6 \u0412\u043E\u0441\u043F\u0440\u043E\u0438\u0437\u0432\u0435\u0441\u0442\u0438";
+      playButton.setAttribute("aria-pressed", "false");
+    }
+  }
+  function replayDelay() {
+    const speed = Number(document.getElementById("replaySpeed")?.value ?? 1);
+    return Math.max(70, Math.round(280 / (Number.isFinite(speed) && speed > 0 ? speed : 1)));
+  }
+  function replayAdvance() {
+    const line = replayPlaybackLines[replayIndex];
+    if (!line) {
+      stopReplayPlayback(false);
+      return;
+    }
+    replayPlaybackLines.forEach((item) => {
+      item.classList.remove("replayNow");
+      item.removeAttribute("aria-current");
+    });
+    line.classList.add("replayNow");
+    line.setAttribute("aria-current", "step");
+    line.scrollIntoView?.({ block: "nearest", behavior: prefersReducedUiMotion() ? "auto" : "smooth" });
+    replayIndex += 1;
+    if (replayIndex >= replayPlaybackLines.length) stopReplayPlayback(false);
+  }
+  function replayPlay() {
+    if (replayTimer) {
+      stopReplayPlayback(false);
+      return;
+    }
+    if (replayIndex >= replayPlaybackLines.length) {
+      replayIndex = 0;
+      document.querySelectorAll("#replayBody .rpLine").forEach((line) => {
+        line.classList.remove("replayNow");
+        line.removeAttribute("aria-current");
+      });
+      replayPlaybackLines = Array.from(document.querySelectorAll("#replayBody .rpLine"));
+    }
+    if (!replayPlaybackLines.length) replayPlaybackLines = Array.from(document.querySelectorAll("#replayBody .rpLine"));
+    if (!replayPlaybackLines.length) return;
+    const playButton = document.getElementById("btnReplayPlay");
+    if (playButton) {
+      playButton.textContent = "\u2161 \u041F\u0430\u0443\u0437\u0430";
+      playButton.setAttribute("aria-pressed", "true");
+    }
+    replayTimer = window.setInterval(replayAdvance, replayDelay());
+    replayAdvance();
+  }
+  function renderReplayTimeline() {
+    const body = document.getElementById("replayBody");
+    if (!body || !activeReplay) return;
+    stopReplayPlayback(true);
+    const query = (document.getElementById("replaySearch")?.value ?? "").trim().toLocaleLowerCase();
+    const kind = document.getElementById("replayKind")?.value ?? "all";
+    const turn = document.getElementById("replayTurn")?.value ?? "all";
+    const visible = activeReplayLines.map((line, index) => ({ line, index, category: replayKind(line) })).filter((item) => (kind === "all" || item.category === kind) && (turn === "all" || item.line.turn === Number(turn)) && (!query || `${item.line.text} ${item.line.type ?? ""} ${REPLAY_KIND_LABEL[item.category]}`.toLocaleLowerCase().includes(query)));
+    const count = document.getElementById("replayCount");
+    if (count) count.textContent = `\u041F\u043E\u043A\u0430\u0437\u0430\u043D\u043E ${visible.length} \u0438\u0437 ${activeReplayLines.length} \u0441\u043E\u0431\u044B\u0442\u0438\u0439`;
+    body.innerHTML = visible.length ? visible.map(({ line, index, category }) => {
+      const actor = line.side === 0 /* Player */ ? "\u0412\u044B" : line.side === 1 /* Opponent */ ? "\u0421\u043E\u043F\u0435\u0440\u043D\u0438\u043A" : "";
+      const sideClass = line.side === 0 /* Player */ ? "rpSideYou" : line.side === 1 /* Opponent */ ? "rpSideFoe" : "";
+      return `<article class="rpLine rpEvent ${sideClass}" role="listitem" data-i="${index}" data-turn="${line.turn}" data-kind="${category}">
+      <span class="rpEventGlyph rpKind-${category}" aria-hidden="true">${REPLAY_KIND_GLYPH[category]}</span>
+      <div class="rpEventContent"><div class="rpEventMeta"><span class="rpTurn">\u0425\u041E\u0414 ${line.turn}</span>
+        <span class="rpKindTag rpKind-${category}">${REPLAY_KIND_LABEL[category]}</span>${actor ? `<span class="rpActor">${actor}</span>` : ""}</div>
+        <p class="rpEventText">${esc(line.text)}</p></div>
+    </article>`;
+    }).join("") : '<div class="rpEmpty"><b>\u0421\u043E\u0431\u044B\u0442\u0438\u0439 \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D\u043E</b><span>\u0418\u0437\u043C\u0435\u043D\u0438\u0442\u0435 \u0437\u0430\u043F\u0440\u043E\u0441 \u0438\u043B\u0438 \u0441\u0431\u0440\u043E\u0441\u044C\u0442\u0435 \u0444\u0438\u043B\u044C\u0442\u0440\u044B.</span></div>';
+    replayPlaybackLines = Array.from(body.querySelectorAll(".rpLine"));
+  }
+  function resetReplayFilters() {
+    const search = document.getElementById("replaySearch");
+    const kind = document.getElementById("replayKind");
+    const turn = document.getElementById("replayTurn");
+    if (search) search.value = "";
+    if (kind) kind.value = "all";
+    if (turn) turn.value = "all";
+    renderReplayTimeline();
+  }
   function openReplay(ts) {
-    const r = (meta.replays ?? []).find((x) => x.ts === ts);
+    const r = (meta.replays ?? []).find((x) => Number(x.ts) === ts);
     if (!r) {
       showToast("\u0420\u0435\u043F\u043B\u0435\u0439 \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D");
       return;
     }
-    $("replayTitle").textContent = `\u25B6 \u0420\u0435\u043F\u043B\u0435\u0439: ${r.foe} \xB7 ${r.win ? "\u043F\u043E\u0431\u0435\u0434\u0430" : "\u043F\u043E\u0440\u0430\u0436\u0435\u043D\u0438\u0435"} \xB7 ${r.turns} \u0445.`;
-    $("replayBody").innerHTML = r.lines.map((l, i) => `<div class="jl rpLine" data-i="${i}">[\u0445\u043E\u0434 ${l[0]}] ${esc(l[1])}</div>`).join("") || '<div class="jl">\u041B\u043E\u0433 \u043F\u0443\u0441\u0442</div>';
-    $("replayModal").classList.remove("hidden");
-  }
-  var replayTimer = 0;
-  function replayPlay() {
-    if (replayTimer) {
-      window.clearInterval(replayTimer);
-      replayTimer = 0;
-      return;
+    stopReplayPlayback(true);
+    replayReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    activeReplay = r;
+    activeReplayLines = (Array.isArray(r.lines) ? r.lines : []).map(normalizeReplayLine).filter((line) => !!line.text.trim());
+    const isDraw = r.result === "Draw" /* Draw */;
+    const result = isDraw ? "\u041D\u0438\u0447\u044C\u044F" : r.win ? "\u041F\u043E\u0431\u0435\u0434\u0430" : "\u041F\u043E\u0440\u0430\u0436\u0435\u043D\u0438\u0435";
+    const badge = document.getElementById("replayResult");
+    if (badge) {
+      badge.textContent = result;
+      badge.className = `replayResultBadge ${isDraw ? "isDraw" : r.win ? "isWin" : "isLoss"}`;
     }
-    const lines = Array.from(document.querySelectorAll("#replayBody .rpLine"));
-    let i = 0;
-    replayTimer = window.setInterval(() => {
-      if (i >= lines.length) {
-        window.clearInterval(replayTimer);
-        replayTimer = 0;
-        return;
-      }
-      lines.forEach((l) => l.classList.remove("you"));
-      lines[i].classList.add("you");
-      lines[i].scrollIntoView({ block: "nearest" });
-      i += 1;
-    }, 110);
+    $("replayTitle").textContent = "\u0420\u0430\u0437\u0431\u043E\u0440 \u043C\u0430\u0442\u0447\u0430";
+    const date = new Date(Number(r.ts));
+    const dateText = Number.isFinite(date.getTime()) ? date.toLocaleString("ru-RU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "\u0434\u0430\u0442\u0430 \u043D\u0435 \u0441\u043E\u0445\u0440\u0430\u043D\u0435\u043D\u0430";
+    const duration = replayStatValue(r.stats?.durationSecs);
+    $("replayMetaLine").textContent = `${r.foe || "\u0421\u043E\u043F\u0435\u0440\u043D\u0438\u043A"} \xB7 ${Number(r.turns) || 0} \u0445\u043E\u0434\u043E\u0432 \xB7 ${dateText}${duration === null ? "" : ` \xB7 ${Math.floor(duration / 60)}:${String(Math.floor(duration % 60)).padStart(2, "0")}`}`;
+    $("replaySummary").innerHTML = replaySummaryHtml(r);
+    const turnSelect = $("replayTurn");
+    const turns = [...new Set(activeReplayLines.map((line) => line.turn))].sort((a, b) => a - b);
+    turnSelect.innerHTML = '<option value="all">\u0412\u0441\u0435 \u0445\u043E\u0434\u044B</option>' + turns.map((turnNo) => `<option value="${turnNo}">\u0425\u043E\u0434 ${turnNo}</option>`).join("");
+    document.getElementById("replaySearch").value = "";
+    document.getElementById("replayKind").value = "all";
+    document.getElementById("replaySpeed").value = "1";
+    $("replayModal").classList.remove("hidden");
+    renderReplayTimeline();
+    document.getElementById("replaySearch").focus();
   }
+  function closeReplay() {
+    stopReplayPlayback(true);
+    $("replayModal").classList.add("hidden");
+    activeReplay = null;
+    activeReplayLines = [];
+    replayPlaybackLines = [];
+    const focus = replayReturnFocus;
+    replayReturnFocus = null;
+    if (focus?.isConnected) focus.focus();
+  }
+  $("replayModal").addEventListener("click", (ev) => {
+    if (ev.target === $("replayModal")) closeReplay();
+  });
   function inviteFriend(nick) {
     battle.launchMode = "friend";
     battle.friendFoe = nick;
@@ -30525,6 +32047,7 @@
       if (_sealed) attachVolumetric(_sealed.parentElement);
     } catch {
     }
+    animateUiSurface($("shopBody"), "ecSubpanelEnter", 240);
   }
   document.addEventListener("click", (ev) => {
     const t = ev.target;
@@ -30903,15 +32426,31 @@
       return;
     }
     if (t0?.id === "btnReplayClose") {
-      if (replayTimer) {
-        window.clearInterval(replayTimer);
-        replayTimer = 0;
-      }
-      $("replayModal").classList.add("hidden");
+      closeReplay();
+      return;
     }
+    if (t0?.id === "btnReplayReset") {
+      resetReplayFilters();
+      return;
+    }
+  });
+  document.addEventListener("input", (ev) => {
+    const target = ev.target;
+    if (target?.id === "replaySearch") renderReplayTimeline();
   });
   document.addEventListener("change", (ev) => {
     const t0 = ev.target;
+    if (t0?.id === "replayKind" || t0?.id === "replayTurn") {
+      renderReplayTimeline();
+      return;
+    }
+    if (t0?.id === "replaySpeed") {
+      if (replayTimer) {
+        window.clearInterval(replayTimer);
+        replayTimer = window.setInterval(replayAdvance, replayDelay());
+      }
+      return;
+    }
   });
   var BP_LEVELS = 50;
   var BP_STEP = 400;
@@ -31103,6 +32642,7 @@
       attachVolumetric(document.getElementById("bpBody"));
     } catch {
     }
+    animateUiSurface($("bpBody"), "ecSubpanelEnter", 240);
   }
   document.addEventListener("click", (ev) => {
     const t0 = ev.target;
@@ -31253,6 +32793,8 @@
     return meta.campStars?.[node] ?? 0;
   }
   function openCampaign() {
+    if (!requireStarterDeckUnlock()) return;
+    setAppRoute("campaign");
     const regions = FACTION_IDS.map((f) => {
       const nodes = [1, 2, 3, 4].map((n) => {
         const id = `${f}_${n}`;
@@ -31301,8 +32843,8 @@
     \u043D\u0430\u0433\u0440\u0430\u0434\u044B \xD71/\xD71.5/\xD72 (\u0437\u0432\u0451\u0437\u0434\u044B \u2605). \u041A\u0430\u043C\u043F\u0430\u043D\u0438\u044F \u043D\u0435 \u0432\u043B\u0438\u044F\u0435\u0442 \u043D\u0430 \u0440\u0435\u0439\u0442\u0438\u043D\u0433.</div>${loreBox}${regions}`;
     closeAllScreens();
     $("menu").classList.add("hidden");
-    setAppRoute("campaign");
     $("campaignModal").classList.remove("hidden");
+    animateUiSurface($("campBody"), "ecSubpanelEnter", 240);
   }
   document.addEventListener("click", (ev) => {
     const t0 = ev.target;
@@ -31579,7 +33121,267 @@
   function tutCoachHide() {
     $("tutCoach")?.classList.add("hidden");
   }
+  var INTRO_CHAPTERS = ["\u041F\u0440\u043E\u0431\u0443\u0436\u0434\u0435\u043D\u0438\u0435 \u0443 \u0412\u0440\u0430\u0442", "\u041F\u044F\u0442\u044C \u0433\u043E\u043B\u043E\u0441\u043E\u0432", "\u041E\u0441\u043D\u043E\u0432\u044B \u043F\u043E\u0435\u0434\u0438\u043D\u043A\u0430", "\u0418\u0441\u043F\u044B\u0442\u0430\u043D\u0438\u044F", "\u041D\u043E\u0432\u0430\u044F \u0445\u0440\u0430\u043D\u0438\u0442\u0435\u043B\u044C\u043D\u0438\u0446\u0430 \u0426\u0438\u0442\u0430\u0434\u0435\u043B\u0438"];
+  function openIntroFlow() {
+    if (meta.starterDecksUnlocked) {
+      meta.introComplete = true;
+      return;
+    }
+    const modal = document.getElementById("introModal");
+    if (!modal) return;
+    modal.classList.remove("hidden");
+    document.body.classList.add("introOpen");
+    if (modal.dataset.trapBound !== "1") {
+      modal.dataset.trapBound = "1";
+      modal.addEventListener("keydown", (ev) => {
+        if (ev.key === "Escape") {
+          ev.preventDefault();
+          ev.stopPropagation();
+          return;
+        }
+        if (ev.key !== "Tab") return;
+        const focusable = Array.from(modal.querySelectorAll(
+          'button:not([disabled]),[href],input:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])'
+        )).filter((node) => !node.closest(".hidden"));
+        if (!focusable.length) {
+          ev.preventDefault();
+          return;
+        }
+        const first = focusable[0], last = focusable[focusable.length - 1];
+        if (ev.shiftKey && (document.activeElement === first || !modal.contains(document.activeElement))) {
+          ev.preventDefault();
+          last.focus();
+        } else if (!ev.shiftKey && (document.activeElement === last || !modal.contains(document.activeElement))) {
+          ev.preventDefault();
+          first.focus();
+        }
+      });
+      modal.addEventListener("click", (ev) => {
+        if (ev.target === modal) ev.preventDefault();
+      });
+    }
+    renderIntroFlow();
+  }
+  function closeIntroFlow() {
+    document.getElementById("introModal")?.classList.add("hidden");
+    document.body.classList.remove("introOpen");
+  }
+  function renderIntroFlow() {
+    const modal = document.getElementById("introModal");
+    const body = document.getElementById("introBody");
+    const foot = document.getElementById("introFoot");
+    if (!modal || !body || !foot) return;
+    modal.classList.remove("hidden");
+    document.body.classList.add("introOpen");
+    const title = document.getElementById("introTitle");
+    const stepText = document.getElementById("introStepText");
+    const progress = document.getElementById("introProgressFill");
+    const showCompletion = meta.introComplete && meta.starterDecksUnlocked;
+    const stage = Math.max(0, Math.min(3, Number(meta.introStep) || 0));
+    let progressPct = [18, 38, 58, 72][stage] ?? 18;
+    if (showCompletion) {
+      progressPct = 100;
+      if (title) title.textContent = "\u0412\u0441\u0435 \u0434\u0432\u0435\u0440\u0438 \u043E\u0442\u043A\u0440\u044B\u0442\u044B";
+      if (stepText) stepText.textContent = "\u041F\u0420\u041E\u041B\u041E\u0413 \xB7 \u0417\u0410\u0412\u0415\u0420\u0428\u0401\u041D";
+      body.innerHTML = `<div class="introLoreMark">\u2735</div>
+      <p class="introLead">\u042D\u0445\u043E \u043F\u0440\u0438\u0437\u043D\u0430\u043B\u043E \u0432\u0430\u0448 \u0433\u043E\u043B\u043E\u0441. \u0412\u044B \u043F\u0440\u043E\u0448\u043B\u0438 \u0447\u0435\u0442\u044B\u0440\u0435 \u0431\u043E\u0435\u0432\u044B\u0445 \u0438\u0441\u043F\u044B\u0442\u0430\u043D\u0438\u044F, \u043F\u043E\u0437\u043D\u0430\u043A\u043E\u043C\u0438\u043B\u0438\u0441\u044C \u0441 \u043F\u044F\u0442\u044C\u044E \u043E\u0440\u0434\u0435\u043D\u0430\u043C\u0438 \u0438 \u0433\u043E\u0442\u043E\u0432\u044B \u0437\u0430\u0449\u0438\u0449\u0430\u0442\u044C \u0426\u0438\u0442\u0430\u0434\u0435\u043B\u044C.</p>
+      <div class="introRewardLine">\u{1F513} \u041E\u0442\u043A\u0440\u044B\u0442\u044B \u0432\u0441\u0435 5 \u0441\u0442\u0430\u0440\u0442\u043E\u0432\u044B\u0445 \u043A\u043E\u043B\u043E\u0434 \xB7 \u{1F381} +5 \u0431\u0443\u0441\u0442\u0435\u0440\u043E\u0432 \xB7 \u{1F48E} +100</div>
+      <div class="introDeckGrid">${FACTION_IDS.map((f) => {
+        const d = starterDeckForFaction(f);
+        return `<div class="introDeckChoice${f === meta.introFaction ? " selected" : ""}" style="--ifac:${colorOf(f).primary}">
+          <b>${esc(d?.name ?? FACTION_RU[f])}</b><small>${esc(FACTION_RU[f])} \xB7 ${d?.cards.length ?? 30} \u043A\u0430\u0440\u0442 \xB7 \u0434\u043E\u0441\u0442\u0443\u043F\u043D\u0430 \u0432 \u0440\u0430\u0437\u0434\u0435\u043B\u0435 \xAB\u041A\u043E\u043B\u043E\u0434\u044B\xBB</small></div>`;
+      }).join("")}</div>
+      <p class="introLead" style="font-size:.82rem;margin:.3rem auto">\u0412\u0430\u0448 \u043F\u0435\u0440\u0432\u044B\u0439 \u0432\u044B\u0431\u043E\u0440: <b>${esc(FACTION_RU[meta.introFaction] ?? meta.introFaction)}</b>. \u041E\u0441\u0442\u0430\u043B\u044C\u043D\u044B\u0435 \u043A\u043E\u043B\u043E\u0434\u044B \u0442\u043E\u0436\u0435 \u0443\u0436\u0435 \u0434\u043E\u0441\u0442\u0443\u043F\u043D\u044B.</p>`;
+      foot.innerHTML = `<span class="left"><span class="introMeetCount">\u041F\u0420\u041E\u041B\u041E\u0413 \u0417\u0410\u0412\u0415\u0420\u0428\u0401\u041D</span></span>
+      <span class="right"><button type="button" class="btn primary" id="btnIntroEnter">\u0412\u043E\u0439\u0442\u0438 \u0432 \u0426\u0438\u0442\u0430\u0434\u0435\u043B\u044C \u2192</button></span>`;
+    } else {
+      if (stepText) stepText.textContent = `\u0413\u041B\u0410\u0412\u0410 ${stage + 1} / 5`;
+      if (stage === 0) {
+        if (title) title.textContent = INTRO_CHAPTERS[0];
+        body.innerHTML = `<div class="introLoreMark" aria-hidden="true">\u2726</div>
+        <p class="introLead">\u0417\u0430 \u043F\u0440\u0435\u0434\u0435\u043B\u0430\u043C\u0438 \u0438\u0437\u0432\u0435\u0441\u0442\u043D\u044B\u0445 \u043A\u043E\u0440\u043E\u043B\u0435\u0432\u0441\u0442\u0432 \u0441\u0442\u043E\u0438\u0442 \u0426\u0438\u0442\u0430\u0434\u0435\u043B\u044C \u2014 \u043A\u0440\u0435\u043F\u043E\u0441\u0442\u044C \u043D\u0430 \u0440\u0430\u0437\u043B\u043E\u043C\u0435 \u043F\u044F\u0442\u0438 \u0441\u0442\u0438\u0445\u0438\u0439. \u0415\u0451 \u0441\u0442\u0435\u043D\u044B \u0445\u0440\u0430\u043D\u044F\u0442 \u043D\u0435 \u043F\u0440\u043E\u0441\u0442\u043E \u043C\u0430\u0433\u0438\u044E: \u043E\u043D\u0438 \u043F\u043E\u043C\u043D\u044F\u0442 \u043A\u0430\u0436\u0434\u0443\u044E \u0431\u0438\u0442\u0432\u0443.</p>
+        <p class="introLead">\u041A\u043E\u0433\u0434\u0430 \u0434\u0440\u0435\u0432\u043D\u0435\u0435 <b style="color:#f4d995">\u042D\u0445\u043E</b> \u043F\u0440\u043E\u0431\u0443\u0434\u0438\u043B\u043E\u0441\u044C, \u0440\u0443\u043D\u044B \u0437\u0430\u0433\u043E\u0432\u043E\u0440\u0438\u043B\u0438, \u0441\u0442\u0430\u0440\u044B\u0435 \u0441\u043E\u044E\u0437\u044B \u0434\u0440\u043E\u0433\u043D\u0443\u043B\u0438, \u0430 \u043F\u044F\u0442\u044C \u043E\u0440\u0434\u0435\u043D\u043E\u0432 \u043F\u043E\u0442\u044F\u043D\u0443\u043B\u0438\u0441\u044C \u043A \u0435\u0433\u043E \u0441\u0438\u043B\u0435. \u0422\u0435\u043F\u0435\u0440\u044C \u0426\u0438\u0442\u0430\u0434\u0435\u043B\u0438 \u043D\u0443\u0436\u0435\u043D \u043D\u043E\u0432\u044B\u0439 \u0445\u0440\u0430\u043D\u0438\u0442\u0435\u043B\u044C \u2014 \u0438 \u0441\u043D\u0430\u0447\u0430\u043B\u0430 \u0435\u043C\u0443 \u043F\u0440\u0435\u0434\u0441\u0442\u043E\u0438\u0442 \u043F\u043E\u043D\u044F\u0442\u044C, \u043A\u043E\u043C\u0443 \u043C\u043E\u0436\u043D\u043E \u0434\u043E\u0432\u0435\u0440\u0438\u0442\u044C \u0441\u0432\u043E\u044E \u043A\u043E\u043B\u043E\u0434\u0443.</p>
+        <blockquote class="introQuote">\xAB\u0426\u0438\u0442\u0430\u0434\u0435\u043B\u044C \u0441\u043B\u044B\u0448\u0438\u0442 \u043A\u0430\u0436\u0434\u043E\u0435 \u044D\u0445\u043E. \u0418 \u043A\u0430\u0436\u0434\u043E\u0435 \u2014 \u043F\u043E\u043C\u043D\u0438\u0442.\xBB</blockquote>
+        <div class="introLoreFacts"><div class="introLoreFact"><b>\u041F\u044F\u0442\u044C \u0441\u0442\u0438\u0445\u0438\u0439</b><small>\u043F\u044F\u0442\u044C \u0432\u0437\u0433\u043B\u044F\u0434\u043E\u0432 \u043D\u0430 \u043E\u0434\u043D\u0443 \u0432\u043E\u0439\u043D\u0443</small></div>
+          <div class="introLoreFact"><b>\u0420\u0443\u043D\u044B \u0438 \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u044F</b><small>\u0440\u0435\u0448\u0435\u043D\u0438\u0435 \u0432\u0430\u0436\u043D\u0435\u0435 \u0441\u0438\u043B\u044B \u043A\u0430\u0440\u0442\u044B</small></div>
+          <div class="introLoreFact"><b>\u0422\u0432\u043E\u0451 \u0438\u0441\u043F\u044B\u0442\u0430\u043D\u0438\u0435</b><small>\u0447\u0435\u0442\u044B\u0440\u0435 \u0431\u043E\u044F \u043D\u0430 \u043D\u0430\u0441\u0442\u043E\u044F\u0449\u0435\u043C \u0434\u0432\u0438\u0436\u043A\u0435</small></div></div>`;
+        foot.innerHTML = `<span class="left"><span class="introMeetCount">\u0422\u0412\u041E\u042F \u0418\u0421\u0422\u041E\u0420\u0418\u042F \u041D\u0410\u0427\u0418\u041D\u0410\u0415\u0422\u0421\u042F</span></span>
+        <span class="right"><button type="button" class="btn primary" id="btnIntroNext">\u0412\u0441\u0442\u0440\u0435\u0442\u0438\u0442\u044C \u043F\u044F\u0442\u044C \u0444\u0440\u0430\u043A\u0446\u0438\u0439 \u2192</button></span>`;
+      } else if (stage === 1) {
+        progressPct = 38;
+        if (title) title.textContent = INTRO_CHAPTERS[1];
+        const seen = new Set(meta.introFactionsSeen ?? []);
+        const selected = FACTION_IDS.includes(meta.introFaction) ? meta.introFaction : "Aurites" /* Aurites */;
+        const info = FACTION_INFO[selected];
+        const allSeen = FACTION_IDS.every((f) => seen.has(f));
+        body.innerHTML = `<p class="introLead" style="margin:.05rem auto .65rem">\u041A\u0430\u0436\u0434\u044B\u0439 \u043E\u0440\u0434\u0435\u043D \u0445\u0440\u0430\u043D\u0438\u0442 \u0447\u0430\u0441\u0442\u044C \u0438\u0441\u0442\u043E\u0440\u0438\u0438 \u0426\u0438\u0442\u0430\u0434\u0435\u043B\u0438. \u041E\u0442\u043A\u0440\u043E\u0439\u0442\u0435 \u0432\u0441\u0435 \u043F\u044F\u0442\u044C \u0433\u043E\u043B\u043E\u0441\u043E\u0432, \u0437\u0430\u0442\u0435\u043C \u0432\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u0442\u0443 \u0444\u0440\u0430\u043A\u0446\u0438\u044E, \u0447\u044C\u0438 \u0438\u0434\u0435\u0430\u043B\u044B \u043F\u043E\u0432\u0435\u0434\u0443\u0442 \u0432\u0430\u0441 \u0432 \u0431\u043E\u0439.</p>
+        <div class="introFactionGrid">${FACTION_IDS.map((f) => {
+          const item = FACTION_INFO[f];
+          const col = colorOf(f);
+          const visited = seen.has(f);
+          return `<button type="button" class="introFactionCard${f === selected ? " selected" : ""}" data-intro-faction="${f}"
+            style="--ifac:${col.primary}" aria-pressed="${f === selected}" title="\u041F\u043E\u0437\u043D\u0430\u043A\u043E\u043C\u0438\u0442\u044C\u0441\u044F \u0441 \u043E\u0440\u0434\u0435\u043D\u043E\u043C: ${esc(item?.name ?? FACTION_RU[f])}">
+            ${visited ? '<span class="seenMark" aria-label="\u043F\u0440\u043E\u0447\u0438\u0442\u0430\u043D\u043E">\u2713</span>' : ""}
+            <span class="introFactionSigil">${FACTION_SIGIL[f]}</span><b>${esc(item?.name ?? FACTION_RU[f])}</b>
+            <small>${esc(item?.tagline ?? HUB_ELEM_RU[f])}</small></button>`;
+        }).join("")}</div>
+        <div class="introFactionDetail" style="--ifac:${colorOf(selected).primary}">
+          <h3>${FACTION_SIGIL[selected]} ${esc(info?.name ?? FACTION_RU[selected])} \xB7 ${esc(info?.tagline ?? HUB_ELEM_RU[selected])}</h3>
+          <p>${esc(info?.description ?? "")}</p>
+          <div class="introMechanic"><b>\u0417\u043D\u0430\u043A \u043E\u0440\u0434\u0435\u043D\u0430:</b> ${esc(info?.mechanics ?? PASSIVE_TEXT[selected].replace(/<[^>]+>/g, ""))}</div>
+        </div>
+        <div class="introMeetCount"><span>\u041F\u043E\u0437\u043D\u0430\u043A\u043E\u043C\u043B\u0435\u043D\u043E: <b>${seen.size} / ${FACTION_IDS.length}</b></span>
+          <span>${allSeen ? `\u0412\u044B\u0431\u0440\u0430\u043D\u043E: ${esc(info?.name ?? FACTION_RU[selected])}` : "\u041D\u0430\u0436\u043C\u0438\u0442\u0435 \u043D\u0430 \u043A\u0430\u0436\u0434\u0443\u044E \u0444\u0440\u0430\u043A\u0446\u0438\u044E, \u0447\u0442\u043E\u0431\u044B \u0443\u0437\u043D\u0430\u0442\u044C \u0435\u0451 \u0438\u0441\u0442\u043E\u0440\u0438\u044E"}</span></div>`;
+        foot.innerHTML = `<span class="left"><button type="button" class="btn" id="btnIntroBack">\u2190 \u041A \u043F\u0440\u043E\u043B\u043E\u0433\u0443</button></span>
+        <span class="right"><button type="button" class="btn primary" id="btnIntroNext" ${allSeen ? "" : "disabled"}>\u0418\u0437\u0443\u0447\u0438\u0442\u044C \u0431\u043E\u0439 \u2192</button></span>`;
+      } else if (stage === 2) {
+        progressPct = 58;
+        if (title) title.textContent = INTRO_CHAPTERS[2];
+        body.innerHTML = `<p class="introLead">\u041A\u0430\u0440\u0442\u044B \u2014 \u044D\u0442\u043E \u0442\u043E\u043B\u044C\u043A\u043E \u043D\u0430\u0447\u0430\u043B\u043E. \u0412 \u043A\u0430\u0436\u0434\u043E\u0439 \u043F\u0430\u0440\u0442\u0438\u0438 \u0432\u0430\u0436\u043D\u044B \u043F\u043E\u0440\u044F\u0434\u043E\u043A \u0445\u043E\u0434\u043E\u0432, \u0437\u0430\u043F\u0430\u0441 \u043C\u0430\u043D\u044B \u0438 \u043C\u043E\u043C\u0435\u043D\u0442, \u043A\u043E\u0433\u0434\u0430 \u0432\u044B \u0440\u0435\u0448\u0430\u0435\u0442\u0435 \u0432\u043C\u0435\u0448\u0430\u0442\u044C\u0441\u044F.</p>
+        <div class="introRuleGrid">
+          <div class="introRule"><span class="ruleNum">1</span><div><b>\u041C\u0430\u043D\u0430 \u0440\u0430\u0441\u0442\u0451\u0442 \u0432\u043C\u0435\u0441\u0442\u0435 \u0441 \u0445\u043E\u0434\u043E\u043C</b><p>\u0412 \u043D\u0430\u0447\u0430\u043B\u0435 \u0432\u0430\u0448\u0435\u0433\u043E \u0445\u043E\u0434\u0430 \u043C\u0430\u043A\u0441\u0438\u043C\u0443\u043C \u043C\u0430\u043D\u044B \u0443\u0432\u0435\u043B\u0438\u0447\u0438\u0432\u0430\u0435\u0442\u0441\u044F \u043D\u0430 1. \u041F\u043B\u0430\u043D\u0438\u0440\u0443\u0439\u0442\u0435: \u0434\u0435\u0448\u0451\u0432\u0430\u044F \u043A\u0430\u0440\u0442\u0430 \u0441\u0435\u0439\u0447\u0430\u0441 \u0438\u043B\u0438 \u0441\u0438\u043B\u044C\u043D\u0430\u044F \u043F\u043E\u0437\u0436\u0435.</p></div></div>
+          <div class="introRule"><span class="ruleNum">2</span><div><b>\u0420\u0443\u043D\u044B \u043C\u0435\u043D\u044F\u044E\u0442 \u043F\u0440\u0430\u0432\u0438\u043B\u0430</b><p>\u0420\u0443\u043D\u0430 \u0437\u0430\u043D\u0438\u043C\u0430\u0435\u0442 \u043E\u0442\u0434\u0435\u043B\u044C\u043D\u043E\u0435 \u043C\u0435\u0441\u0442\u043E \u0438 \u0443\u0441\u0438\u043B\u0438\u0432\u0430\u0435\u0442 \u0433\u0435\u0440\u043E\u044F \u0438\u043B\u0438 \u0432\u0430\u0448\u0438\u0445 \u0441\u0443\u0449\u0435\u0441\u0442\u0432. \u041E\u0431\u044B\u0447\u043D\u043E \u0435\u0451 \u044D\u0444\u0444\u0435\u043A\u0442 \u043E\u0441\u0442\u0430\u0451\u0442\u0441\u044F \u0434\u043E \u043A\u043E\u043D\u0446\u0430 \u043F\u0430\u0440\u0442\u0438\u0438.</p></div></div>
+          <div class="introRule"><span class="ruleNum">3</span><div><b>\u0421\u0443\u0449\u0435\u0441\u0442\u0432\u0430 \u043D\u0435 \u0432\u0441\u0435\u0433\u0434\u0430 \u0430\u0442\u0430\u043A\u0443\u044E\u0442 \u0441\u0440\u0430\u0437\u0443</b><p>\u041F\u043E\u0441\u043B\u0435 \u043F\u0440\u0438\u0437\u044B\u0432\u0430 \u0431\u043E\u043B\u044C\u0448\u0438\u043D\u0441\u0442\u0432\u043E \u0441\u0443\u0449\u0435\u0441\u0442\u0432 \u0436\u0434\u0451\u0442 \u0441\u043B\u0435\u0434\u0443\u044E\u0449\u0435\u0433\u043E \u0445\u043E\u0434\u0430. \u0417\u0430\u0442\u0435\u043C \u0432\u044B \u0432\u044B\u0431\u0438\u0440\u0430\u0435\u0442\u0435 \u0446\u0435\u043B\u044C \u0430\u0442\u0430\u043A\u0438: \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043E \u0438\u043B\u0438 \u0433\u0435\u0440\u043E\u0439.</p></div></div>
+          <div class="introRule"><span class="ruleNum">4</span><div><b>\u041C\u0433\u043D\u043E\u0432\u0435\u043D\u043D\u043E\u0435 \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u0435 \u2014 \u0432 \u043D\u0443\u0436\u043D\u044B\u0439 \u043C\u043E\u043C\u0435\u043D\u0442</b><p>\u0412 \u043E\u043A\u043D\u0435 \u043F\u0440\u0438\u043E\u0440\u0438\u0442\u0435\u0442\u0430 \u043C\u043E\u0436\u043D\u043E \u043E\u0442\u0432\u0435\u0442\u0438\u0442\u044C \u043D\u0430 \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435 \u0441\u043E\u043F\u0435\u0440\u043D\u0438\u043A\u0430. \u0421\u043B\u0435\u0434\u0438\u0442\u0435 \u0437\u0430 \u0441\u0442\u0435\u043A\u043E\u043C \u0438 \u0431\u0435\u0440\u0435\u0433\u0438\u0442\u0435 \u043C\u0430\u043D\u0443 \u0434\u043B\u044F \u0432\u0430\u0436\u043D\u043E\u0433\u043E \u043E\u0442\u0432\u0435\u0442\u0430.</p></div></div>
+        </div>
+        <blockquote class="introQuote">\u0426\u0435\u043B\u044C \u043F\u043E\u0435\u0434\u0438\u043D\u043A\u0430 \u043F\u0440\u043E\u0441\u0442\u0430: \u0437\u0430\u0449\u0438\u0442\u0438 \u0441\u0432\u043E\u0438 \u043F\u043B\u0430\u043D\u044B, \u0447\u0438\u0442\u0430\u0439 \u043D\u0430\u043C\u0435\u0440\u0435\u043D\u0438\u044F \u0441\u043E\u043F\u0435\u0440\u043D\u0438\u043A\u0430 \u0438 \u0434\u043E\u0432\u0435\u0434\u0438 \u0435\u0433\u043E \u0437\u0434\u043E\u0440\u043E\u0432\u044C\u0435 \u0434\u043E \u043D\u0443\u043B\u044F.</blockquote>`;
+        foot.innerHTML = `<span class="left"><button type="button" class="btn" id="btnIntroBack">\u2190 \u041A \u0444\u0440\u0430\u043A\u0446\u0438\u044F\u043C</button></span>
+        <span class="right"><button type="button" class="btn primary" id="btnIntroNext">\u0412 \u0443\u0447\u0435\u0431\u043D\u044B\u0439 \u043B\u0430\u0433\u0435\u0440\u044C \u2192</button></span>`;
+      } else {
+        progressPct = 68 + Math.round(Math.min(4, meta.tutStage ?? 0) * 7);
+        const completed = Math.max(0, Math.min(LESSONS.length, Number(meta.tutStage) || 0));
+        if (title) title.textContent = INTRO_CHAPTERS[3];
+        if (stepText) stepText.textContent = completed < LESSONS.length ? `\u0418\u0421\u041F\u042B\u0422\u0410\u041D\u0418\u0415 ${completed + 1} / ${LESSONS.length}` : "\u041D\u0410\u0413\u0420\u0410\u0414\u0410 \xB7 5 \u0421\u0422\u0410\u0420\u0422\u041E\u0412\u042B\u0425 \u041A\u041E\u041B\u041E\u0414";
+        if (completed < LESSONS.length) {
+          const next = completed + 1;
+          body.innerHTML = `<p class="introLead" style="margin:.05rem auto .55rem">\u041D\u0430\u0441\u0442\u0430\u0432\u043D\u0438\u043A \u0436\u0434\u0451\u0442 \u043D\u0430 \u0442\u0440\u0435\u043D\u0438\u0440\u043E\u0432\u043E\u0447\u043D\u043E\u043C \u043F\u043E\u043B\u0435. \u0427\u0435\u0442\u044B\u0440\u0435 \u043A\u043E\u0440\u043E\u0442\u043A\u0438\u0445 \u0431\u043E\u044F \u043D\u0430\u0443\u0447\u0430\u0442 \u0447\u0438\u0442\u0430\u0442\u044C \u043C\u0430\u043D\u0443, \u0440\u0430\u0437\u044B\u0433\u0440\u044B\u0432\u0430\u0442\u044C \u0440\u0443\u043D\u044B, \u0430\u0442\u0430\u043A\u043E\u0432\u0430\u0442\u044C \u0438 \u043F\u0440\u0438\u043C\u0435\u043D\u044F\u0442\u044C \u043A\u043B\u044E\u0447\u0435\u0432\u044B\u0435 \u0441\u043F\u043E\u0441\u043E\u0431\u043D\u043E\u0441\u0442\u0438. \u041F\u0440\u043E\u0433\u0440\u0435\u0441\u0441 \u0441\u043E\u0445\u0440\u0430\u043D\u044F\u0435\u0442\u0441\u044F \u2014 \u043C\u043E\u0436\u043D\u043E \u0432\u0435\u0440\u043D\u0443\u0442\u044C\u0441\u044F \u043F\u043E\u0437\u0436\u0435.</p>
+          <div class="introLessonList">${LESSONS.map((l, i) => {
+            const n = i + 1;
+            const done = n <= completed;
+            const active = n === next;
+            const buttonText = done ? "\u041F\u0440\u043E\u0439\u0434\u0435\u043D\u043E \u2713" : active ? "\u041D\u0430\u0447\u0430\u0442\u044C \u0431\u043E\u0439" : "\u0417\u0430\u043A\u0440\u044B\u0442\u043E";
+            return `<div class="introLesson${done ? " done" : active ? " current" : ""}">
+              <span class="introLessonSeal">${done ? "\u2713" : n}</span><div><h3>${esc(l.ru)}</h3><p>${esc(l.hint)}</p></div>
+              <button type="button" class="btn${active ? " primary" : ""}" data-intro-lesson="${n}" ${active ? "" : "disabled"}>${buttonText}</button>
+            </div>`;
+          }).join("")}</div>
+          <div class="introMeetCount"><span>\u041F\u0440\u043E\u0439\u0434\u0435\u043D\u043E \u0438\u0441\u043F\u044B\u0442\u0430\u043D\u0438\u0439</span><b>${completed} / ${LESSONS.length}</b></div>`;
+          foot.innerHTML = `<span class="left"><button type="button" class="btn" id="btnIntroBack">\u2190 \u041A \u043F\u0440\u0430\u0432\u0438\u043B\u0430\u043C</button></span>
+          <span class="right"><span class="introMeetCount">\u0421\u043D\u0430\u0447\u0430\u043B\u0430 \u043F\u0440\u043E\u0439\u0434\u0438\u0442\u0435 \u0431\u043E\u0439 ${next} / 4</span></span>`;
+        } else {
+          progressPct = 92;
+          if (title) title.textContent = "\u041F\u043E\u0441\u043B\u0435\u0434\u043D\u0438\u0439 \u043A\u043B\u044E\u0447";
+          body.innerHTML = `<p class="introLead" style="margin:.05rem auto .5rem">\u0418\u0441\u043F\u044B\u0442\u0430\u043D\u0438\u044F \u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043D\u044B. \u0421\u043E\u0432\u0435\u0442 \u0426\u0438\u0442\u0430\u0434\u0435\u043B\u0438 \u043E\u0442\u043A\u0440\u044B\u0432\u0430\u0435\u0442 \u0432\u0430\u043C \u0432\u0441\u0435 \u043F\u044F\u0442\u044C \u0431\u0430\u0437\u043E\u0432\u044B\u0445 \u043A\u043E\u043B\u043E\u0434 \u2014 \u0432\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u043E\u0434\u043D\u0443 \u0434\u043B\u044F \u043F\u0435\u0440\u0432\u043E\u0433\u043E \u0431\u043E\u044F. \u041E\u0441\u0442\u0430\u043B\u044C\u043D\u044B\u0435 \u0442\u043E\u0436\u0435 \u043E\u0441\u0442\u0430\u043D\u0443\u0442\u0441\u044F \u0432 \u0440\u0430\u0437\u0434\u0435\u043B\u0435 \xAB\u041A\u043E\u043B\u043E\u0434\u044B\xBB.</p>
+          <div class="introDeckGrid">${FACTION_IDS.map((f) => {
+            const deck = starterDeckForFaction(f);
+            const chosen = meta.introFaction === f;
+            return `<button type="button" class="introDeckChoice${chosen ? " selected" : ""}" data-intro-deck="${f}"
+              style="--ifac:${colorOf(f).primary}" aria-pressed="${chosen}">
+              <b>${esc(deck?.name ?? `\u0421\u0442\u0430\u0440\u0442\u043E\u0432\u0430\u044F: ${FACTION_RU[f]}`)}</b><small>${FACTION_SIGIL[f]} ${esc(FACTION_RU[f])} \xB7 ${deck?.cards.length ?? 30} \u043A\u0430\u0440\u0442${chosen ? " \xB7 \u0412\u0410\u0428 \u0412\u042B\u0411\u041E\u0420" : ""}</small></button>`;
+          }).join("")}</div>
+          <div class="introRewardLine">\u{1F393} 4 \u0438\u0441\u043F\u044B\u0442\u0430\u043D\u0438\u044F \u043F\u0440\u043E\u0439\u0434\u0435\u043D\u044B \xB7 \u{1F381} +5 \u0431\u0443\u0441\u0442\u0435\u0440\u043E\u0432 \xB7 \u{1F48E} +100 \xB7 \u{1F513} \u0432\u0441\u0435 5 \u043A\u043E\u043B\u043E\u0434</div>`;
+          foot.innerHTML = `<span class="left"><button type="button" class="btn" id="btnIntroBack">\u2190 \u0418\u0441\u043F\u044B\u0442\u0430\u043D\u0438\u044F</button></span>
+          <span class="right"><button type="button" class="btn primary" id="btnIntroUnlock">\u041E\u0442\u043A\u0440\u044B\u0442\u044C \u0441\u0442\u0430\u0440\u0442\u043E\u0432\u044B\u0435 \u043A\u043E\u043B\u043E\u0434\u044B \u2192</button></span>`;
+        }
+      }
+    }
+    if (progress) progress.style.width = `${progressPct}%`;
+    if (stepText && showCompletion) stepText.textContent = "\u041F\u0420\u041E\u041B\u041E\u0413 \xB7 \u0417\u0410\u0412\u0415\u0420\u0428\u0401\u041D";
+    const focus = modal.querySelector("#introFoot button:not([disabled]),.introFactionCard.selected,.introDeckChoice.selected");
+    focus?.focus();
+  }
+  var introModalNode = document.getElementById("introModal");
+  if (window.EC_NO_AUTH_GATE) {
+    window.ecIntroSnapshot = () => ({
+      complete: meta.introComplete,
+      unlocked: meta.starterDecksUnlocked,
+      step: meta.introStep,
+      seen: [...meta.introFactionsSeen ?? []],
+      lessonStage: meta.tutStage
+    });
+    window.ecFinishIntroForTest = () => {
+      meta.introComplete = true;
+      meta.starterDecksUnlocked = true;
+      meta.introStep = 3;
+      metaSave();
+      closeIntroFlow();
+      buildMenu(false);
+    };
+    window.ecPrepareIntroRewardForTest = () => {
+      meta.introComplete = false;
+      meta.starterDecksUnlocked = false;
+      meta.introStep = 3;
+      meta.introFactionsSeen = FACTION_IDS.slice();
+      meta.tutStage = LESSONS.length;
+      meta.tutDone = true;
+      meta.tutReward = "";
+      metaSave();
+      buildMenu(false);
+      openIntroFlow();
+    };
+  }
+  introModalNode?.addEventListener("click", (ev) => {
+    const target = ev.target;
+    if (!target) return;
+    const factionCard = target.closest("[data-intro-faction]");
+    if (factionCard?.dataset.introFaction && !meta.introComplete) {
+      const fac = factionCard.dataset.introFaction;
+      if (!FACTION_IDS.includes(fac)) return;
+      meta.introFaction = fac;
+      meta.introFactionsSeen = [.../* @__PURE__ */ new Set([...meta.introFactionsSeen ?? [], fac])];
+      picked = fac;
+      savePicked();
+      metaSave();
+      renderIntroFlow();
+      return;
+    }
+    const deckChoice = target.closest("[data-intro-deck]");
+    if (deckChoice?.dataset.introDeck && !meta.introComplete) {
+      const fac = deckChoice.dataset.introDeck;
+      if (FACTION_IDS.includes(fac)) {
+        meta.introFaction = fac;
+        metaSave();
+        renderIntroFlow();
+      }
+      return;
+    }
+    const startLessonBtn = target.closest("[data-intro-lesson]");
+    if (startLessonBtn?.dataset.introLesson && !startLessonBtn.hasAttribute("disabled")) {
+      startLesson(Number(startLessonBtn.dataset.introLesson));
+      return;
+    }
+    if (target.closest("#btnIntroNext")) {
+      const current = Math.max(0, Math.min(3, Number(meta.introStep) || 0));
+      if (current === 1 && !FACTION_IDS.every((f) => (meta.introFactionsSeen ?? []).includes(f))) return;
+      meta.introStep = Math.min(3, current + 1);
+      metaSave();
+      renderIntroFlow();
+      return;
+    }
+    if (target.closest("#btnIntroBack")) {
+      meta.introStep = Math.max(0, (Number(meta.introStep) || 0) - 1);
+      metaSave();
+      renderIntroFlow();
+      return;
+    }
+    if (target.closest("#btnIntroUnlock")) {
+      grantTutReward(meta.introFaction || "Aurites");
+      return;
+    }
+    if (target.closest("#btnIntroEnter")) {
+      closeIntroFlow();
+      buildMenu(false);
+      $("menu").classList.remove("hidden");
+      setAppRoute("home");
+      document.getElementById("btnPlay")?.focus();
+      return;
+    }
+  });
   function openTut() {
+    if (!meta.starterDecksUnlocked) {
+      openIntroFlow();
+      return;
+    }
     const rows = LESSONS.map((l, i) => {
       const n = i + 1;
       const done = (meta.tutStage ?? 0) >= n;
@@ -31604,17 +33406,48 @@
     $("tutModal").classList.remove("hidden");
   }
   function startLesson(n) {
+    if (!Number.isInteger(n) || n < 1 || n > LESSONS.length) return;
+    if (!meta.introComplete) {
+      const next = Math.min((meta.tutStage ?? 0) + 1, LESSONS.length);
+      if (n !== next) {
+        showToast(`\u{1F393} \u0421\u043D\u0430\u0447\u0430\u043B\u0430 \u0437\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u0435 \u0438\u0441\u043F\u044B\u0442\u0430\u043D\u0438\u0435 ${next}`);
+        return;
+      }
+    }
     battle.tutCleanup();
     battle.launchMode = "tut";
     battle.practice = true;
     battle.tutLesson = n;
     battle.difficulty = 0.3;
+    battle.playerFaction = "Aurites" /* Aurites */;
+    battle.playerDeckId = starterDeckForFaction("Aurites" /* Aurites */)?.id ?? "Aurites" /* Aurites */;
     battle.enemyFaction = FACTION_IDS[Math.floor(Math.random() * FACTION_IDS.length)];
+    battle.friendFoe = "\u041D\u0430\u0441\u0442\u0430\u0432\u043D\u0438\u043A \u0426\u0438\u0442\u0430\u0434\u0435\u043B\u0438";
+    battle.bossPower = null;
+    battle.bossHp = 0;
+    battle.campaignBoss = null;
+    battle.campNode = null;
+    battle.eventId = null;
+    battle.matchId = null;
+    closeIntroFlow();
     $("tutModal").classList.add("hidden");
-    btn("btnPlay").click();
+    audioUnlock();
+    musicStart();
+    Audio_.uiClick();
+    battle.start().catch((err) => reportFatal("tutorial-start", err));
   }
   function grantTutReward(fac) {
+    if (!FACTION_IDS.includes(fac) || (meta.tutStage ?? 0) < LESSONS.length) return;
+    const firstStoryUnlock = !meta.starterDecksUnlocked;
     meta.tutReward = fac;
+    meta.starterDecksUnlocked = true;
+    meta.introComplete = true;
+    meta.introFaction = fac;
+    meta.tutDone = true;
+    picked = fac;
+    menuSelectedDeckId = starterDeckForFaction(fac)?.id ?? fac;
+    savePicked();
+    saveMenuDeck();
     const cheap = [...db.values()].filter((c) => c.faction === fac && !isExpansionId(c.id)).sort((a, b) => a.cost - b.cost).slice(0, 10);
     for (const c of cheap) owned.set(c.id, Math.min(PLAYSET, (owned.get(c.id) ?? 0) + 2));
     ownedSave();
@@ -31623,8 +33456,11 @@
     gemsAdd(100);
     renderShards();
     tutGatePractice();
-    openTut();
-    showToast(`\u{1F381} \u0421\u0442\u0430\u0440\u0442\u043E\u0432\u0430\u044F \u043A\u043E\u043B\u043E\u0434\u0430 \xAB${FACTION_RU[fac]}\xBB: 10 \u043A\u0430\u0440\u0442 \xD72, 5 \u0431\u0443\u0441\u0442\u0435\u0440\u043E\u0432, \u{1F48E}100`);
+    if (firstStoryUnlock) {
+      buildMenu(false);
+      renderIntroFlow();
+    } else openTut();
+    showToast(`\u{1F381} \u041E\u0442\u043A\u0440\u044B\u0442\u044B \u0432\u0441\u0435 5 \u0441\u0442\u0430\u0440\u0442\u043E\u0432\u044B\u0445 \u043A\u043E\u043B\u043E\u0434. \u0412\u044B \u0432\u044B\u0431\u0440\u0430\u043B\u0438 \xAB${FACTION_RU[fac]}\xBB \xB7 +5 \u0431\u0443\u0441\u0442\u0435\u0440\u043E\u0432 \xB7 \u{1F48E}100`);
   }
   function tutGatePractice() {
     const cp = document.getElementById("chkPractice");
@@ -31780,6 +33616,11 @@
     }
     battle.start().catch((err) => reportFatal("restart", err));
   });
+  btn("btnGoRecap").addEventListener("click", () => {
+    const latest = Array.isArray(meta.replays) ? meta.replays[0] : void 0;
+    if (latest) openReplay(latest.ts);
+    else showToast("\u0420\u0430\u0437\u0431\u043E\u0440 \u043C\u0430\u0442\u0447\u0430 \u043F\u043E\u043A\u0430 \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u0435\u043D");
+  });
   btn("btnGoMenu").addEventListener("click", () => openHomeScreen());
   var COLLECTION_PAGE_SIZE = 40;
   var colList = [];
@@ -31791,6 +33632,7 @@
   var colObserver = null;
   var colRenderGeneration = 0;
   function openCollectionScreen() {
+    if (!requireStarterDeckUnlock()) return;
     setAppRoute("collection");
     $("menu").classList.add("hidden");
     for (const id of ["homeScreen", "eventsScreen", "decksScreen", "shopModal", "bpModal", "profileModal", "boosterModal", "campaignModal", "journalModal", "replayModal"])
@@ -31951,6 +33793,8 @@
     saveSettings();
     applySettings();
   });
+  var fcChk = document.getElementById("setFullControl");
+  if (fcChk) fcChk.addEventListener("change", () => battle.setFullControl(fcChk.checked));
   var rpChk = document.getElementById("setRope");
   if (rpChk) rpChk.addEventListener("change", () => {
     settings.rope = rpChk.checked;
@@ -31998,6 +33842,7 @@
     applySettings();
   });
   var authMode = "login";
+  var authGateRefreshPending = false;
   function syncAccountRow() {
     const inn = !!meta.signedIn;
     const show = (id, on) => {
@@ -32040,20 +33885,50 @@
   function authGateCheck() {
     const m = document.getElementById("authModal");
     if (!m || !authRequired()) return;
-    if (meta.signedIn && authGet()) {
+    const tokens = authGet();
+    if (meta.signedIn && tokens && Number.isFinite(tokens.exp) && tokens.exp > Date.now() + 3e4) {
       m.classList.remove("gate");
       return;
     }
     m.classList.add("gate");
+    if (meta.signedIn && tokens) {
+      if (authGateRefreshPending) return;
+      authGateRefreshPending = true;
+      openAuth("login");
+      const err = document.getElementById("authErr");
+      if (err) err.textContent = "\u041F\u0440\u043E\u0432\u0435\u0440\u044F\u0435\u043C \u0441\u043E\u0445\u0440\u0430\u043D\u0451\u043D\u043D\u0443\u044E \u0441\u0435\u0441\u0441\u0438\u044E\u2026";
+      const submit = document.getElementById("authSubmit");
+      if (submit) submit.disabled = true;
+      void authRefresh().then((ok) => {
+        if (ok && meta.signedIn) {
+          m.classList.remove("gate");
+          closeAuth();
+          syncAccountRow();
+          void friendsRefresh();
+        } else {
+          if (!authGet()) {
+            meta.signedIn = false;
+            metaSave();
+            syncAccountRow();
+          }
+          if (submit) submit.disabled = false;
+          const msg = document.getElementById("authErr");
+          if (msg) msg.textContent = authGet() ? "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u043F\u0440\u043E\u0432\u0435\u0440\u0438\u0442\u044C \u0441\u0435\u0441\u0441\u0438\u044E. \u041F\u0440\u043E\u0432\u0435\u0440\u044C\u0442\u0435 \u0441\u043E\u0435\u0434\u0438\u043D\u0435\u043D\u0438\u0435 \u0438 \u0432\u043E\u0439\u0434\u0438\u0442\u0435 \u0441\u043D\u043E\u0432\u0430." : "\u0421\u0435\u0441\u0441\u0438\u044F \u0438\u0441\u0442\u0435\u043A\u043B\u0430 \u2014 \u0432\u043E\u0439\u0434\u0438\u0442\u0435 \u0441\u043D\u043E\u0432\u0430.";
+        }
+      }).finally(() => {
+        authGateRefreshPending = false;
+      });
+      return;
+    }
     openAuth("login");
   }
   async function pullProfile(pid) {
+    const ctl = new AbortController();
+    const t = window.setTimeout(() => ctl.abort(), 8e3);
     try {
-      const ctl = new AbortController();
-      const t = window.setTimeout(() => ctl.abort(), 2e3);
-      const r = await authFetch(`${META_API()}/api/profile?pid=${encodeURIComponent(pid)}`, { signal: ctl.signal });
-      window.clearTimeout(t);
-      if (!r.ok) return;
+      const r = await authFetch(`${META_API()}/api/profile?pid=${encodeURIComponent(pid)}`, { signal: ctl.signal, cache: "no-store" });
+      if (r.status === 404) return "missing";
+      if (!r.ok) return "error";
       const gp = await r.json();
       meta.nick = String(gp.nick ?? meta.nick);
       meta.xp = Number(gp.xp ?? meta.xp);
@@ -32082,10 +33957,37 @@
       meta.foilTokens = Number(gp.foilTokens ?? meta.foilTokens ?? 0);
       meta.premOpens = Number(gp.premOpens ?? meta.premOpens ?? 0);
       if (Array.isArray(gp.avatarsOwned)) meta.avatarsOwned = gp.avatarsOwned;
-      meta.tutStage = Number(gp.tutStage ?? meta.tutStage ?? 0);
-      if (gp.tutDone != null) meta.tutDone = !!gp.tutDone;
-      meta.tutReward = String(gp.tutReward ?? meta.tutReward ?? "");
-      if (Array.isArray(gp.tutClaims)) meta.tutClaims = gp.tutClaims;
+      const wasStarterDecksLocked = !meta.starterDecksUnlocked;
+      const remoteTutStage = Number(gp.tutStage ?? meta.tutStage ?? 0);
+      if (Number.isFinite(remoteTutStage)) meta.tutStage = Math.max(meta.tutStage ?? 0, Math.max(0, Math.min(LESSONS.length, Math.trunc(remoteTutStage))));
+      meta.tutDone = !!meta.tutDone || gp.tutDone === true || meta.tutStage >= LESSONS.length;
+      const remoteTutReward = String(gp.tutReward ?? "").trim();
+      meta.tutReward = remoteTutReward || meta.tutReward || "";
+      if (Array.isArray(gp.tutClaims)) meta.tutClaims = [.../* @__PURE__ */ new Set([...meta.tutClaims ?? [], ...gp.tutClaims])];
+      const hasIntroState = typeof gp.introComplete === "boolean" || typeof gp.starterDecksUnlocked === "boolean";
+      if (hasIntroState) {
+        meta.introComplete = !!meta.introComplete || gp.introComplete === true;
+        meta.starterDecksUnlocked = !!meta.starterDecksUnlocked || gp.starterDecksUnlocked === true;
+        const remoteStep = Number(gp.introStep ?? 0);
+        if (Number.isInteger(remoteStep) && remoteStep >= 0 && remoteStep <= 3) meta.introStep = Math.max(meta.introStep ?? 0, remoteStep);
+        if (FACTION_IDS.includes(gp.introFaction)) meta.introFaction = gp.introFaction;
+        if (Array.isArray(gp.introFactionsSeen)) {
+          meta.introFactionsSeen = [...new Set(
+            [...meta.introFactionsSeen ?? [], ...gp.introFactionsSeen].filter((f) => typeof f === "string" && FACTION_IDS.includes(f))
+          )];
+        }
+      }
+      const legacyTutorialComplete = !hasIntroState && meta.introStep === 0 && !(meta.introFactionsSeen ?? []).length && meta.tutDone && meta.tutStage >= LESSONS.length;
+      if (meta.tutReward || legacyTutorialComplete) {
+        meta.introComplete = true;
+        meta.starterDecksUnlocked = true;
+      }
+      if (meta.introComplete) meta.starterDecksUnlocked = true;
+      if (meta.starterDecksUnlocked) meta.introComplete = true;
+      if (wasStarterDecksLocked && meta.starterDecksUnlocked) {
+        closeIntroFlow();
+        buildMenu(false);
+      } else if (!meta.starterDecksUnlocked && !document.getElementById("introModal")?.classList.contains("hidden")) renderIntroFlow();
       const c = gp.cosmetics;
       if (c) {
         if (Array.isArray(c.backs)) meta.backsOwned = c.backs;
@@ -32094,6 +33996,15 @@
         if (c.backEq) meta.backEq = c.backEq;
         if (c.tableSkin) meta.tableSkin = c.tableSkin;
         if (c.runeSkin) meta.runeSkin = c.runeSkin;
+        if (Array.isArray(c.deckHeroesOwned)) {
+          meta.deckHeroesOwned = c.deckHeroesOwned.filter((id) => {
+            const hero = DECK_HERO_BY_ID.get(id);
+            return !!hero && hero.tier !== "standard";
+          });
+        }
+        if (c.deckHeroes && typeof c.deckHeroes === "object" && !Array.isArray(c.deckHeroes)) {
+          meta.deckHeroes = Object.fromEntries(Object.entries(c.deckHeroes).filter(([deckId, heroId]) => /^[A-Za-z0-9_-]{1,120}$/.test(deckId) && typeof heroId === "string" && DECK_HERO_BY_ID.has(heroId)));
+        }
       }
       meta.lastSynced = {
         shards: shardsGet(),
@@ -32105,47 +34016,108 @@
         bpXp: meta.bpXp ?? 0
       };
       metaSave();
+      return "loaded";
     } catch {
+      return "error";
+    } finally {
+      window.clearTimeout(t);
     }
   }
+  var authAttemptInFlight = false;
   async function authDo() {
+    if (authAttemptInFlight) return;
+    const mode = authMode;
     const login = document.getElementById("authLogin")?.value.trim() ?? "";
     const pw = document.getElementById("authPass")?.value ?? "";
     const er = document.getElementById("authErr");
+    const submit = document.getElementById("authSubmit");
+    const switcher = document.getElementById("authSwitch");
     const setErr = (s) => {
       if (er) er.textContent = s;
     };
     setErr("");
     if (!/^[A-Za-z0-9_.-]{3,20}$/.test(login)) {
-      setErr("\u041B\u043E\u0433\u0438\u043D:3\u201320 \u0441\u0438\u043C\u0432\u043E\u043B\u043E\u0432, \u043B\u0430\u0442\u0438\u043D\u0438\u0446\u0430/\u0446\u0438\u0444\u0440\u044B/_.-");
+      setErr("\u041B\u043E\u0433\u0438\u043D: 3\u201320 \u0441\u0438\u043C\u0432\u043E\u043B\u043E\u0432, \u043B\u0430\u0442\u0438\u043D\u0438\u0446\u0430/\u0446\u0438\u0444\u0440\u044B/_.-");
       return;
     }
-    if (pw.length < 8) {
-      setErr("\u041F\u0430\u0440\u043E\u043B\u044C: \u043C\u0438\u043D\u0438\u043C\u0443\u043C 8 \u0441\u0438\u043C\u0432\u043E\u043B\u043E\u0432");
+    if (!pw.length) {
+      setErr("\u0412\u0432\u0435\u0434\u0438\u0442\u0435 \u043F\u0430\u0440\u043E\u043B\u044C");
       return;
     }
+    if (mode === "register" && pw.length < 8) {
+      setErr("\u0414\u043B\u044F \u043D\u043E\u0432\u043E\u0433\u043E \u0430\u043A\u043A\u0430\u0443\u043D\u0442\u0430 \u043F\u0430\u0440\u043E\u043B\u044C \u0434\u043E\u043B\u0436\u0435\u043D \u0441\u043E\u0434\u0435\u0440\u0436\u0430\u0442\u044C \u043C\u0438\u043D\u0438\u043C\u0443\u043C 8 \u0441\u0438\u043C\u0432\u043E\u043B\u043E\u0432");
+      return;
+    }
+    authAttemptInFlight = true;
+    if (submit) {
+      submit.disabled = true;
+      submit.textContent = "\u041F\u043E\u0434\u043A\u043B\u044E\u0447\u0435\u043D\u0438\u0435\u2026";
+    }
+    if (switcher) switcher.disabled = true;
+    const oldPid = String(meta.pid || "");
+    let timer = 0;
     try {
       const ctl = new AbortController();
-      const t = window.setTimeout(() => ctl.abort(), 2500);
-      const r = await window.fetch(`${META_API()}/api/auth/${authMode}`, {
+      timer = window.setTimeout(() => ctl.abort(), 15e3);
+      const r = await window.fetch(`${META_API()}/api/auth/${mode}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         signal: ctl.signal,
+        cache: "no-store",
         body: JSON.stringify({ login, password: pw, pid: meta.pid })
       });
-      window.clearTimeout(t);
       const j = await r.json().catch(() => ({}));
       if (!r.ok) {
         setErr(j.error || `\u041E\u0448\u0438\u0431\u043A\u0430 \u0441\u0435\u0440\u0432\u0435\u0440\u0430 (${r.status})`);
         return;
       }
+      if (!j.accessToken || !j.refreshToken) {
+        setErr("\u0421\u0435\u0440\u0432\u0435\u0440 \u0432\u0435\u0440\u043D\u0443\u043B \u043D\u0435\u043F\u043E\u043B\u043D\u0443\u044E \u0441\u0435\u0441\u0441\u0438\u044E. \u041F\u043E\u0432\u0442\u043E\u0440\u0438\u0442\u0435 \u0432\u0445\u043E\u0434.");
+        return;
+      }
+      const accountPid = String(j.pid || oldPid);
+      const switchingAccount = !!oldPid && accountPid !== oldPid;
+      if (switchingAccount && syncInFlight) await syncInFlight;
       authSet(j);
-      const accPid = String(j.pid || meta.pid);
-      if (meta.nick === "\u0413\u043E\u0441\u0442\u044C") meta.nick = String(j.login || login);
-      if (accPid) {
-        if (accPid !== meta.pid) meta.pid = accPid;
-        await syncProfile();
-        await pullProfile(accPid);
+      if (switchingAccount) {
+        profileSyncPaused = true;
+        profileMigrationNick = String(j.login || login);
+        meta.pid = accountPid;
+        meta.lastSynced = void 0;
+        const pulled = await pullProfile(accountPid);
+        if (pulled === "loaded") {
+          profileSyncPaused = false;
+          profileMigrationNick = "";
+        } else if (pulled === "missing") {
+          profileSyncPaused = false;
+          meta.nick = profileMigrationNick;
+          profileMigrationNick = "";
+          await syncProfile();
+          await pullProfile(accountPid);
+        }
+      } else {
+        meta.pid = accountPid;
+        if (meta.nick === "\u0413\u043E\u0441\u0442\u044C") meta.nick = String(j.login || login);
+        if (profileSyncPaused) {
+          const pulled = await pullProfile(accountPid);
+          if (pulled === "loaded") {
+            profileSyncPaused = false;
+            profileMigrationNick = "";
+          } else if (pulled === "missing") {
+            profileSyncPaused = false;
+            if (profileMigrationNick) meta.nick = profileMigrationNick;
+            profileMigrationNick = "";
+            await syncProfile();
+            await pullProfile(accountPid);
+          }
+        } else {
+          await syncProfile();
+          const pulled = await pullProfile(accountPid);
+          if (pulled === "missing") {
+            await syncProfile();
+            await pullProfile(accountPid);
+          }
+        }
       }
       meta.signedIn = true;
       metaSave();
@@ -32155,9 +34127,18 @@
       document.getElementById("authModal")?.classList.remove("gate");
       closeAuth();
       void friendsRefresh();
-      showToast(authMode === "login" ? `\u{1F511} \u0412\u044B \u0432\u043E\u0448\u043B\u0438: ${j.login}` : `\u{1F389} \u0410\u043A\u043A\u0430\u0443\u043D\u0442 \u0441\u043E\u0437\u0434\u0430\u043D: ${j.login}`);
-    } catch {
-      setErr("\u0421\u0435\u0440\u0432\u0435\u0440 \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u0435\u043D. \u0417\u0430\u043F\u0443\u0441\u0442\u0438\u0442\u0435 npm run server:meta (\u043F\u043E\u0440\u0442 8081) \u0438 \u043F\u043E\u043F\u0440\u043E\u0431\u0443\u0439\u0442\u0435 \u0441\u043D\u043E\u0432\u0430.");
+      showToast(mode === "login" ? `\u{1F511} \u0412\u044B \u0432\u043E\u0448\u043B\u0438: ${j.login || login}` : `\u{1F389} \u0410\u043A\u043A\u0430\u0443\u043D\u0442 \u0441\u043E\u0437\u0434\u0430\u043D: ${j.login || login}`);
+      if (profileSyncPaused) showToast("\u{1F512} \u041F\u0440\u043E\u0444\u0438\u043B\u044C \u0441\u043E\u0445\u0440\u0430\u043D\u0451\u043D \u043B\u043E\u043A\u0430\u043B\u044C\u043D\u043E; \u0441\u0435\u0440\u0432\u0435\u0440\u043D\u0443\u044E \u043A\u043E\u043F\u0438\u044E \u0431\u0435\u0437\u043E\u043F\u0430\u0441\u043D\u043E \u043F\u0440\u043E\u0432\u0435\u0440\u0438\u043C \u043F\u0440\u0438 \u0432\u043E\u0441\u0441\u0442\u0430\u043D\u043E\u0432\u043B\u0435\u043D\u0438\u0438 \u0441\u0432\u044F\u0437\u0438.");
+    } catch (err) {
+      setErr(err instanceof DOMException && err.name === "AbortError" ? "\u0421\u0435\u0440\u0432\u0435\u0440 \u043E\u0442\u0432\u0435\u0447\u0430\u0435\u0442 \u0441\u043B\u0438\u0448\u043A\u043E\u043C \u0434\u043E\u043B\u0433\u043E. \u041F\u0440\u043E\u0432\u0435\u0440\u044C\u0442\u0435 \u0441\u0435\u0442\u044C \u0438 \u043F\u043E\u043F\u0440\u043E\u0431\u0443\u0439\u0442\u0435 \u0435\u0449\u0451 \u0440\u0430\u0437." : "\u0421\u0435\u0440\u0432\u0435\u0440 \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u0435\u043D. \u041F\u0440\u043E\u0432\u0435\u0440\u044C\u0442\u0435 META_API_URL \u0438 \u0434\u043E\u0441\u0442\u0443\u043F\u043D\u043E\u0441\u0442\u044C meta-server.");
+    } finally {
+      if (timer) window.clearTimeout(timer);
+      authAttemptInFlight = false;
+      if (submit) {
+        submit.disabled = false;
+        submit.textContent = mode === "login" ? "\u0412\u043E\u0439\u0442\u0438" : "\u0421\u043E\u0437\u0434\u0430\u0442\u044C \u0430\u043A\u043A\u0430\u0443\u043D\u0442";
+      }
+      if (switcher) switcher.disabled = false;
     }
   }
   document.getElementById("btnLoginOpen")?.addEventListener("click", () => openAuth("login"));
@@ -32187,6 +34168,24 @@
   }
   syncAccountRow();
   authGateCheck();
+  window.addEventListener("storage", (ev) => {
+    if (ev.key === AUTH_KEY && !authGet() && meta.signedIn) {
+      meta.signedIn = false;
+      syncAccountRow();
+      authGateCheck();
+      return;
+    }
+    if (ev.key !== META_KEY || !ev.newValue) return;
+    try {
+      const remote = JSON.parse(ev.newValue);
+      if (typeof remote.signedIn === "boolean") meta.signedIn = remote.signedIn;
+      if (typeof remote.pid === "string") meta.pid = remote.pid;
+      if (typeof remote.nick === "string") meta.nick = remote.nick;
+      syncAccountRow();
+      authGateCheck();
+    } catch {
+    }
+  });
   var logoutB = document.getElementById("btnLogout");
   if (logoutB) logoutB.addEventListener("click", () => {
     if (!window.confirm("\u0412\u044B\u0439\u0442\u0438 \u0438\u0437 \u0430\u043A\u043A\u0430\u0443\u043D\u0442\u0430? \u041B\u043E\u043A\u0430\u043B\u044C\u043D\u044B\u0439 \u043F\u0440\u043E\u0433\u0440\u0435\u0441\u0441 \u0441\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u0441\u044F.")) return;
@@ -32315,12 +34314,165 @@
   });
   var editing = null;
   var builderOn = false;
+  function saveDeckHeroSelectionForEditor(heroId) {
+    if (!editing) return false;
+    const hero = DECK_HERO_BY_ID.get(heroId);
+    if (!hero || hero.faction !== editing.faction || !isDeckHeroUnlocked(heroId)) return false;
+    editing.heroId = hero.id;
+    return editing.id ? saveDeckHeroSelection(editing.id, editing.faction, hero.id) : true;
+  }
   var POOL_CARDS = cardsJson.cards;
   var dbLookup = (id) => db.get(id);
   function editingCards() {
     const out = [];
     if (editing) for (const [id, n] of editing.counts) for (let i = 0; i < n; i++) out.push(id);
     return out;
+  }
+  var handTesterDeckKey = "";
+  var handTesterDrawPile = [];
+  var handTesterHand = [];
+  var handTesterSwap = /* @__PURE__ */ new Set();
+  var handTesterMulliganUsed = false;
+  var handTesterHasDeal = false;
+  var handTesterStatus = "\u041D\u043E\u0432\u0430\u044F \u0440\u0443\u043A\u0430 \u0435\u0449\u0451 \u043D\u0435 \u0440\u043E\u0437\u0434\u0430\u043D\u0430.";
+  var handTesterReturnFocus = null;
+  function handTesterSignature(cards) {
+    const ordered = cards.slice().sort((a, b) => a.localeCompare(b));
+    return `${editing?.id ?? "new"}|${editing?.faction ?? ""}|${ordered.join(",")}`;
+  }
+  function syncHandTesterDeck(cards) {
+    const signature = handTesterSignature(cards);
+    const changed = signature !== handTesterDeckKey;
+    const open = document.getElementById("btnDbHandTest");
+    if (open) {
+      open.disabled = cards.length === 0;
+      open.title = cards.length ? `\u0420\u0430\u0437\u0434\u0430\u0442\u044C 5 \u043A\u0430\u0440\u0442 \u0438\u0437 \u0442\u0435\u043A\u0443\u0449\u0435\u0439 \u043A\u043E\u043B\u043E\u0434\u044B (${cards.length})` : "\u0421\u043D\u0430\u0447\u0430\u043B\u0430 \u0434\u043E\u0431\u0430\u0432\u044C\u0442\u0435 \u043A\u0430\u0440\u0442\u044B \u0432 \u043A\u043E\u043B\u043E\u0434\u0443";
+    }
+    if (!changed) return;
+    handTesterDeckKey = signature;
+    handTesterDrawPile = [];
+    handTesterHand = [];
+    handTesterSwap.clear();
+    handTesterMulliganUsed = false;
+    handTesterHasDeal = false;
+    handTesterStatus = cards.length ? "\u0421\u043E\u0441\u0442\u0430\u0432 \u043A\u043E\u043B\u043E\u0434\u044B \u0438\u0437\u043C\u0435\u043D\u0438\u043B\u0441\u044F \u2014 \u0440\u0430\u0437\u0434\u0430\u0439\u0442\u0435 \u043D\u043E\u0432\u0443\u044E \u0440\u0443\u043A\u0443." : "\u0414\u043E\u0431\u0430\u0432\u044C\u0442\u0435 \u043A\u0430\u0440\u0442\u044B \u0432 \u043A\u043E\u043B\u043E\u0434\u0443, \u0447\u0442\u043E\u0431\u044B \u043D\u0430\u0447\u0430\u0442\u044C \u0442\u0435\u0441\u0442.";
+    const modal = document.getElementById("dbHandModal");
+    if (modal && !modal.classList.contains("hidden")) renderHandTester();
+  }
+  function shuffleHandTester(cards) {
+    for (let i = cards.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [cards[i], cards[j]] = [cards[j], cards[i]];
+    }
+  }
+  function renderHandTester(focusIndex) {
+    const stats = document.getElementById("dbHandDeckStats");
+    const summary = document.getElementById("dbHandSummary");
+    const cardsHost = document.getElementById("dbHandCards");
+    const status = document.getElementById("dbHandStatus");
+    const replaceButton = document.getElementById("btnDbHandMulligan");
+    const dealButton = document.getElementById("btnDbHandDeal");
+    if (!stats || !summary || !cardsHost || !status || !replaceButton || !dealButton) return;
+    const deck = editingCards().map(dbLookup).filter((card) => !!card);
+    const countType = (type) => deck.filter((card) => card.type === type).length;
+    const averageCost = (list) => list.length ? (list.reduce((sum, card) => sum + card.cost, 0) / list.length).toFixed(1).replace(".", ",") : "\u2014";
+    const metrics = [
+      [String(deck.length), "\u043A\u0430\u0440\u0442"],
+      [String(countType("Creature" /* Creature */)), "\u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0430"],
+      [String(countType("Spell" /* Spell */)), "\u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u044F"],
+      [String(countType("Rune" /* Rune */)), "\u0440\u0443\u043D\u044B"],
+      [averageCost(deck), "\u0441\u0440\u0435\u0434\u043D\u044F\u044F \u0446\u0435\u043D\u0430"]
+    ];
+    stats.innerHTML = metrics.map(([value, label]) => `<div class="dbHandMetric"><b>${esc(value)}</b><span>${esc(label)}</span></div>`).join("");
+    cardsHost.replaceChildren();
+    if (handTesterHasDeal) {
+      const handCards = handTesterHand.map(dbLookup).filter((card) => !!card);
+      const countHandType = (type) => handCards.filter((card) => card.type === type).length;
+      summary.textContent = `\u0420\u0443\u043A\u0430 ${handCards.length}/5 \xB7 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0430 ${countHandType("Creature" /* Creature */)} \xB7 \u0437\u0430\u043A\u043B\u0438\u043D\u0430\u043D\u0438\u044F ${countHandType("Spell" /* Spell */)} \xB7 \u0440\u0443\u043D\u044B ${countHandType("Rune" /* Rune */)} \xB7 \u0441\u0440\u0435\u0434\u043D\u044F\u044F \u0446\u0435\u043D\u0430 ${averageCost(handCards)}`;
+      handTesterHand.forEach((id, index) => {
+        const card = dbLookup(id);
+        if (!card) return;
+        const node = renderCard(card);
+        const selected = handTesterSwap.has(index);
+        node.dataset.handIndex = String(index);
+        node.tabIndex = 0;
+        node.setAttribute("role", "button");
+        node.setAttribute("aria-pressed", selected ? "true" : "false");
+        node.setAttribute("aria-label", `${cardName(card)} \xB7 ${card.cost} \u043C\u0430\u043D\u044B \xB7 ${selected ? "\u043E\u0442\u043C\u0435\u0447\u0435\u043D\u0430 \u0434\u043B\u044F \u043F\u0435\u0440\u0435\u0441\u0434\u0430\u0447\u0438" : "\u043D\u0430\u0436\u043C\u0438\u0442\u0435, \u0447\u0442\u043E\u0431\u044B \u043E\u0442\u043C\u0435\u0442\u0438\u0442\u044C \u0434\u043B\u044F \u043F\u0435\u0440\u0435\u0441\u0434\u0430\u0447\u0438"}`);
+        node.classList.toggle("isMulliganSelected", selected);
+        if (selected) node.appendChild(el("span", "dbHandSwapLabel", "\u0417\u0410\u041C\u0415\u041D\u0418\u0422\u042C"));
+        const toggle = () => toggleHandTesterCard(index);
+        node.addEventListener("click", toggle);
+        node.addEventListener("keydown", (ev) => {
+          if (ev.key === "Enter" || ev.key === " ") {
+            ev.preventDefault();
+            toggle();
+          }
+        });
+        node.addEventListener("mouseenter", (ev) => showZoom(card, ev.clientX, ev.clientY));
+        node.addEventListener("mouseleave", hideZoom);
+        cardsHost.appendChild(node);
+      });
+    } else {
+      summary.textContent = `${deck.length} \u043A\u0430\u0440\u0442 \u0432 \u043A\u043E\u043B\u043E\u0434\u0435 \xB7 \u0441\u0442\u0430\u0440\u0442\u043E\u0432\u0430\u044F \u0440\u0443\u043A\u0430 \u2014 \u0434\u043E 5 \u043A\u0430\u0440\u0442.`;
+    }
+    status.textContent = handTesterStatus;
+    replaceButton.disabled = !handTesterHasDeal || handTesterMulliganUsed || handTesterSwap.size === 0;
+    replaceButton.textContent = handTesterMulliganUsed ? "\u041C\u0443\u043B\u043B\u0438\u0433\u0430\u043D \u0438\u0441\u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u043D" : `\u041F\u0435\u0440\u0435\u0441\u0434\u0430\u0442\u044C \u0432\u044B\u0431\u0440\u0430\u043D\u043D\u044B\u0435${handTesterSwap.size ? ` \xB7 ${handTesterSwap.size}` : ""}`;
+    dealButton.disabled = deck.length === 0;
+    dealButton.textContent = handTesterHasDeal ? "\u041D\u043E\u0432\u0430\u044F \u0440\u0430\u0437\u0434\u0430\u0447\u0430" : "\u0420\u0430\u0437\u0434\u0430\u0442\u044C \u0440\u0443\u043A\u0443";
+    if (focusIndex !== void 0) cardsHost.querySelector(`[data-hand-index="${focusIndex}"]`)?.focus();
+  }
+  function toggleHandTesterCard(index) {
+    if (!handTesterHasDeal || handTesterMulliganUsed) return;
+    if (handTesterSwap.has(index)) handTesterSwap.delete(index);
+    else handTesterSwap.add(index);
+    renderHandTester(index);
+  }
+  function dealHandTesterHand() {
+    const cards = editingCards();
+    syncHandTesterDeck(cards);
+    if (!cards.length) {
+      handTesterStatus = "\u0414\u043E\u0431\u0430\u0432\u044C\u0442\u0435 \u0445\u043E\u0442\u044F \u0431\u044B \u043E\u0434\u043D\u0443 \u043A\u0430\u0440\u0442\u0443 \u0432 \u043A\u043E\u043B\u043E\u0434\u0443.";
+      renderHandTester();
+      return;
+    }
+    handTesterDrawPile = cards.slice();
+    shuffleHandTester(handTesterDrawPile);
+    handTesterHand = handTesterDrawPile.splice(0, Math.min(5, handTesterDrawPile.length));
+    handTesterSwap.clear();
+    handTesterMulliganUsed = false;
+    handTesterHasDeal = true;
+    handTesterStatus = cards.length < 5 ? `\u0412 \u043A\u043E\u043B\u043E\u0434\u0435 \u0432\u0441\u0435\u0433\u043E ${cards.length} \u043A\u0430\u0440\u0442 \u2014 \u043F\u043E\u043A\u0430\u0437\u0430\u043D\u044B \u0432\u0441\u0435 \u0434\u043E\u0441\u0442\u0443\u043F\u043D\u044B\u0435. \u042D\u0442\u043E \u0442\u0435\u0441\u0442, \u0431\u043E\u0439 \u043D\u0435 \u0437\u0430\u043F\u0443\u0441\u043A\u0430\u0435\u0442\u0441\u044F.` : "\u041E\u0442\u043C\u0435\u0442\u044C\u0442\u0435 \u043D\u0435\u043F\u043E\u0434\u0445\u043E\u0434\u044F\u0449\u0438\u0435 \u043A\u0430\u0440\u0442\u044B \u0438 \u043F\u0435\u0440\u0435\u0441\u0434\u0430\u0439\u0442\u0435 \u0438\u0445 \u043E\u0434\u0438\u043D \u0440\u0430\u0437. \u0421\u043E\u0441\u0442\u0430\u0432 \u043A\u043E\u043B\u043E\u0434\u044B \u043D\u0435 \u0438\u0437\u043C\u0435\u043D\u0438\u0442\u0441\u044F.";
+    renderHandTester();
+  }
+  function mulliganHandTesterCards() {
+    if (!handTesterHasDeal || handTesterMulliganUsed || handTesterSwap.size === 0) return;
+    const selected = new Set(handTesterSwap);
+    const returned = handTesterHand.filter((_, index) => selected.has(index));
+    const kept = handTesterHand.filter((_, index) => !selected.has(index));
+    handTesterDrawPile.push(...returned);
+    shuffleHandTester(handTesterDrawPile);
+    const replacements = handTesterDrawPile.splice(0, returned.length);
+    handTesterHand = [...kept, ...replacements];
+    handTesterSwap.clear();
+    handTesterMulliganUsed = true;
+    handTesterStatus = `\u041C\u0443\u043B\u043B\u0438\u0433\u0430\u043D \u0432\u044B\u043F\u043E\u043B\u043D\u0435\u043D: \u0437\u0430\u043C\u0435\u043D\u0435\u043D\u043E ${replacements.length} \u0438\u0437 ${handTesterHand.length} \u043A\u0430\u0440\u0442. \u0412\u0442\u043E\u0440\u043E\u0439 \u043C\u0443\u043B\u043B\u0438\u0433\u0430\u043D \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u0435\u043D.`;
+    renderHandTester();
+  }
+  function openHandTester() {
+    if (!editing || editingCards().length === 0) return;
+    handTesterReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    syncHandTesterDeck(editingCards());
+    if (!handTesterHasDeal) dealHandTesterHand();
+    $("dbHandModal").classList.remove("hidden");
+    renderHandTester();
+    document.getElementById("btnDbHandClose")?.focus();
+  }
+  function closeHandTester() {
+    $("dbHandModal").classList.add("hidden");
+    if (handTesterReturnFocus?.isConnected && !handTesterReturnFocus.hasAttribute("disabled")) handTesterReturnFocus.focus();
+    handTesterReturnFocus = null;
   }
   function dbStatus(msg, ok = false) {
     const n = $("dbStatus");
@@ -32376,7 +34528,7 @@
     host.appendChild(fallback);
     if (card) {
       const image = document.createElement("img");
-      image.src = `/art/${encodeURIComponent(card.faction)}/${encodeURIComponent(card.id)}.png`;
+      image.src = cardArtworkUrl(card);
       image.alt = "";
       image.loading = "lazy";
       image.onerror = () => image.remove();
@@ -32386,9 +34538,32 @@
       host.title = "\u0414\u043E\u0431\u0430\u0432\u044C\u0442\u0435 \u043A\u0430\u0440\u0442\u0443, \u0447\u0442\u043E\u0431\u044B \u0432\u044B\u0431\u0440\u0430\u0442\u044C \u043E\u0431\u043B\u043E\u0436\u043A\u0443 \u043A\u043E\u043B\u043E\u0434\u044B";
     }
   }
+  function renderDeckHeroPreview() {
+    const host = document.getElementById("dbHeroPreview");
+    const name = document.getElementById("dbHeroName");
+    const tier = document.getElementById("dbHeroTier");
+    if (!host || !editing) return;
+    const hero = resolveDeckHero(editing.heroId, editing.faction);
+    if (!hero) return;
+    editing.heroId = hero.id;
+    host.replaceChildren();
+    const fallback = el("span", "dbHeroPreviewGlyph", FACTION_SIGIL[editing.faction] ?? "\u2726");
+    host.appendChild(fallback);
+    const image = document.createElement("img");
+    image.className = "dbHeroPreviewArt";
+    image.alt = "";
+    image.loading = "lazy";
+    image.decoding = "async";
+    host.appendChild(image);
+    artChain(image, deckHeroArtUrls(hero.id, editing.faction));
+    host.title = `\u0413\u0435\u0440\u043E\u0439 \u043A\u043E\u043B\u043E\u0434\u044B: ${hero.name}`;
+    if (name) name.textContent = hero.name;
+    if (tier) tier.textContent = hero.tier === "standard" ? "\u0421\u0442\u0430\u043D\u0434\u0430\u0440\u0442\u043D\u044B\u0439 \xB7 \u0434\u043E\u0441\u0442\u0443\u043F\u0435\u043D \u0441\u0440\u0430\u0437\u0443" : hero.tier === "coin" ? "\u041C\u043E\u043D\u0435\u0442\u043D\u044B\u0439 \xB7 2000 \u{1FA99}" : "\u0414\u043E\u043D\u0430\u0442\u043D\u044B\u0439 \xB7 \u043F\u043E\u043A\u0443\u043F\u043A\u0430 \u0432\u0440\u0435\u043C\u0435\u043D\u043D\u043E \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u043D\u0430";
+  }
   function renderEditor() {
     if (!editing) return;
     const cards = editingCards();
+    syncHandTesterDeck(cards);
     $("dbDeckFaction").textContent = `\xB7 ${FACTION_RU[editing.faction]}`;
     $("dbCount").textContent = `${cards.length} \xB7 \u043C\u0438\u043D. ${MIN_DECK_SIZE}`;
     $("dbCount").title = `\u041C\u0438\u043D\u0438\u043C\u0443\u043C ${MIN_DECK_SIZE} \u043A\u0430\u0440\u0442; \u0432\u0435\u0440\u0445\u043D\u0435\u0433\u043E \u043B\u0438\u043C\u0438\u0442\u0430 \u043D\u0435\u0442`;
@@ -32409,6 +34584,9 @@
       avatarGallery.title = avatarCards.length ? "\u041E\u0442\u043A\u0440\u044B\u0442\u044C \u0433\u0430\u043B\u0435\u0440\u0435\u044E \u0430\u0440\u0442\u043E\u0432 \u043A\u0430\u0440\u0442 \u044D\u0442\u043E\u0439 \u043A\u043E\u043B\u043E\u0434\u044B" : "\u0421\u043D\u0430\u0447\u0430\u043B\u0430 \u0434\u043E\u0431\u0430\u0432\u044C\u0442\u0435 \u043A\u0430\u0440\u0442\u044B";
     }
     renderDeckAvatarPreview();
+    const activeDeckHero = resolveDeckHero(editing.heroId, editing.faction);
+    editing.heroId = activeDeckHero?.id ?? editing.faction;
+    renderDeckHeroPreview();
     const listHost = $("dbDeckList");
     listHost.innerHTML = "";
     if (!cards.length) {
@@ -32517,18 +34695,20 @@
     sel("dbMyDecks").innerHTML = list.length ? list.map((d) => `<option value="${d.id}">${esc(d.name)} (${d.cards.length})</option>`).join("") : '<option value="">\u2014 \u043C\u043E\u0438\u0445 \u043A\u043E\u043B\u043E\u0434 \u043D\u0435\u0442 \u2014</option>';
   }
   function newEditing(faction) {
-    return { id: null, name: "", faction, counts: /* @__PURE__ */ new Map(), avatarCardId: null };
+    return { id: null, name: "", faction, counts: /* @__PURE__ */ new Map(), avatarCardId: null, heroId: faction };
   }
   function loadIntoEditor(deck) {
     if (!deck) return;
     const counts = /* @__PURE__ */ new Map();
     for (const id of deck.cards) counts.set(id, (counts.get(id) ?? 0) + 1);
+    const faction = deck.faction;
     editing = {
       id: deck.id.startsWith("custom-") ? deck.id : null,
       name: deck.name,
-      faction: deck.faction,
+      faction,
       counts,
-      avatarCardId: deck.avatarCardId ?? null
+      avatarCardId: deck.avatarCardId ?? null,
+      heroId: deckHeroIdForDeck(deck.id, faction) ?? faction
     };
     dbStatus("");
     renderEditor();
@@ -32550,6 +34730,7 @@
       $("colCount").textContent = "";
       renderCollection();
     }
+    animateUiSurface(builder ? $("dbMain") : $("colGrid"), "ecSubpanelEnter", 260);
   }
   btn("tabCollection").addEventListener("click", () => {
     Audio_.uiClick();
@@ -32614,6 +34795,7 @@
       return;
     }
     const id = editing.id ?? `custom-${Date.now().toString(36)}`;
+    const selectedHeroId = resolveDeckHero(editing.heroId, editing.faction)?.id ?? editing.faction;
     const deck = {
       id,
       name,
@@ -32623,12 +34805,15 @@
       updated: Date.now()
     };
     upsertCustomDeck(deck);
+    saveDeckHeroSelection(id, editing.faction, selectedHeroId, false);
+    metaSave();
     editing.id = id;
     editing.name = name;
+    editing.heroId = selectedHeroId;
     buildMenu();
     renderMyDecksSel();
     sel("dbMyDecks").value = id;
-    dbStatus(`\u0421\u043E\u0445\u0440\u0430\u043D\u0435\u043D\u043E: \xAB${name}\xBB \u2014 \u0432\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u043E\u0431\u043B\u043E\u0436\u043A\u0443 \u0438 \u0437\u0430\u043F\u0443\u0441\u043A\u0430\u0439\u0442\u0435 \u0431\u043E\u0439 \u043A\u043D\u043E\u043F\u043A\u043E\u0439 \xAB\u0412 \u0431\u043E\u0439\xBB \u0438\u043B\u0438 \u0447\u0435\u0440\u0435\u0437 \u041A\u043E\u043B\u043E\u0434\u044B \u2192 \xAB\u0418\u0433\u0440\u0430\u0442\u044C\xBB.`, true);
+    dbStatus(`\u0421\u043E\u0445\u0440\u0430\u043D\u0435\u043D\u043E: \xAB${name}\xBB \u2014 \u043E\u0431\u043B\u043E\u0436\u043A\u0430 \u043A\u0430\u0440\u0442\u044B \u0438 \u0432\u0438\u0437\u0443\u0430\u043B\u044C\u043D\u044B\u0439 \u0433\u0435\u0440\u043E\u0439 \u0445\u0440\u0430\u043D\u044F\u0442\u0441\u044F \u043E\u0442\u0434\u0435\u043B\u044C\u043D\u043E. \u0417\u0430\u043F\u0443\u0441\u043A\u0430\u0439\u0442\u0435 \u0431\u043E\u0439 \u043A\u043D\u043E\u043F\u043A\u043E\u0439 \xAB\u0412 \u0431\u043E\u0439\xBB \u0438\u043B\u0438 \u0447\u0435\u0440\u0435\u0437 \u041A\u043E\u043B\u043E\u0434\u044B \u2192 \xAB\u0418\u0433\u0440\u0430\u0442\u044C\xBB.`, true);
     Audio_.uiClick();
   });
   btn("btnDbExport").addEventListener("click", () => {
@@ -32678,7 +34863,9 @@
       dbStatus("\u0421\u043E\u0445\u0440\u0430\u043D\u0451\u043D\u043D\u0430\u044F \u043A\u043E\u043B\u043E\u0434\u0430 \u043D\u0435 \u0432\u044B\u0431\u0440\u0430\u043D\u0430");
       return;
     }
-    deleteCustomDeck(editing.id);
+    const deletedId = editing.id;
+    deleteCustomDeck(deletedId);
+    forgetDeckHeroSelection(deletedId);
     dbStatus(`\u041A\u043E\u043B\u043E\u0434\u0430 \u0443\u0434\u0430\u043B\u0435\u043D\u0430 \u0438\u0437 \u0445\u0440\u0430\u043D\u0438\u043B\u0438\u0449\u0430.`, true);
     editing.id = null;
     buildMenu();
@@ -32736,6 +34923,39 @@
     renderDeckAvatarPreview();
   });
   btn("btnDbAvatarGallery").addEventListener("click", openEditorDeckArtPicker);
+  btn("btnDbHeroPicker").addEventListener("click", openEditorDeckHeroPicker);
+  btn("btnDbHandTest").addEventListener("click", openHandTester);
+  btn("btnDbHandClose").addEventListener("click", closeHandTester);
+  btn("btnDbHandDone").addEventListener("click", closeHandTester);
+  btn("btnDbHandDeal").addEventListener("click", dealHandTesterHand);
+  btn("btnDbHandMulligan").addEventListener("click", mulliganHandTesterCards);
+  $("dbHandModal").addEventListener("click", (ev) => {
+    if (ev.target === $("dbHandModal")) closeHandTester();
+  });
+  $("dbHandModal").addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape") {
+      ev.preventDefault();
+      ev.stopPropagation();
+      closeHandTester();
+      return;
+    }
+    if (ev.key !== "Tab") return;
+    const modal = $("dbHandModal");
+    const focusable = [...modal.querySelectorAll('button:not(:disabled),[tabindex="0"]')].filter((node) => !node.hidden && node.getAttribute("aria-hidden") !== "true");
+    if (!focusable.length) {
+      ev.preventDefault();
+      modal.focus();
+      return;
+    }
+    const first = focusable[0], last = focusable[focusable.length - 1];
+    if (ev.shiftKey && document.activeElement === first) {
+      ev.preventDefault();
+      last.focus();
+    } else if (!ev.shiftKey && document.activeElement === last) {
+      ev.preventDefault();
+      first.focus();
+    }
+  });
   sel("dbFaction").innerHTML = FACTION_IDS.map((f) => `<option value="${f}">${FACTION_RU[f]}</option>`).join("");
   ["dbSearch", "dbType"].forEach((id) => $(id).addEventListener(id === "dbSearch" ? "input" : "change", renderPool));
   window.__decks = {
@@ -32745,6 +34965,13 @@
     validate: (cards, faction) => validateDeck(cards, faction, dbLookup),
     resolve: (id) => resolveDeck(id, deckList),
     pool: (faction) => POOL_CARDS.filter((c) => c.faction === faction || c.faction === "Neutral" /* Neutral */).map((c) => ({ id: c.id, rarity: c.rarity }))
+  };
+  window.__deckHeroes = {
+    catalog: DECK_HERO_CATALOG,
+    owned: isDeckHeroUnlocked,
+    forDeck: deckHeroIdForDeck,
+    setForDeck: saveDeckHeroSelection,
+    openForDeck: openSavedDeckHeroPicker
   };
   var KW_ICON = {
     Taunt: "\u26E8",
@@ -32924,6 +35151,7 @@
     const sec = RULES_SECTIONS.find((r) => r.id === rulesSection) ?? RULES_SECTIONS[0];
     body.innerHTML = sec.html();
     body.parentElement.scrollTop = 0;
+    animateUiSurface(body, "ecSubpanelEnter", 230);
   }
   function openRules(section) {
     if (section) rulesSection = section;
@@ -32976,6 +35204,10 @@
     if (t && (t.tagName === "INPUT" || t.tagName === "SELECT" || t.tagName === "TEXTAREA")) return;
     const inBattle = !$("battle").classList.contains("hidden");
     if (ev.key === "Escape") {
+      if (!$("dbHandModal").classList.contains("hidden")) {
+        closeHandTester();
+        return;
+      }
       if (!$("deckArtPickerModal").classList.contains("hidden")) {
         closeDeckArtPicker();
         return;
@@ -32987,7 +35219,8 @@
       for (const id of ["cosmPreview", "journalModal", "replayModal", "factionModal", "graveModal"]) {
         const modal = document.getElementById(id);
         if (modal && !modal.classList.contains("hidden")) {
-          modal.classList.add("hidden");
+          if (id === "replayModal") closeReplay();
+          else modal.classList.add("hidden");
           return;
         }
       }
@@ -33049,6 +35282,7 @@
   });
   applySettings();
   buildMenu();
+  if (!meta.starterDecksUnlocked) openIntroFlow();
   window.__battle = battle;
   console.log(
     "[\u042D\u0445\u043E-\u0426\u0438\u0442\u0430\u0434\u0435\u043B\u044C] \u043F\u0440\u043E\u0442\u043E\u0442\u0438\u043F \u0433\u043E\u0442\u043E\u0432. \u041A\u0430\u0440\u0442 \u0432 \u0431\u0430\u0437\u0435:",
@@ -33082,18 +35316,32 @@
   })();
   var onlineTab = "play";
   var onlinePoll = 0;
+  var onlinePollMs = 0;
+  var onlinePollInFlight = false;
+  var onlineLaunchTimer = 0;
+  var onlineStarting = false;
   var onlineSearch = null;
   var onlineFound = null;
   var onlineLastChallenges = /* @__PURE__ */ new Set();
   var onlineResultsHtml = "";
   var ONLINE_STATUS_RU = { online: "\u0432 \u0441\u0435\u0442\u0438", searching: "\u0438\u0449\u0435\u0442 \u043C\u0430\u0442\u0447", in_match: "\u0432 \u043C\u0430\u0442\u0447\u0435", offline: "\u043D\u0435 \u0432 \u0441\u0435\u0442\u0438" };
   async function onApi(method, path, body) {
+    const ctl = new AbortController();
+    const timer = window.setTimeout(() => ctl.abort(), 8e3);
     try {
-      const r = await authFetch(`${META_API()}${path}`, { method, headers: { "content-type": "application/json" }, body: body ? JSON.stringify(body) : void 0 });
+      const r = await authFetch(`${META_API()}${path}`, {
+        method,
+        headers: { "content-type": "application/json" },
+        body: body ? JSON.stringify(body) : void 0,
+        signal: ctl.signal,
+        cache: "no-store"
+      });
       const j = await r.json().catch(() => ({}));
       return { ok: r.ok, status: r.status, j };
     } catch {
-      return { ok: false, status: 0, j: { error: "\u0421\u0435\u0440\u0432\u0435\u0440 \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u0435\u043D (npm run server:meta, \u043F\u043E\u0440\u0442 8081)" } };
+      return { ok: false, status: 0, j: { error: "\u041D\u0435\u0442 \u043E\u0442\u0432\u0435\u0442\u0430 \u043E\u0442 meta-server. \u041F\u0440\u043E\u0432\u0435\u0440\u044C\u0442\u0435 \u0441\u043E\u0435\u0434\u0438\u043D\u0435\u043D\u0438\u0435 \u0438 URL API." } };
+    } finally {
+      window.clearTimeout(timer);
     }
   }
   function onlineEnsureModal() {
@@ -33153,7 +35401,7 @@
     const f = deck.faction;
     const av = deck.avatarCardId && deck.cards.includes(deck.avatarCardId) ? db.get(deck.avatarCardId) : void 0;
     const c = av ?? suggestedDeckArt(deck.cards);
-    const urls = c ? [`/art/${encodeURIComponent(c.faction)}/${encodeURIComponent(c.id)}.png`] : [];
+    const urls = c ? [cardArtworkUrl(c)] : [];
     urls.push(`/heroes/${encodeURIComponent(f)}`, `img/menu_${f.toLowerCase()}.jpg`);
     return urls.join("|");
   }
@@ -33166,7 +35414,7 @@
     const sel2 = decks.find((d) => d.id === selId) ?? decks[0];
     const busy = !!(onlineSearch || onlineFound);
     const problem = sel2 ? deckPlayProblem(sel2) : "\u041D\u0435\u0442 \u043A\u043E\u043B\u043E\u0434\u044B";
-    const tiles = decks.map((d) => `<button data-f="${esc(d.faction)}" class="alDeck${d.id === sel2?.id ? " sel" : ""}" data-on="deck" data-arg="${esc(d.id)}" ${busy ? "disabled" : ""} title="${esc(d.name)} \xB7 ${d.cards.length} \u043A\u0430\u0440\u0442">
+    const tiles = decks.map((d) => `<button data-f="${esc(d.faction)}" class="alDeck${d.id === sel2?.id ? " sel" : ""}" data-on="deck" data-arg="${esc(d.id)}" ${busy ? "disabled" : ""} title="${esc(d.name)} \xB7 ${d.cards.length} \u043A\u0430\u0440\u0442 \xB7 \u0433\u0435\u0440\u043E\u0439: ${esc(resolveDeckHero(d.heroId, d.faction)?.name ?? d.faction)}">
       <img data-arts="${esc(onlineDeckArts(d))}" alt="" loading="lazy">
       <span class="alDeckName">${esc(d.name)}</span>
       <span class="alDeckSub">${esc(FACTION_RU[d.faction] ?? d.faction)} \xB7 ${d.cards.length}</span>
@@ -33270,13 +35518,21 @@
       return;
     }
     if (a === "queue") {
+      if (onlineSearch || onlineFound || onlineStarting) return;
       const r = await onApi("POST", "/api/mm/queue", { mode: arg, deckId: onlineDeckId() });
       if (fail(r)) return;
       onlineSearch = { mode: arg, since: Date.now() };
+      ensureOnlinePoll();
     }
     if (a === "cancel") {
-      await onApi("POST", "/api/mm/cancel");
+      const r = await onApi("POST", "/api/mm/cancel");
+      if (fail(r)) return;
       onlineSearch = null;
+      if (onlineLaunchTimer) {
+        window.clearTimeout(onlineLaunchTimer);
+        onlineLaunchTimer = 0;
+      }
+      ensureOnlinePoll();
     }
     if (a === "mode") {
       onlineMode = arg === "casual" ? "casual" : "ranked";
@@ -33332,51 +35588,80 @@
     await onlinePollTick(true);
   }
   async function onlinePollTick(forceRender = false) {
-    if (!meta.signedIn || !authGet()) return;
-    const st = await onApi("GET", "/api/mm/status");
-    if (st.ok && st.j.state === "found" && st.j.opponent) {
-      onlineSearch = null;
-      onlineFound = { match: st.j.match, seat: st.j.seat, mode: st.j.mode, opponent: st.j.opponent, ticket: st.j.ticket ?? "", wsUrl: st.j.wsUrl };
-      const tk = onlineFound.ticket;
-      const wu = onlineFound.wsUrl;
-      window.setTimeout(() => {
-        if (onlineFound?.ticket === tk) void startOnlineBattle(tk, wu);
-      }, 1800);
-      onlineTab = "play";
-      Audio_.uiClick();
-      showToast(`\u2694 \u0421\u043E\u043F\u0435\u0440\u043D\u0438\u043A \u043D\u0430\u0439\u0434\u0435\u043D: ${st.j.opponent.nick}`);
-      forceRender = true;
-    } else if (st.ok && st.j.state === "idle" && onlineSearch && onlineSearch.mode !== "friendly") {
-      onlineSearch = null;
-      forceRender = true;
-    }
-    const open = !document.getElementById("onlineModal")?.classList.contains("hidden") && !!document.getElementById("onlineModal");
-    const typing = document.activeElement?.id === "onSearch";
-    if (open && !typing && (forceRender || onlineTab !== "play")) await renderOnline();
-    else if (open && onlineSearch) {
-      const t = document.querySelector("#onlineModal .onTimer");
-      const sec = Math.round((Date.now() - onlineSearch.since) / 1e3);
-      if (t) t.textContent = `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
-      const inf = document.getElementById("onMmInfo");
-      if (inf && st.ok && st.j.state === "searching") inf.textContent = `\u041E\u043A\u043D\u043E \u043F\u043E\u0434\u0431\u043E\u0440\u0430 \xB1${st.j.window} MMR \xB7 \u0432 \u043E\u0447\u0435\u0440\u0435\u0434\u0438: ${st.j.inQueue}`;
+    if (!meta.signedIn || !authGet() || onlinePollInFlight || onlineStarting) return;
+    onlinePollInFlight = true;
+    try {
+      const st = await onApi("GET", "/api/mm/status");
+      if (st.ok && st.j.state === "found" && st.j.opponent) {
+        onlineSearch = null;
+        onlineFound = { match: st.j.match, seat: st.j.seat, mode: st.j.mode, opponent: st.j.opponent, ticket: st.j.ticket ?? "", wsUrl: st.j.wsUrl };
+        const tk = onlineFound.ticket;
+        const wu = onlineFound.wsUrl;
+        if (onlineLaunchTimer) window.clearTimeout(onlineLaunchTimer);
+        onlineLaunchTimer = window.setTimeout(() => {
+          onlineLaunchTimer = 0;
+          if (onlineFound?.ticket === tk) void startOnlineBattle(tk, wu);
+        }, 1800);
+        onlineTab = "play";
+        Audio_.uiClick();
+        showToast(`\u2694 \u0421\u043E\u043F\u0435\u0440\u043D\u0438\u043A \u043D\u0430\u0439\u0434\u0435\u043D: ${st.j.opponent.nick}`);
+        forceRender = true;
+      } else if (st.ok && st.j.state === "idle" && onlineSearch && onlineSearch.mode !== "friendly") {
+        onlineSearch = null;
+        forceRender = true;
+      }
+      ensureOnlinePoll();
+      const modal = document.getElementById("onlineModal");
+      const open = !!modal && !modal.classList.contains("hidden");
+      const typing = document.activeElement?.id === "onSearch";
+      if (open && !typing && (forceRender || onlineTab !== "play")) await renderOnline();
+      else if (open && onlineSearch) {
+        const t = document.querySelector("#onlineModal .onTimer");
+        const sec = Math.round((Date.now() - onlineSearch.since) / 1e3);
+        if (t) t.textContent = `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
+        const inf = document.getElementById("onMmInfo");
+        if (inf && st.ok && st.j.state === "searching") inf.textContent = `\u041E\u043A\u043D\u043E \u043F\u043E\u0434\u0431\u043E\u0440\u0430 \xB1${st.j.window} MMR \xB7 \u0432 \u043E\u0447\u0435\u0440\u0435\u0434\u0438: ${st.j.inQueue}`;
+        if (inf && !st.ok) inf.textContent = "\u041F\u0440\u043E\u0432\u0435\u0440\u044F\u0435\u043C \u043E\u0447\u0435\u0440\u0435\u0434\u044C\u2026 \u0441\u0435\u0440\u0432\u0435\u0440 \u0432\u0440\u0435\u043C\u0435\u043D\u043D\u043E \u043D\u0435 \u043E\u0442\u0432\u0435\u0447\u0430\u0435\u0442";
+      }
+    } finally {
+      onlinePollInFlight = false;
     }
   }
+  function ensureOnlinePoll(runNow = false) {
+    const modalOpen = !!document.getElementById("onlineModal") && !document.getElementById("onlineModal").classList.contains("hidden");
+    if (!onlineSearch && !modalOpen) {
+      window.clearInterval(onlinePoll);
+      onlinePoll = 0;
+      onlinePollMs = 0;
+      return;
+    }
+    const interval = onlineSearch ? 1e3 : 8e3;
+    if (!onlinePoll || onlinePollMs !== interval) {
+      window.clearInterval(onlinePoll);
+      onlinePollMs = interval;
+      onlinePoll = window.setInterval(() => {
+        void onlinePollTick();
+      }, interval);
+    }
+    if (runNow) void onlinePollTick();
+  }
+  function startOnlinePoll() {
+    ensureOnlinePoll(true);
+  }
   function openOnline() {
+    if (!requireStarterDeckUnlock()) return;
+    setAppRoute("online");
     closeAllScreens();
     $("menu").classList.add("hidden");
-    setAppRoute("online");
     const m = onlineEnsureModal();
     m.classList.remove("hidden");
+    animateUiSurface(m, "ecRouteEnter", 400);
     void renderOnline();
-    window.clearInterval(onlinePoll);
-    onlinePoll = window.setInterval(() => {
-      void onlinePollTick();
-    }, 2500);
+    startOnlinePoll();
   }
   function closeOnline() {
     document.getElementById("onlineModal")?.classList.add("hidden");
-    window.clearInterval(onlinePoll);
-    onlinePoll = 0;
+    ensureOnlinePoll();
   }
   function renderHomeChallengeBanner() {
     const b = document.getElementById("ecChBanner");
@@ -33422,7 +35707,22 @@
   });
   window.setInterval(() => {
     if (!meta.signedIn || !authGet() || typeof window.fetch !== "function") return;
-    void syncProfile();
+    if (profileSyncPaused) {
+      const pid = meta.pid;
+      void pullProfile(pid).then((status) => {
+        if (meta.pid !== pid || !meta.signedIn) return;
+        if (status === "loaded") {
+          profileSyncPaused = false;
+          profileMigrationNick = "";
+          showToast("\u{1F504} \u0421\u0435\u0440\u0432\u0435\u0440\u043D\u044B\u0439 \u043F\u0440\u043E\u0444\u0438\u043B\u044C \u0441\u0438\u043D\u0445\u0440\u043E\u043D\u0438\u0437\u0438\u0440\u043E\u0432\u0430\u043D");
+        } else if (status === "missing") {
+          profileSyncPaused = false;
+          if (profileMigrationNick) meta.nick = profileMigrationNick;
+          profileMigrationNick = "";
+          void syncProfile();
+        }
+      });
+    } else void syncProfile();
     void onApi("POST", "/api/presence", { status: "online" });
     void onApi("GET", "/api/friends").then((r) => {
       if (!r.ok) return;
@@ -33445,46 +35745,128 @@
       this.mode = "casual";
       this.match = "";
       this.overInfo = null;
+      this.connected = false;
+      this.resumeSyncPending = false;
+      this.closed = false;
+      this.onConnectionChange = null;
       this.onNeedSync = null;
+      this.onSync = null;
       this.ws = null;
       this.queue = [];
       this.waiters = [];
-      this.closed = false;
       this.started = null;
       this.retries = 0;
       this.urlIdx = 0;
+      this.retryTimer = 0;
+      this.connectTimer = 0;
+      this.connectDeadline = 0;
+      this.disconnectedAt = 0;
+      this.connectionAccepted = false;
+    }
+    isReady() {
+      return this.connected && !this.resumeSyncPending && !this.closed && !this.overInfo;
+    }
+    notifyConnection() {
+      this.onConnectionChange?.(this.isReady());
+    }
+    setConnected(value) {
+      if (this.connected === value) return;
+      this.connected = value;
+      this.notifyConnection();
+    }
+    finishStarted(ok, err) {
+      const resolve = this.started;
+      if (!resolve) return;
+      this.started = null;
+      if (this.connectTimer) {
+        window.clearTimeout(this.connectTimer);
+        this.connectTimer = 0;
+      }
+      resolve(ok, err);
     }
     connect(timeoutMs = 2e4) {
       return new Promise((resolve, reject) => {
-        const t = window.setTimeout(() => {
-          this.started = null;
-          reject(new Error("\u0421\u043E\u043F\u0435\u0440\u043D\u0438\u043A \u043D\u0435 \u043F\u043E\u0434\u043A\u043B\u044E\u0447\u0438\u043B\u0441\u044F \u0432\u043E\u0432\u0440\u0435\u043C\u044F"));
-        }, timeoutMs);
+        if (!this.urls.length) {
+          reject(new Error("\u041D\u0435 \u0437\u0430\u0434\u0430\u043D \u0430\u0434\u0440\u0435\u0441 \u043C\u0430\u0442\u0447-\u0441\u0435\u0440\u0432\u0435\u0440\u0430"));
+          return;
+        }
+        this.connectDeadline = Date.now() + timeoutMs;
         this.started = (ok, err) => {
-          window.clearTimeout(t);
-          this.started = null;
           if (ok) resolve();
           else reject(new Error(err || "\u041E\u0448\u0438\u0431\u043A\u0430 \u043F\u043E\u0434\u043A\u043B\u044E\u0447\u0435\u043D\u0438\u044F"));
         };
         this.open();
+        this.armConnectTimeout();
       });
     }
+    armConnectTimeout() {
+      if (!this.started) return;
+      if (this.connectTimer) window.clearTimeout(this.connectTimer);
+      const left = this.connectDeadline - Date.now();
+      if (left <= 0) {
+        this.finishStarted(false, "\u0421\u0435\u0440\u0432\u0435\u0440 \u043C\u0430\u0442\u0447\u0430 \u043D\u0435 \u043E\u0442\u0432\u0435\u0442\u0438\u043B \u0432\u043E\u0432\u0440\u0435\u043C\u044F");
+        return;
+      }
+      const remainingTargets = Math.max(1, this.urls.length - this.urlIdx);
+      const attemptMs = this.connectionAccepted ? left : Math.min(8e3, Math.max(2500, Math.floor(left / remainingTargets)));
+      this.connectTimer = window.setTimeout(() => {
+        if (!this.started) return;
+        if (this.connectionAccepted) {
+          this.finishStarted(false, "\u0421\u043E\u043F\u0435\u0440\u043D\u0438\u043A \u043D\u0435 \u043F\u043E\u0434\u043A\u043B\u044E\u0447\u0438\u043B\u0441\u044F \u043A \u043C\u0430\u0442\u0447-\u0441\u0435\u0440\u0432\u0435\u0440\u0443 \u0432\u043E\u0432\u0440\u0435\u043C\u044F. \u041F\u043E\u0432\u0442\u043E\u0440\u0438\u0442\u0435 \u043F\u043E\u0438\u0441\u043A.");
+          return;
+        }
+        if (this.urlIdx < this.urls.length - 1) {
+          const old = this.ws;
+          this.ws = null;
+          this.urlIdx++;
+          try {
+            old?.close();
+          } catch {
+          }
+          this.open();
+          this.armConnectTimeout();
+        } else this.finishStarted(false, "\u041C\u0430\u0442\u0447-\u0441\u0435\u0440\u0432\u0435\u0440 \u043D\u0435 \u043E\u0442\u0432\u0435\u0442\u0438\u043B. \u041F\u0440\u043E\u0432\u0435\u0440\u044C\u0442\u0435 MATCH_WS_PUBLIC_URL.");
+      }, Math.min(attemptMs, left));
+    }
+    tryNextInitialEndpoint(reason) {
+      if (!this.started) return;
+      if (this.urlIdx < this.urls.length - 1 && !/билет|место занято|уже заверш|недействительн/i.test(reason)) {
+        const old = this.ws;
+        this.ws = null;
+        this.urlIdx++;
+        try {
+          old?.close();
+        } catch {
+        }
+        this.open();
+        this.armConnectTimeout();
+      } else this.finishStarted(false, reason);
+    }
     open() {
+      if (this.closed || this.overInfo || !this.urls.length) return;
       let ws;
       try {
         ws = new WebSocket(this.urls[this.urlIdx]);
       } catch {
-        this.started?.(false, "\u041C\u0430\u0442\u0447-\u0441\u0435\u0440\u0432\u0435\u0440 \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u0435\u043D");
+        if (this.started) this.tryNextInitialEndpoint("\u041C\u0430\u0442\u0447-\u0441\u0435\u0440\u0432\u0435\u0440 \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u0435\u043D");
+        else this.scheduleReconnect();
         return;
       }
       this.ws = ws;
-      let opened = false;
+      this.connectionAccepted = false;
       ws.onopen = () => {
-        opened = true;
-        this.retries = 0;
-        ws.send(JSON.stringify({ t: "join", ticket: this.ticket, ...this.joinInfo }));
+        if (this.ws !== ws || this.closed) return;
+        try {
+          ws.send(JSON.stringify({ t: "join", ticket: this.ticket, ...this.joinInfo }));
+        } catch {
+          try {
+            ws.close();
+          } catch {
+          }
+        }
       };
       ws.onmessage = (ev) => {
+        if (this.ws !== ws || this.closed) return;
         let m;
         try {
           m = JSON.parse(String(ev.data));
@@ -33497,17 +35879,32 @@
           this.match = String(m.match ?? "");
           this.you = m.you;
           this.opp = m.opp;
+          this.resumeSyncPending = !!m.resume;
+          this.retries = 0;
+          this.disconnectedAt = 0;
+          this.setConnected(true);
+          this.notifyConnection();
           if (m.resume) {
-            pushLog("\u{1F4E1} \u0421\u043E\u0435\u0434\u0438\u043D\u0435\u043D\u0438\u0435 \u0432\u043E\u0441\u0441\u0442\u0430\u043D\u043E\u0432\u043B\u0435\u043D\u043E", "phase");
+            this.queue.length = 0;
+            pushLog("\u{1F4E1} \u0421\u043E\u0435\u0434\u0438\u043D\u0435\u043D\u0438\u0435 \u0432\u043E\u0441\u0441\u0442\u0430\u043D\u043E\u0432\u043B\u0435\u043D\u043E \u2014 \u0441\u0438\u043D\u0445\u0440\u043E\u043D\u0438\u0437\u0438\u0440\u0443\u0435\u043C \u043C\u0430\u0442\u0447", "phase");
             return;
           }
-          this.started?.(true);
+          this.finishStarted(true);
         } else if (m.t === "joined") {
+          this.connectionAccepted = true;
           if (m.waiting) setOnlineConnecting("\u0416\u0434\u0451\u043C \u0441\u043E\u043F\u0435\u0440\u043D\u0438\u043A\u0430\u2026");
+          if (this.started) this.armConnectTimeout();
         } else if (m.t === "net") {
           const nm = m.m;
           if (nm?.k === "needSync") {
             this.onNeedSync?.();
+            return;
+          }
+          if (nm?.k === "sync") {
+            this.onSync?.(nm);
+            this.resumeSyncPending = false;
+            this.notifyConnection();
+            this.push({ k: "syncApplied" });
             return;
           }
           this.push(nm);
@@ -33518,37 +35915,66 @@
           pushLog("\u{1F4E1} \u0421\u043E\u043F\u0435\u0440\u043D\u0438\u043A \u0432\u0435\u0440\u043D\u0443\u043B\u0441\u044F", "phase");
         } else if (m.t === "over") {
           this.overInfo = { winnerSeat: m.winnerSeat ?? null, reason: String(m.reason ?? "") };
-          battle.netServerOver(this.overInfo.winnerSeat, this.overInfo.reason);
+          this.resumeSyncPending = false;
+          this.setConnected(false);
           this.flush();
+          battle.netServerOver(this.overInfo.winnerSeat, this.overInfo.reason);
         } else if (m.t === "err") {
-          showToast(`\u26A0 ${m.msg}`);
-          this.started?.(false, String(m.msg));
+          const message = String(m.msg ?? "\u041E\u0448\u0438\u0431\u043A\u0430 \u043C\u0430\u0442\u0447-\u0441\u0435\u0440\u0432\u0435\u0440\u0430");
+          if (this.started) this.tryNextInitialEndpoint(message);
+          else {
+            this.overInfo = { winnerSeat: null, reason: message };
+            this.resumeSyncPending = false;
+            this.setConnected(false);
+            this.flush();
+            showToast(`\u26A0 ${message}`);
+            battle.netServerOver(null, message);
+          }
         }
       };
       ws.onclose = () => {
+        if (this.ws !== ws) return;
         this.ws = null;
+        this.setConnected(false);
         if (this.closed || this.overInfo) return;
-        if (this.started && !opened && this.urlIdx < this.urls.length - 1) {
-          this.urlIdx++;
-          this.open();
-          return;
-        }
         if (this.started) {
-          this.started(false, "\u0421\u0435\u0440\u0432\u0435\u0440 \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u0435\u043D \u2014 \u0437\u0430\u043F\u0443\u0441\u0442\u0438\u0442\u0435 npm run server:meta");
+          if (!this.connectionAccepted && this.urlIdx < this.urls.length - 1) {
+            this.urlIdx++;
+            this.open();
+            this.armConnectTimeout();
+          } else this.finishStarted(false, this.connectionAccepted ? "\u0421\u043E\u0435\u0434\u0438\u043D\u0435\u043D\u0438\u0435 \u0441 \u043C\u0430\u0442\u0447-\u0441\u0435\u0440\u0432\u0435\u0440\u043E\u043C \u043F\u043E\u0442\u0435\u0440\u044F\u043D\u043E \u0434\u043E \u043D\u0430\u0447\u0430\u043B\u0430 \u0438\u0433\u0440\u044B." : "\u0421\u0435\u0440\u0432\u0435\u0440 \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u0435\u043D \u2014 \u043F\u0440\u043E\u0432\u0435\u0440\u044C\u0442\u0435 URL \u043C\u0430\u0442\u0447-\u0441\u0435\u0440\u0432\u0435\u0440\u0430.");
           return;
         }
-        if (this.retries++ < 20) {
-          pushLog("\u{1F4E1} \u0421\u0432\u044F\u0437\u044C \u043F\u043E\u0442\u0435\u0440\u044F\u043D\u0430 \u2014 \u043F\u0435\u0440\u0435\u043F\u043E\u0434\u043A\u043B\u044E\u0447\u0435\u043D\u0438\u0435\u2026", "big");
-          window.setTimeout(() => this.open(), 1500);
-        }
+        this.scheduleReconnect();
       };
+    }
+    scheduleReconnect() {
+      if (this.closed || this.overInfo || this.retryTimer) return;
+      if (!this.disconnectedAt) this.disconnectedAt = Date.now();
+      if (Date.now() - this.disconnectedAt >= 55e3) {
+        const winnerSeat = this.seat === 0 ? 1 : 0;
+        this.overInfo = { winnerSeat, reason: "disconnect" };
+        this.flush();
+        battle.netServerOver(winnerSeat, "disconnect");
+        return;
+      }
+      const base = Math.min(4500, 500 * 1.6 ** Math.min(this.retries, 5));
+      const delay = Math.round(base + Math.random() * 300);
+      this.retries++;
+      this.retryTimer = window.setTimeout(() => {
+        this.retryTimer = 0;
+        if (!this.closed && !this.overInfo) this.open();
+      }, delay);
     }
     push(m) {
       const i = this.waiters.findIndex((w) => !w.kind || w.kind === m.k);
       if (i >= 0) {
         const w = this.waiters.splice(i, 1)[0];
         w.res(m);
-      } else this.queue.push(m);
+      } else {
+        this.queue.push(m);
+        if (this.queue.length > 128) this.queue.splice(0, this.queue.length - 128);
+      }
     }
     flush() {
       for (const w of this.waiters.splice(0)) w.res(null);
@@ -33569,21 +35995,58 @@
       this.sendRaw({ t: "net", m });
     }
     sendRaw(m) {
-      if (this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(m));
+      if (this.connected && this.ws && this.ws.readyState === WebSocket.OPEN) {
+        try {
+          this.ws.send(JSON.stringify(m));
+        } catch {
+        }
+      }
     }
     concede() {
       this.sendRaw({ t: "concede" });
     }
     close() {
       this.closed = true;
+      if (this.retryTimer) {
+        window.clearTimeout(this.retryTimer);
+        this.retryTimer = 0;
+      }
+      if (this.connectTimer) {
+        window.clearTimeout(this.connectTimer);
+        this.connectTimer = 0;
+      }
+      this.resumeSyncPending = false;
+      this.setConnected(false);
+      this.finishStarted(false, "\u041F\u043E\u0434\u043A\u043B\u044E\u0447\u0435\u043D\u0438\u0435 \u043E\u0442\u043C\u0435\u043D\u0435\u043D\u043E");
       this.flush();
+      const ws = this.ws;
+      this.ws = null;
       try {
-        this.ws?.close();
+        ws?.close();
       } catch {
       }
     }
   };
-  var MATCH_WS = () => [META_API().replace(/^http/, "ws") + "/match", `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.hostname}:8080`];
+  function normalizedWsUrl(raw) {
+    if (!raw) return "";
+    try {
+      const u = new URL(raw, window.location.href);
+      if (u.protocol === "http:") u.protocol = "ws:";
+      if (u.protocol === "https:") u.protocol = "wss:";
+      if (u.protocol === "ws:" && window.location.protocol === "https:") u.protocol = "wss:";
+      if (u.protocol !== "ws:" && u.protocol !== "wss:") return "";
+      return u.href.replace(/\/+$/, "");
+    } catch {
+      return "";
+    }
+  }
+  var MATCH_WS = (preferred = "") => {
+    const configured = clientUrlParams.get("matchWs") || storedClientUrl("ec_match_ws") || CLIENT_RUNTIME_CONFIG.matchWsUrl || "";
+    const explicit = [preferred, ...configured.split(",")].map((x) => normalizedWsUrl(x.trim())).filter(Boolean);
+    const apiSocket = normalizedWsUrl(`${META_API().replace(/^http/, "ws")}/match`);
+    const fallback = window.location.protocol === "https:" ? normalizedWsUrl(`${window.location.origin.replace(/^http/, "ws")}/match`) : normalizedWsUrl(`ws://${window.location.hostname || "localhost"}:8080/match`);
+    return [.../* @__PURE__ */ new Set([...explicit, apiSocket, fallback])];
+  };
   function setOnlineConnecting(text) {
     let o = document.getElementById("onlineConnecting");
     if (!text) {
@@ -33599,18 +36062,31 @@
     o.querySelector(".t").textContent = text;
   }
   async function startOnlineBattle(ticket, wsUrl) {
+    if (!requireStarterDeckUnlock()) return;
+    if (onlineStarting || !ticket) return;
+    onlineStarting = true;
+    if (onlineLaunchTimer) {
+      window.clearTimeout(onlineLaunchTimer);
+      onlineLaunchTimer = 0;
+    }
     const deckId = onlineDeckId();
     const def = resolveDeck(deckId, deckList) ?? starterDeckForFaction(picked) ?? deckById.get(picked);
-    const urls = wsUrl ? [wsUrl, ...MATCH_WS()] : MATCH_WS();
+    const urls = MATCH_WS(wsUrl);
     const link = new NetLink(urls, ticket, { deck: def.cards.slice(), faction: String(def.faction), name: String(meta.nick || "\u0418\u0433\u0440\u043E\u043A") });
+    link.onConnectionChange = (connected) => {
+      if (battle.net === link) battle.onNetConnection(connected);
+    };
+    onlineSearch = null;
     closeOnline();
     setOnlineConnecting("\u041F\u043E\u0434\u043A\u043B\u044E\u0447\u0435\u043D\u0438\u0435 \u043A \u043C\u0430\u0442\u0447\u0443\u2026");
     try {
-      await link.connect(25e3);
+      await link.connect(6e4);
     } catch (err) {
       setOnlineConnecting(null);
       link.close();
-      showToast(`\u26A0 ${err.message}`);
+      onlineFound = null;
+      onlineStarting = false;
+      showToast(`\u26A0 ${err.message}. \u0417\u0430\u043F\u0443\u0441\u0442\u0438\u0442\u0435 \u043F\u043E\u0438\u0441\u043A \u0435\u0449\u0451 \u0440\u0430\u0437.`);
       openOnline();
       return;
     }
@@ -33632,6 +36108,7 @@
     battle.eventId = null;
     battle.matchId = link.match;
     applyBattleBg(battle.playerFaction);
+    onlineStarting = false;
     battle.start().catch((err) => reportFatal("online-start", err));
   }
   async function onlineRefreshAfterMatch() {

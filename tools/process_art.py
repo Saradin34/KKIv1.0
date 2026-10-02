@@ -7,9 +7,11 @@
  Берёт всё новое из drop-зон художника (echo-citadel/art_raw и /home/user/art_raw),
  нормализует и раскладывает:
    • карты   : cover-crop в пропорцию 3:4 → 512×720 (artSize из Cards.json),
-               _processed/cards/<Faction>/<id>.png + Assets/Resources/Cards/<Faction>/
-   • герои   : cover-crop в квадрат → 512×512,
+               _processed/cards/<Faction>[/<Subfaction>]/<id>.png + Assets/Resources/Cards/<Faction>[/<Subfaction>]/
+   • герои профиля/фракций: cover-crop в квадрат → 512×512,
                _processed/heroes/<Faction>.png + Assets/Resources/Heroes/
+   • герои колод: art_raw/deck_heroes/<id>/portrait.* → 512×512,
+               _processed/deck_heroes/<id>.png + Assets/Resources/DeckHeroes/
    • фоны/UI : копируются в _processed/ui/ без изменений пропорций (ресайз ≤2048)
  Идемпотентен: sha256 источника хранится в _processed/.state.json — unchanged
  файлы не пересчитываются. Пишет manifest.csv (id, src, sha256, out, size).
@@ -18,6 +20,7 @@
 """
 from __future__ import annotations
 import csv, hashlib, json, os, shutil, sys
+from typing import Optional, Tuple
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RAW_DIRS = [os.path.join(ROOT, 'art_raw'), os.path.abspath(os.path.join(ROOT, '..', 'art_raw'))]
@@ -25,7 +28,7 @@ OUT = os.path.join(ROOT, '_processed')
 ASSETS = os.path.join(ROOT, 'unity', 'EchoCitadel', 'Assets')
 CARDS_JSON = os.path.join(ASSETS, 'StreamingAssets', 'Cards.json')
 STATE = os.path.join(OUT, '.state.json')
-EXT = ('.png', '.jpg', '.jpeg', '.webp')
+EXT = ('.png', '.jpg', '.jpeg', '.webp', '.gif')
 
 try:
     from PIL import Image
@@ -64,6 +67,16 @@ def cover(src: str, dst: str, w: int, h: int) -> None:
         im.save(dst, 'PNG', optimize=True)
 
 
+def preferred_portrait(folder: str) -> Optional[str]:
+    files = [os.path.join(folder, fn) for fn in sorted(os.listdir(folder))
+             if os.path.splitext(fn)[1].lower() in EXT and os.path.isfile(os.path.join(folder, fn))]
+    def rank(src: str) -> Tuple[int, str]:
+        base = os.path.splitext(os.path.basename(src))[0].lower()
+        order = 0 if base == 'portrait' else 1 if base == '00_main' else 2 if base in ('main', 'avatar') else 3
+        return order, os.path.basename(src).lower()
+    return sorted(files, key=rank)[0] if files else None
+
+
 def main() -> int:
     data = json.load(open(CARDS_JSON, encoding='utf-8'))
     by_id = {c['id']: c for c in data['cards']}
@@ -92,14 +105,24 @@ def main() -> int:
             src = os.path.join(raw, fn)
             h = sha256(src)
             key = f'card:{cid}'
-            if state.get(key) == h:
+            card = by_id[cid]
+            artwork_path = (card.get('artworkPath') or card.get('art') or
+                            f"Resources/Cards/{card['faction']}/{cid}.png").replace(chr(92), '/')
+            try:
+                cards_i = artwork_path.split('/').index('Cards')
+                cards_rel = artwork_path.split('/')[cards_i + 1:]
+                if len(cards_rel) < 2 or any(part in ('', '.', '..') for part in cards_rel):
+                    raise ValueError('invalid card artworkPath')
+            except (ValueError, IndexError):
+                cards_rel = [card['faction'], cid + '.png']
+            if cards_rel[-1] != cid + '.png':
+                cards_rel[-1] = cid + '.png'
+            out = os.path.join(OUT, 'cards', *cards_rel)
+            uni = os.path.join(ASSETS, 'Resources', 'Cards', *cards_rel)
+            if state.get(key) == h and os.path.exists(uni):
                 skipped += 1
                 new_state[key] = h
                 continue
-            card = by_id[cid]
-            fac = card['faction']
-            out = os.path.join(OUT, 'cards', fac, f'{cid}.png')
-            uni = os.path.join(ASSETS, 'Resources', 'Cards', fac, f'{cid}.png')
             cover(src, out, 512, 720)
             thumb = os.path.join(OUT, 'thumbs', f'{cid}.png')
             cover(src, thumb, 256, 360)
@@ -139,6 +162,42 @@ def main() -> int:
                 new_state[key] = h
                 done += 1
 
+    # --- визуальные герои колод: папка <id>/portrait.* или файл <id>.<ext> ---
+    for raw in RAW_DIRS:
+        hroot = os.path.join(raw, 'deck_heroes')
+        if not os.path.isdir(hroot):
+            continue
+        entries = sorted(os.listdir(hroot))
+        folder_names = {name.lower() for name in entries
+                        if os.path.isdir(os.path.join(hroot, name))
+                        and preferred_portrait(os.path.join(hroot, name))}
+        for entry in entries:
+            path_entry = os.path.join(hroot, entry)
+            if os.path.isdir(path_entry):
+                hero_id = entry
+                src = preferred_portrait(path_entry)
+            else:
+                hero_id, ext = os.path.splitext(entry)
+                if ext.lower() not in EXT or hero_id.lower() in folder_names:
+                    continue
+                src = path_entry if os.path.isfile(path_entry) else None
+            if not hero_id or any(not (ch.isascii() and (ch.isalnum() or ch in '_-')) for ch in hero_id) or not src:
+                continue
+            h = sha256(src)
+            key = f'deck-hero:{hero_id.lower()}'
+            out = os.path.join(OUT, 'deck_heroes', f'{hero_id}.png')
+            uni = os.path.join(ASSETS, 'Resources', 'DeckHeroes', f'{hero_id}.png')
+            if state.get(key) == h and os.path.exists(uni):
+                skipped += 1
+                new_state[key] = h
+                continue
+            cover(src, out, 512, 512)
+            os.makedirs(os.path.dirname(uni), exist_ok=True)
+            shutil.copyfile(out, uni)
+            manifest.append(['deck-hero', hero_id, h, os.path.relpath(out, ROOT), f'{os.path.getsize(out)}B'])
+            new_state[key] = h
+            done += 1
+
     # --- фоны/UI: любые прочие изображения в корне art_raw с префиксом bg_/ui_ ---
     for raw in RAW_DIRS:
         if not os.path.isdir(raw):
@@ -168,7 +227,8 @@ def main() -> int:
 
     # --- renorm: уже лежащие в Unity арты нестандартной пропорции → 512×720 / 512×512 ---
     for root, want in ((os.path.join(ASSETS, 'Resources', 'Cards'), (512, 720)),
-                       (os.path.join(ASSETS, 'Resources', 'Heroes'), (512, 512))):
+                       (os.path.join(ASSETS, 'Resources', 'Heroes'), (512, 512)),
+                       (os.path.join(ASSETS, 'Resources', 'DeckHeroes'), (512, 512))):
         if not os.path.isdir(root):
             continue
         for dp, _, fs_ in os.walk(root):
@@ -226,7 +286,7 @@ def main() -> int:
         w.writerow(['kind', 'id', 'sha256', 'out', 'size'])
         w.writerows(manifest)
     print(f'✔ пайплайн ассетов: обработано {done}, пропущено без изменений {skipped}')
-    print(f'  _processed/: cards/, heroes/, ui/ + manifest.csv')
+    print(f'  _processed/: cards/, heroes/, deck_heroes/, ui/ + manifest.csv')
     return 0
 
 

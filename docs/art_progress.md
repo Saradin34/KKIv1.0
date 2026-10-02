@@ -3,8 +3,8 @@
 Пайплайн интеграции (единый для прототипа и Unity):
 1. `generate_image` → `art_raw/<id>.png` (квадратная композиция под арт-зону 70%).
 2. Нормализация PIL: центр-кроп в квадрат → 768×768 PNG (optimize).
-3. Файл кладётся в `unity/EchoCitadel/Assets/Resources/Cards/<Faction>/<id>.png`
-   (путь совпадает с `artworkPath` в Cards.json).
+3. После нормализации PNG кладётся по `artworkPath`: `unity/EchoCitadel/Assets/Resources/Cards/<Faction>[/<Subfamily>]/<id>.png`.
+   Для карт ядра сегмента `<Subfamily>` нет.
 4. Прототип: `tools/serve.js` отдаёт папку по `/art/…`; `artUrlFor()` (src/ui/art.ts)
    строит URL; `cardArt()` рисует `<image … preserveAspectRatio="xMidYMid slice">`
    поверх процедурной заглушки. Файла нет → остаётся заглушка, ошибок нет.
@@ -53,13 +53,13 @@ ter_s09 (Сердце Мира, L), aur_r06 (Руна Последнего Св�
 ## Контроль
 - Смоук-чеки: «PNG-арты флагманов интегрированы (пакет 1: 5 карт)» и
   «PNG-арты интегрированы (пакет 2: 5 карт)» — файлы на диске + PNG-магия + `artUrlFor` в бандле.
-- Ручная сверка: `curl /art/<Faction>/<id>.png` → 200, md5 == диск.
+- Ручная сверка: `curl /art/<Faction>[/<Subfamily>]/<id>.png` → 200, md5 == файл на диске.
 
 ## Drop-in режим (2026-09-04)
 Художник кладёт файл в `art_raw/<id>.png` (принимаются также .jpg/.jpeg/.webp;
 `aur_1.png` понимается как `aur_01`) — прототип подхватывает его **сразу**, без шагов:
-- `tools/serve.js`: запрос `/art/<Faction>/<id>.png` резолвится так:
-  1) `art_raw/<id>*` (свежий файл, приоритет), 2) `Resources/Cards/<Faction>/<id>.png`.
+- `tools/serve.js`: запрос `/art/<Faction>[/<Subfamily>]/<id>.png` резолвится так:
+  1) flat `art_raw/<id>*` (свежий файл, приоритет), 2) вложенный путь из `artworkPath` в `Resources/Cards`.
   Папки drop-in: `/home/user/art_raw` и `/home/user/echo-citadel/art_raw` (подпапки игнорируются).
 - Для Unity: `npm run art:sync` — нормализует (центр-кроп квадрат, 768×768, PIL; без PIL — копия)
   и раскладывает по `artworkPath` из Cards.json; неизвестные id пропускаются с предупреждением.

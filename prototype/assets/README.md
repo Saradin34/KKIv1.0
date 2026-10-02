@@ -9,6 +9,6 @@
 | `ui/` | `logo.png` — логотип топбара (горизонтальный, ~600×160, прозрачный фон) |
 
 Серверные арты (не в этой папке, а в корне репо):
-- `art_raw/<id>.png` → арты карт (сервер раскладывает по `/art/<Фракция>/<id>.png`);
+- `art_raw/<id>.png` → арты карт (flat drop-in; сервер/синк используют `/art/<Фракция>[/<Семейство>]/<id>.png` по artworkPath);
 - `art_raw/heroes/<Фракция>/` — портреты героев для «Быстрого выбора» и аватаров;
 - `art_raw/cosm/{backs,tables,runes,offers,bundles,bp,quests,events,mana,sets}/` — косметика и ключ-арты (см. `art_raw/README.md`).

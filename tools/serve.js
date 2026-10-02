@@ -4,9 +4,10 @@
    Отдаёт prototype/index.html + prototype.js на 0.0.0.0 (нужно для
    live-preview песочницы). Без зависимостей.
 
-   Дополнительно монтирует папку артов:
-       /art/<Faction>/<id>.png  →  unity/EchoCitadel/Assets/Resources/Cards/<Faction>/<id>.png
-   То есть художник кладёт PNG в папку фракции внутри Unity-проекта —
+   Дополнительно монтирует папки артов:
+       /art/<Faction>[/<Subfamily>]/<id>.png  →  unity/EchoCitadel/Assets/Resources/Cards/<Faction>[/<Subfamily>]/<id>.png
+       /deck-heroes/<id>                     →  art_raw/deck_heroes/<id>/portrait.* или art_raw/deck_heroes/<id>.<ext>
+   То есть художник кладёт PNG в папку фракции или семейства внутри Unity-проекта —
    и прототип в браузере подхватывает его без копирования и пересборки.
    Пока файла нет, карта рисуется процедурной заглушкой (src/ui/art.ts).
 
@@ -21,7 +22,42 @@ const ART_ROOT = path.resolve(__dirname, '..', 'unity', 'EchoCitadel', 'Assets',
 // Drop-in папки художника: файл art_raw/<id>.png подхватывается сразу, без копирования.
 // Приоритет: art_raw (свежийドロップ) → Resources/Cards (нормализованные для Unity).
 const RAW_DIRS = [path.resolve(__dirname, '..', 'art_raw'), path.resolve(__dirname, '..', '..', 'art_raw')];
-const RAW_EXT = ['.png', '.jpg', '.jpeg', '.webp'];
+// GIF/APNG/animated WebP are served directly to <img> so the browser keeps animation.
+const RAW_EXT = ['.png', '.jpg', '.jpeg', '.webp', '.gif'];
+const DECK_HERO_ASSET_ROOT = path.resolve(__dirname, '..', 'unity', 'EchoCitadel', 'Assets', 'Resources', 'DeckHeroes');
+
+function preferredPortrait(dir) {
+  let images = [];
+  try {
+    images = fs.readdirSync(dir).filter(name => RAW_EXT.includes(path.extname(name).toLowerCase())
+      && fs.statSync(path.join(dir, name)).isFile());
+  } catch { return null; }
+  const rank = name => {
+    const base = path.basename(name, path.extname(name)).toLowerCase();
+    return base === 'portrait' ? 0 : base === '00_main' ? 1 : base === 'main' || base === 'avatar' ? 2 : 3;
+  };
+  images.sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+  return images.length ? path.join(dir, images[0]) : null;
+}
+
+function findHeroDirectory(base, id) {
+  try {
+    const names = fs.readdirSync(base).filter(name => name.toLowerCase() === id.toLowerCase()
+      && fs.statSync(path.join(base, name)).isDirectory());
+    const withArt = names.find(name => preferredPortrait(path.join(base, name)));
+    return withArt ? path.join(base, withArt) : (names.length ? path.join(base, names[0]) : null);
+  } catch { return null; }
+}
+
+function findFlatHeroImage(base, id, extensions = RAW_EXT) {
+  try {
+    const names = fs.readdirSync(base);
+    const match = names.find(name => extensions.includes(path.extname(name).toLowerCase())
+      && path.basename(name, path.extname(name)).toLowerCase() === id.toLowerCase()
+      && fs.statSync(path.join(base, name)).isFile());
+    return match ? path.join(base, match) : null;
+  } catch { return null; }
+}
 
 /** Варианты имени: aur_2 → aur_02 (и обратно), чтобы опечатки в цифрах не ломали маппинг. */
 function idVariants(idBase) {
@@ -48,6 +84,11 @@ function findRawArt(idBase) {
 }
 const i = process.argv.indexOf('--port');
 const PORT = Number(i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : 5173);
+const RUNTIME_CONFIG = {
+  metaApiBase: process.env.EC_META_API_URL || process.env.META_API_URL || '',
+  matchApiBase: process.env.EC_MATCH_API_URL || process.env.MATCH_API_URL || '',
+  matchWsUrl: process.env.EC_MATCH_WS_URL || process.env.MATCH_WS_PUBLIC_URL || '',
+};
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -61,6 +102,7 @@ const MIME = {
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
   '.webp': 'image/webp',
+  '.gif': 'image/gif',
   '.ico': 'image/x-icon',
 };
 
@@ -79,6 +121,13 @@ function send(res, code, body, type) {
 const server = http.createServer((req, res) => {
   let urlPath = decodeURIComponent((req.url || '/').split('?')[0]);
   if (urlPath === '/' || urlPath === '') urlPath = '/index.html';
+
+  // Runtime endpoints stay configurable without rebuilding the browser bundle.
+  if (urlPath === '/runtime-config.js') {
+    return send(res, 200,
+      `window.EC_CONFIG = Object.assign({}, window.EC_CONFIG || {}, ${JSON.stringify(RUNTIME_CONFIG)});`,
+      'text/javascript; charset=utf-8');
+  }
 
   // /art/… → папка артов внутри Unity-проекта (одна копия файлов на все клиенты)
   if (urlPath.startsWith('/locale/')) {
@@ -128,6 +177,37 @@ const server = http.createServer((req, res) => {
     if (file) break;
     }
     if (!file) return send(res, 404, '404: аватар героя не найден (положите png в art_raw/heroes/' + name + '/)');
+    fs.readFile(file, (err, data) => {
+      if (err) return send(res, 404, '404: ' + urlPath);
+      send(res, 200, data, MIME[path.extname(file).toLowerCase()] || 'application/octet-stream');
+    });
+    return;
+  }
+
+  // /deck-heroes/<id> — портрет героя конкретной колоды, отдельно от профильных /heroes/<Faction>.
+  if (urlPath.startsWith('/deck-heroes/')) {
+    const id = urlPath.slice('/deck-heroes/'.length).replace(/[^a-zA-Z0-9_-]/g, '');
+    if (!id) return send(res, 404, '404: укажите ID героя колоды');
+    let file = null;
+    for (const raw of RAW_DIRS) {
+      const base = path.join(raw, 'deck_heroes');
+      const dir = findHeroDirectory(base, id);
+      if (dir) file = preferredPortrait(dir);
+      if (!file) file = findFlatHeroImage(base, id);
+      if (file) break;
+    }
+    if (!file) {
+      const processedRoot = path.resolve(__dirname, '..', '_processed', 'deck_heroes');
+      file = findFlatHeroImage(processedRoot, id, ['.png']);
+    }
+    if (!file) file = findFlatHeroImage(DECK_HERO_ASSET_ROOT, id, RAW_EXT);
+    if (!file) {
+      const checked = RAW_DIRS.map(raw => `${path.join(raw, 'deck_heroes', id)} / ${path.join(raw, 'deck_heroes', id + '.*')}`).join(' | ');
+      console.warn(`[DeckHeroes] 404 ${id}; проверено: ${checked}`);
+      return send(res, 404,
+        `404: портрет ${id} не найден. Ожидается art_raw/deck_heroes/${id}/portrait.png `
+        + `или art_raw/deck_heroes/${id}.png. Проверено: ${checked}`);
+    }
     fs.readFile(file, (err, data) => {
       if (err) return send(res, 404, '404: ' + urlPath);
       send(res, 200, data, MIME[path.extname(file).toLowerCase()] || 'application/octet-stream');
@@ -254,7 +334,8 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`[Эхо-Цитадель] прототип: http://0.0.0.0:${PORT}/  (корень ${ROOT})`);
-  console.log(`[Эхо-Цитадель] арты:     http://0.0.0.0:${PORT}/art/<Faction>/<id>.png  (${ART_ROOT})`);
+  console.log(`[Эхо-Цитадель] арты:     http://0.0.0.0:${PORT}/art/<Faction>[/<Subfamily>]/<id>.png  (${ART_ROOT})`);
   console.log(`[Эхо-Цитадель] drop-in:  art_raw/<id>.png подхватывается сразу  (${RAW_DIRS.join(' | ')})`);
+  console.log(`[Эхо-Цитадель] герои колод: /deck-heroes/<id>  (art_raw/deck_heroes/<id>/portrait.* или <id>.<ext>)`);
   console.log(`[Эхо-Цитадель] косметика: /cosm/<kind>/<id>  (art_raw/cosm/{backs,tables,runes,offers,bundles,bp,quests,events})`);
 });

@@ -113,6 +113,18 @@ function ensureStyle(): void {
   14%{opacity:.85;transform:translate(-50%,-50%) scale(1) rotateX(58deg)}
   70%{opacity:.55}100%{opacity:0;transform:translate(-50%,-50%) scale(1.06) rotateX(58deg)}}
 
+.vfx-summon-sigil{position:absolute;transform:translate(-50%,-50%) scale(.18) rotate(-34deg);opacity:0;
+  filter:drop-shadow(0 0 7px currentColor) drop-shadow(0 0 20px currentColor);mix-blend-mode:screen}
+.vfx-summon-sigil.go{animation:vfxSummonSigil .78s cubic-bezier(.18,.78,.22,1) forwards}
+.vfx-summon-sigil svg{display:block;width:100%;height:100%;overflow:visible}
+.vfx-summon-sigil .orbit{stroke-dasharray:3 4;animation:vfxSigilOrbit 2.4s linear infinite}
+.vfx-summon-sigil .etch{stroke-dasharray:2 3;opacity:.72}
+@keyframes vfxSummonSigil{0%{opacity:0;transform:translate(-50%,-50%) scale(.16) rotate(-34deg);filter:blur(3px) drop-shadow(0 0 4px currentColor)}
+  25%{opacity:.98;filter:blur(0) drop-shadow(0 0 10px currentColor) drop-shadow(0 0 24px currentColor)}
+  62%{opacity:.76;transform:translate(-50%,-50%) scale(1.04) rotate(8deg)}
+  100%{opacity:0;transform:translate(-50%,-50%) scale(1.32) rotate(24deg);filter:blur(1.5px) drop-shadow(0 0 16px currentColor)}}
+@keyframes vfxSigilOrbit{to{stroke-dashoffset:-28}}
+
 .vfx-flash{position:fixed;inset:0;background:currentColor;opacity:0;mix-blend-mode:screen}
 .vfx-flash.go{animation:vfxFlash var(--d,.28s) ease-out forwards}
 @keyframes vfxFlash{0%{opacity:var(--a,.5)}100%{opacity:0}}
@@ -621,11 +633,29 @@ export function runeFx(at: Pt, color = '#d8b45a'): void {
   motes(at, color, 14, 80);
 }
 
-/** Призыв существа: декаль → вспышка. */
+/** Призыв существа: проявляющийся сигил вместо обычного «падения» карты на поле. */
 export function summonFx(at: Pt, color = '#d8b45a'): void {
-  groundDecal(at, color, 140, 1100, true);
-  impactRing(at, color, 130);
-  sparkBurst(at, color, 12, 90);
+  if (reducedMotion) return;
+  const size = 176;
+  const sigil = add('vfx-summon-sigil', color, {
+    left: `${at.x}px`, top: `${at.y}px`, width: `${size}px`, height: `${size}px`,
+  });
+  sigil.setAttribute('aria-hidden', 'true');
+  sigil.innerHTML = `<svg viewBox="0 0 128 128" focusable="false">
+    <circle cx="64" cy="64" r="54" fill="none" stroke="currentColor" stroke-width="1.4" opacity=".92"/>
+    <circle class="orbit" cx="64" cy="64" r="45" fill="none" stroke="currentColor" stroke-width="1" opacity=".78"/>
+    <circle cx="64" cy="64" r="31" fill="currentColor" opacity=".10"/>
+    <path d="M64 10 70 48 108 64 70 70 64 108 58 70 20 64 58 58Z" fill="none" stroke="currentColor" stroke-width="1.4" opacity=".9"/>
+    <path d="M64 28 75 53 100 64 75 75 64 100 53 75 28 64 53 53Z" fill="none" stroke="currentColor" stroke-width=".9" opacity=".7"/>
+    <path class="etch" d="M42 23 48 34 39 41M86 23 80 34 89 41M105 42 94 48 87 39M105 86 94 80 87 89M42 105 48 94 39 87M23 86 34 80 41 89M23 42 34 48 41 39M86 105 80 94 89 87" fill="none" stroke="currentColor" stroke-width="1.1"/>
+    <path d="M64 46 68 60 82 64 68 68 64 82 60 68 46 64 60 60Z" fill="currentColor" opacity=".62"/>
+    <circle cx="64" cy="10" r="2" fill="currentColor"/><circle cx="118" cy="64" r="2" fill="currentColor"/>
+    <circle cx="64" cy="118" r="2" fill="currentColor"/><circle cx="10" cy="64" r="2" fill="currentColor"/>
+  </svg>`;
+  go(sigil, 820);
+  groundDecal(at, color, 132, 1050, true);
+  impactRing(at, color, 136);
+  sparkBurst(at, color, 16, 94);
 }
 
 /** Эхо: фиолетовая рябь и призрачный след. */

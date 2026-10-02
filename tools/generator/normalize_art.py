@@ -17,7 +17,7 @@
   3. масштабирует до 512×720 (Lanczos);
   4. сохраняет как <id>.png (исходник другого формата остаётся рядом — можно
      удалить вручную или флагом --clean);
-  5. печатает отчёт и обновляет manifest.csv в каждой папке.
+  5. печатает отчёт с вложенным путём; манифесты обновляет make_art_folders.py.
 
 Идемпотентен: файл уже 512×720 → пропускает (если не задан --force).
 
@@ -76,17 +76,20 @@ def main():
     print("-" * 78)
 
     changed = skipped = missing = 0
-    for folder in sorted(os.listdir(ART_ROOT)):
-        folder_abs = os.path.join(ART_ROOT, folder)
-        if not os.path.isdir(folder_abs):
-            continue
-        files = [f for f in sorted(os.listdir(folder_abs)) if f.lower().endswith(SOURCES)]
-        arts = [f for f in files if not f.startswith(("README", "manifest"))]
+    if not os.path.isdir(ART_ROOT):
+        print(f"Папка артов не найдена: {ART_ROOT}", file=sys.stderr)
+        return 2
+
+    for folder_abs, dirs, filenames in os.walk(ART_ROOT):
+        dirs.sort()
+        rel_folder = os.path.relpath(folder_abs, ART_ROOT)
+        folder = "" if rel_folder == "." else rel_folder.replace(os.sep, "/")
+        arts = [name for name in sorted(filenames) if name.lower().endswith(SOURCES)]
         if not arts:
-            print(f"{folder:<13} артов нет — папка ждёт файлы (см. README.md и manifest.csv)")
             continue
 
         for name in arts:
+            rel_name = f"{folder}/{name}" if folder else name
             src = os.path.join(folder_abs, name)
             stem = os.path.splitext(name)[0]
             dst = os.path.join(folder_abs, stem + ".png")
@@ -97,7 +100,7 @@ def main():
                         skipped += 1
                         continue
                     if args.dry:
-                        print(f"{folder}/{name:<16} {w0}×{h0} → требуется {tw}×{th}")
+                        print(f"{rel_name:<56} {w0}×{h0} → требуется {tw}×{th}")
                         changed += 1
                         continue
                     im = crop_to_ratio(im.convert("RGB"), RATIO)
@@ -105,12 +108,12 @@ def main():
                         im = im.resize((tw, th), Image.LANCZOS)
                     im.save(dst, "PNG", optimize=True)
                     size_kb = os.path.getsize(dst) // 1024
-                    print(f"{folder}/{stem + '.png':<16} {w0}×{h0} → {tw}×{th}, {size_kb} КБ")
+                    print(f"{rel_name:<56} {w0}×{h0} → {tw}×{th}, {size_kb} КБ")
                     changed += 1
                     if args.clean and src != dst:
                         os.remove(src)
             except Exception as e:                       # noqa: BLE001 — отчёт важнее падения
-                print(f"{folder}/{name:<16} ОШИБКА: {e}")
+                print(f"{rel_name:<56} ОШИБКА: {e}")
                 missing += 1
 
     print("-" * 78)

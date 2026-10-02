@@ -14,6 +14,7 @@
 минимум 60 карт, не более 4 копий любой карты), дописывает meta.expansionIds (бустер-онли прогрессия).
 """
 import json, os, collections
+from art_layout import art_layout_metadata, resource_card_path
 
 SEED = 20260922
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')
@@ -356,7 +357,7 @@ def main():
             c['faction'] = fac
             c['flavor'] = FLAVOR[(i + len(added)) % len(FLAVOR)]
             c['tags'] = ['card', direction, prefix]
-            c['art'] = f'Resources/Cards/{fac}/{cid}.png'
+            c['art'] = resource_card_path(fac, cid, prefix)
             c['artworkPath'] = c['art']
             c['artPrompt'] = f'dark fantasy trading card game illustration, {motif}: "{c["name"]}"'
             c['negativePrompt'] = 'text, letters, watermark, frame borders'
@@ -390,6 +391,15 @@ def main():
                       'note': '4 направления: агро (Мехи/Гремлины/Спрайты), отжор (Вампиры/Каннибалы/Суккубы), '
                               'токены (Энты/Братство паладинов/Священное братство), яд и порча (Ведьмы/Аспиды/Иссохшие). '
                               'Новый op: debuffHealth (Порча).'}
+    layout = m.setdefault('artLayout', {})
+    layout['root'] = 'Assets/Resources/Cards'
+    layout['byFaction'] = {fac: f'Assets/Resources/Cards/{fac}'
+                           for fac in ['Aurites', 'Necrus', 'Terramorph', 'Pyromancer', 'Ethereal', 'Neutral']}
+    layout['bySubfaction'] = art_layout_metadata()
+    layout['tokens'] = 'Assets/Resources/Cards/_Tokens'
+    layout['size'] = '512x720'
+    layout['naming'] = '<cardId>.png'
+    layout['note'] = 'Карты подфракций лежат в подпапках основной фракции; в каждой папке README.md и manifest.csv.'
     m['expansionIds'] = sorted(set(m.get('expansionIds', [])) | set(exp_ids))
     m['distribution']['types'] = dict(collections.Counter(c['type'] for c in d['cards']))
     m['distribution']['rarities'] = dict(collections.Counter(c['rarity'] for c in d['cards']))

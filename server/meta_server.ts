@@ -65,6 +65,8 @@ interface GameProfile {
   foilTokens: number; premOpens: number; avatarsOwned: string[];
   banned?: boolean;   // v3.13: бан администратором
   tutStage: number; tutDone: boolean; tutReward: string; tutClaims: number[];   // спека «6. Обучение» (v2.5.1)
+  introComplete: boolean; starterDecksUnlocked: boolean; introStep: number;
+  introFaction: string; introFactionsSeen: string[]; // v3.23: кросс-девайсный прогресс пролога
   updatedAt: number;
 }
 const gameProfiles = new Map<string, GameProfile>();
@@ -76,7 +78,9 @@ function blankGameProfile(pid: string, nick: string): GameProfile {
     questDate: '', wquestWeek: '', history: [], shards: 1200, gems: 100, freeOpens: 0,
     bundles: [], cosmetics: null, purchases: [], collection: {}, bpXp: 0, bpPremium: false,
     bpClaimed: [], bpClaimedP: [], foilTokens: 0, premOpens: 0, avatarsOwned: [],
-    tutStage: 0, tutDone: false, tutReward: '', tutClaims: [], updatedAt: Date.now() };
+    tutStage: 0, tutDone: false, tutReward: '', tutClaims: [],
+    introComplete: false, starterDecksUnlocked: false, introStep: 0, introFaction: 'Aurites', introFactionsSeen: [],
+    updatedAt: Date.now() };
 }
 const nicks = new Map<string, string>();   // lower(nick) → pid: занятость никнейма
 
@@ -87,6 +91,7 @@ interface Account { login: string; salt: string; hash: string; pid: string; crea
 const AUTH_FILE = join(process.cwd(), 'server', 'data', 'accounts.json');
 const accounts = new Map<string, Account>();          // lower(login) → аккаунт
 const sessions = new Map<string, { login: string; exp: number }>(); // jti refresh-токена → сессия (JWT, ротация)
+const refreshReplayGrace = new Map<string, { login: string; expiresAt: number; nextJti: string; response: Record<string, unknown> }>();
 function hashPw(pw: string, salt: string): string { return scryptSync(pw, salt, 32).toString('hex'); }
 function saveAccounts(): void {
   try { mkdirSync(join(process.cwd(), 'server', 'data'), { recursive: true }); writeFileSync(AUTH_FILE, JSON.stringify([...accounts.values()], null, 2)); } catch { /* read-only fs */ }
@@ -545,6 +550,7 @@ function dropSession(jti: string): void {
 }
 function revokeAll(login: string): void {
   for (const [k, v] of sessions) if (v.login === login) sessions.delete(k);
+  for (const [k, v] of refreshReplayGrace) if (v.login === login) refreshReplayGrace.delete(k);
   if (pool && pgReady) void pool.query('DELETE FROM sessions WHERE login = $1', [login]).catch(() => { /* ok */ });
 }
 let lastSessionSweep = 0;
@@ -771,6 +777,23 @@ const server = createServer(async (req, res) => {
     const mLosses = merge(prev?.losses, b.losses, b.dLosses, 0);
     const mBpXp = merge(prev?.bpXp, b.bpXp, b.dBpXp, 0);
     const mBestMmr = Math.max(mMmr, merge(prev?.bestMmr, b.bestMmr, undefined, 1000, 800));
+    const incomingReward = typeof b.tutReward === 'string' ? b.tutReward.trim() : '';
+    const tutReward = FACTIONS5.includes(incomingReward) ? incomingReward : (prev?.tutReward ?? '');
+    const tutStageIn = Number(b.tutStage ?? prev?.tutStage ?? 0);
+    const tutStage = Math.max(prev?.tutStage ?? 0,
+      Number.isFinite(tutStageIn) ? Math.max(0, Math.min(4, Math.trunc(tutStageIn))) : 0);
+    const tutDone = !!prev?.tutDone || b.tutDone === true || tutStage >= 4 || !!tutReward;
+    const introComplete = !!prev?.introComplete || b.introComplete === true || !!tutReward;
+    const starterDecksUnlocked = !!prev?.starterDecksUnlocked || b.starterDecksUnlocked === true || introComplete || !!tutReward;
+    const introStepIn = Number(b.introStep ?? prev?.introStep ?? 0);
+    const introStep = Math.max(prev?.introStep ?? 0,
+      Number.isFinite(introStepIn) ? Math.max(0, Math.min(3, Math.trunc(introStepIn))) : 0);
+    const incomingFaction = String(b.introFaction ?? '');
+    const introFaction = FACTIONS5.includes(incomingFaction) ? incomingFaction
+      : (prev?.introFaction && FACTIONS5.includes(prev.introFaction) ? prev.introFaction : 'Aurites');
+    const incomingSeen = Array.isArray(b.introFactionsSeen) ? b.introFactionsSeen : [];
+    const introFactionsSeen = [...new Set([...(prev?.introFactionsSeen ?? []), ...incomingSeen]
+      .filter((f): f is string => typeof f === 'string' && FACTIONS5.includes(f)))];
     const gp: GameProfile = {
       pid, nick,
       level: Number(b.level ?? prev?.level ?? 1),
@@ -800,10 +823,16 @@ const server = createServer(async (req, res) => {
       foilTokens: Number(b.foilTokens ?? prev?.foilTokens ?? 0),
       premOpens: Number(b.premOpens ?? prev?.premOpens ?? 0),
       avatarsOwned: (b.avatarsOwned as string[] | undefined) ?? prev?.avatarsOwned ?? [],
-      tutStage: Number(b.tutStage ?? prev?.tutStage ?? 0),
-      tutDone: b.tutDone != null ? !!b.tutDone : (prev?.tutDone ?? false),
-      tutReward: String(b.tutReward ?? prev?.tutReward ?? ''),
-      tutClaims: (b.tutClaims as number[] | undefined) ?? prev?.tutClaims ?? [],
+      tutStage,
+      tutDone,
+      tutReward,
+      tutClaims: [...new Set([...(prev?.tutClaims ?? []), ...(Array.isArray(b.tutClaims) ? b.tutClaims : [])]
+        .filter((n): n is number => Number.isInteger(n) && n >= 1 && n <= 4))],
+      introComplete,
+      starterDecksUnlocked,
+      introStep,
+      introFaction,
+      introFactionsSeen,
       updatedAt: Date.now(),
     };
     gameProfiles.set(pid, gp);
@@ -1079,7 +1108,7 @@ const server = createServer(async (req, res) => {
     const lesson = Number(b.lesson);
     if (!Number.isInteger(lesson) || lesson < 1 || lesson > 4) return json(res, 400, { error: 'lesson 1..4' });
     gp.tutStage = Math.max(gp.tutStage, lesson);
-    gp.tutDone = true;
+    gp.tutDone = gp.tutDone || gp.tutStage >= 4;
     let granted = 0;
     if (!gp.tutClaims.includes(lesson)) {          // однократно: повторное прохождение не фармит ◈
       gp.tutClaims.push(lesson);
@@ -1101,6 +1130,7 @@ const server = createServer(async (req, res) => {
     if (!FACTIONS5.includes(fac)) return json(res, 400, { error: 'faction required' });
     if (gp.tutReward) return json(res, 409, { error: 'награда уже получена' });
     gp.tutReward = fac;
+    gp.introComplete = true; gp.starterDecksUnlocked = true; gp.introStep = 3; gp.introFaction = fac;
     gp.freeOpens += 5;
     gp.gems += 100;
     const cheap = [...db.values()].filter(c => c.faction === fac && !EXPANSION.has(c.id))
@@ -1168,21 +1198,46 @@ const server = createServer(async (req, res) => {
     const b = await readBody(req);
     const c = verify<RefreshClaims>(String(b.refreshToken ?? ''), 'refresh');
     if (!c) return json(res, 401, { error: 'Refresh-токен недействителен', code: 'refresh_invalid' });
+    const now = Date.now();
+    for (const [jti, replay] of refreshReplayGrace) if (replay.expiresAt <= now) refreshReplayGrace.delete(jti);
+    const replay = refreshReplayGrace.get(c.jti);
+    if (replay && replay.login === c.sub && replay.expiresAt > now) {
+      // Две вкладки могут запросить ротацию одним refresh одновременно. В коротком окне
+      // отдаём им одну и ту же новую пару; поздний повтор по-прежнему отзывает сессию.
+      return json(res, 200, replay.response);
+    }
     const sess = sessions.get(c.jti);
     if (!sess || sess.login !== c.sub) {
-      // повторное использование уже погашенного refresh → отзываем все сессии пользователя
+      // Повторное использование за пределами гонки ротации → защита от кражи токена.
       revokeAll(c.sub);
       return json(res, 401, { error: 'Сессия отозвана — войдите снова', code: 'refresh_reused' });
     }
     dropSession(c.jti);
     const acc = accounts.get(c.sub);
     if (!acc) return json(res, 401, { error: 'Аккаунт не найден', code: 'refresh_invalid' });
-    return json(res, 200, startSession(acc.login, acc.pid));
+    const response = startSession(acc.login, acc.pid);
+    const nextRefresh = verify<RefreshClaims>(String(response.refreshToken ?? ''), 'refresh');
+    refreshReplayGrace.set(c.jti, { login: c.sub, expiresAt: now + 5000, nextJti: nextRefresh?.jti ?? '', response });
+    if (refreshReplayGrace.size > 5000) {
+      for (const [jti, entry] of refreshReplayGrace) if (entry.expiresAt <= now) refreshReplayGrace.delete(jti);
+      while (refreshReplayGrace.size > 5000) refreshReplayGrace.delete(refreshReplayGrace.keys().next().value as string);
+    }
+    return json(res, 200, response);
   }
   if (req.method === 'POST' && path === '/api/auth/logout') {
     const b = await readBody(req);
     const c = verify<RefreshClaims>(String(b.refreshToken ?? ''), 'refresh');
-    if (c) { if (b.all) revokeAll(c.sub); else dropSession(c.jti); }
+    if (c) {
+      if (b.all) revokeAll(c.sub);
+      else {
+        dropSession(c.jti);
+        // Если текущий токен был выдан ротацией, отзываем и короткий replay старого токена,
+        // иначе вторая вкладка могла бы восстановить уже закрытую сессию.
+        for (const [oldJti, replay] of refreshReplayGrace) {
+          if (replay.login === c.sub && replay.nextJti === c.jti) refreshReplayGrace.delete(oldJti);
+        }
+      }
+    }
     return json(res, 200, { ok: true });
   }
   if (req.method === 'GET' && path === '/api/auth/me') {

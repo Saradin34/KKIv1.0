@@ -113,6 +113,7 @@ export class AIController {
     for (const c of list) {
       v += c.attack * 1.5 + c.health;
       if (c.keywords.includes(Keyword.Taunt)) v += 1.0;
+      if (c.keywords.includes(Keyword.Vigilance)) v += 0.7;
       if (c.keywords.includes(Keyword.Lifesteal)) v += 1.2;
       if (c.keywords.includes(Keyword.Unblockable)) v += 1.5;
       if (c.keywords.includes(Keyword.Windfury)) v += c.attack * 0.8;
@@ -137,6 +138,7 @@ export class AIController {
       v *= 3.0; // приведение к единой шкале
       for (const kw of card.keywords) {
         if (kw === Keyword.Taunt) v += this.profile.selfPreservation * 1.5;
+        if (kw === Keyword.Vigilance) v += this.profile.selfPreservation * 0.65;
         if (kw === Keyword.Rush) v += this.profile.aggression * 1.8;
         if (kw === Keyword.Lifesteal) v += me.health < 15 ? 2.2 : 0.9;
         if (kw === Keyword.Unblockable) v += this.profile.aggression * 1.6;

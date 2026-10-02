@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Эхо-Цитадель — прототип</title>
-<link rel="stylesheet" href="./prototype.css?v=3.17.6">
+<link rel="stylesheet" href="./prototype.css?v=3.24.0">
 <style>
 /* =====================================================================
    ЭХО-ЦИТАДЕЛЬ — стили прототипа (ТЗ раздел 4 и 6.1)
@@ -479,7 +479,7 @@ body.fxLite .rays{animation:none;opacity:.5}
   background:rgba(22,14,4,.78);border:1px solid var(--gold-dim);color:#e8cf96;letter-spacing:.14em;
   font-size:.7rem;text-transform:uppercase;box-shadow:0 4px 14px rgba(0,0,0,.5);text-shadow:0 1px 2px #000}
 #turnPill.mine{color:#b8f0c4;border-color:#4d8a5f;box-shadow:0 0 16px rgba(95,199,122,.35)}
-/* тап: атаковавшее существо повёрнуто на 90° (слот меняет ширину/высоту плавно) */
+/* Визуальный tap как в MTG: карта поворачивается на 90°, слот поля при этом не меняет размер. */
 .unit{transition:transform .16s, box-shadow .16s, width .42s ease}
 :root{--uw:clamp(100px, min(8.8vw, 15.5vh), 142px)}
 @media (max-width:900px){:root{--uw:clamp(76px,7.4vw,96px)}}
@@ -489,8 +489,17 @@ body.fxLite .rays{animation:none;opacity:.5}
 .unit .atk,.unit .hp{font-size:1.18rem}
 .unit.tapped{width:var(--uw);aspect-ratio:512/720}
 .unit .ubody{transition:transform .42s ease}
-/* тап как в MTG: лёгкий наклон, а не горизонтальный поворот — слот не прыгает */
-.unit.tapped .ubody{transform:rotate(14deg) translateY(3px);filter:saturate(.82) brightness(.9)}
+.unit.tapped .ubody{transform:rotate(90deg) scale(.72);filter:saturate(.78) brightness(.88)}
+.unit.vigilant .ubody{box-shadow:0 0 0 1px rgba(104,220,178,.72),0 0 15px rgba(85,223,171,.22),0 8px 18px rgba(0,0,0,.6)}
+.unit .tapStateBadge{position:absolute;right:-7px;bottom:2px;z-index:12;width:23px;height:23px;display:grid;place-items:center;
+  border-radius:50%;border:1px solid rgba(207,237,255,.84);background:linear-gradient(180deg,#8dc7e8,#345a78);
+  color:#f2fbff;font-size:1rem;font-weight:800;line-height:1;box-shadow:0 2px 8px rgba(0,0,0,.58),0 0 12px rgba(110,204,250,.42)}
+.unit.tapAnim .ubody{animation:unitTapTurn .42s cubic-bezier(.2,.8,.25,1) both}
+.unit.untapAnim .ubody{animation:unitUntapTurn .48s cubic-bezier(.2,.75,.28,1) both}
+@keyframes unitTapTurn{0%{transform:rotate(0) scale(1)}70%{transform:rotate(98deg) scale(.69)}100%{transform:rotate(90deg) scale(.72)}}
+@keyframes unitUntapTurn{0%{transform:rotate(90deg) scale(.72)}72%{transform:rotate(-7deg) scale(1.025)}100%{transform:rotate(0) scale(1)}}
+@media(prefers-reduced-motion:reduce){.unit.tapAnim .ubody,.unit.untapAnim .ubody{animation:none!important}}
+body.fxLite .unit.tapAnim .ubody,body.fxLite .unit.untapAnim .ubody{animation:none!important}
 /* тёплые пилюли статистики под песочный стол */
 .stat{background:rgba(30,21,8,.72);border-color:rgba(216,180,90,.35);color:#f2e6c8}
 .zoneLabel{color:rgba(70,46,16,.62)}
@@ -604,6 +613,9 @@ body,button,select,input,textarea{font-family:'Alegreya',Georgia,'Times New Roma
   background:linear-gradient(180deg,rgba(30,20,6,.82),rgba(14,9,2,.86));border:1px solid var(--gold-dim);
   box-shadow:0 10px 34px rgba(0,0,0,.6),0 0 0 1px rgba(0,0,0,.6) inset;backdrop-filter:blur(5px)}
 #actionDock .btn{width:100%;padding:.44rem .6rem;font-size:.8rem;letter-spacing:.06em}
+#actionDock .btn.fullControl{border-color:rgba(202,171,105,.72);color:#eadcb6;background:linear-gradient(180deg,rgba(56,48,29,.92),rgba(23,19,13,.96))}
+#actionDock .btn.fullControl.on{border-color:#8fd8b0;color:#e5fff0;background:linear-gradient(180deg,rgba(37,78,60,.96),rgba(12,30,25,.98));
+  box-shadow:0 0 0 1px rgba(0,0,0,.7),0 0 16px rgba(93,220,162,.24),0 3px 10px rgba(0,0,0,.5)}
 #actionDock #actionHint{font-size:.62rem;color:#cbb98a;line-height:1.35;text-align:center}
 #actionDock #turnPill{margin:0 0 .1rem;align-self:center}
 /* дорожка шагов боя как в MTG: начало → атакующие → блокирующие → урон → конец */
@@ -1059,6 +1071,79 @@ body[data-back="ember"] #hand .cardback,body[data-back="ember"] #enemyBacks .car
   background:rgba(6,4,1,.74);backdrop-filter:blur(3px);overflow:auto;padding:1rem}
 #profileModal .packPanel,#shopModal .packPanel,#campaignModal .packPanel,#tutModal .packPanel,
 #replayModal .packPanel,#journalModal .packPanel{max-height:88vh;overflow:auto;margin:auto}
+/* v3.23: сюжетный пролог нового игрока — lore, атлас фракций и путь из четырёх реальных учебных стычек. */
+#introModal{position:fixed;inset:0;z-index:10000;display:flex;align-items:center;justify-content:center;padding:clamp(.55rem,2.5vw,1.5rem);
+  background:radial-gradient(ellipse at 50% 8%,rgba(87,63,27,.42),transparent 54%),rgba(5,6,11,.94);backdrop-filter:blur(9px)}
+#introModal.hidden{display:none}
+.introPanel{width:min(980px,97vw);max-height:min(94vh,900px);overflow:hidden;display:flex;flex-direction:column;gap:.8rem;
+  padding:clamp(1rem,2.6vw,1.65rem);border:1px solid rgba(235,198,112,.58);border-radius:18px;
+  background:linear-gradient(148deg,rgba(25,28,39,.99),rgba(10,12,19,.995) 62%,rgba(20,15,11,.99));
+  box-shadow:0 32px 110px rgba(0,0,0,.82),0 0 50px rgba(220,177,79,.14),inset 0 0 0 1px rgba(255,255,255,.035)}
+.introMast{display:flex;align-items:center;justify-content:space-between;gap:1rem;border-bottom:1px solid rgba(255,221,151,.13);padding-bottom:.7rem}
+.introEyebrow{font-size:.62rem;letter-spacing:.24em;color:#c7a85e;font-weight:800}
+#introTitle{margin:.2rem 0 0;color:#fff0c3;font:400 clamp(1.35rem,3vw,2rem)/1.15 'Philosopher',serif;letter-spacing:.035em}
+.introCrest{width:52px;height:52px;flex:none;display:grid;place-items:center;border-radius:50%;color:#ffdf89;font-size:1.65rem;
+  border:1px solid rgba(255,224,151,.72);background:radial-gradient(circle at 38% 30%,rgba(210,167,71,.3),rgba(27,20,10,.92));
+  box-shadow:0 0 25px rgba(232,185,87,.22),inset 0 0 18px rgba(255,226,155,.12)}
+.introProgress{display:flex;align-items:center;gap:.75rem;color:#bdb08e;font-size:.6rem;letter-spacing:.16em}
+.introProgress>div{height:4px;flex:1;border-radius:10px;background:rgba(255,255,255,.1);overflow:hidden}
+#introProgressFill{display:block;width:0;height:100%;border-radius:10px;background:linear-gradient(90deg,#a77731,#ffe49a);box-shadow:0 0 12px rgba(255,214,124,.58);transition:width .3s ease}
+#introBody{min-height:0;overflow:auto;padding:.15rem .1rem .4rem;color:#e8e1d2;line-height:1.55;scrollbar-color:#765e2d transparent}
+.introLead{max-width:760px;margin:.2rem auto .9rem;text-align:center;font:400 clamp(.95rem,1.65vw,1.12rem)/1.75 'Alegreya',serif;color:#f0e3c6}
+.introQuote{max-width:720px;margin:.8rem auto;padding:.65rem 1rem;border-left:2px solid #d6b461;color:#f2d999;background:linear-gradient(90deg,rgba(196,151,65,.12),transparent);font:italic 1rem/1.6 'Philosopher',serif}
+.introLoreMark{display:grid;place-items:center;width:82px;height:82px;margin:.25rem auto .8rem;border-radius:50%;border:1px solid rgba(241,207,132,.7);
+  color:#ffe6a7;font-size:2.15rem;background:radial-gradient(circle,rgba(207,166,78,.3),rgba(12,13,18,.2) 68%);
+  box-shadow:0 0 38px rgba(223,177,72,.22),inset 0 0 28px rgba(236,199,112,.12)}
+.introLoreFacts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:.55rem;margin-top:1rem}
+.introLoreFact{padding:.65rem .7rem;border:1px solid rgba(220,190,125,.2);border-radius:10px;background:rgba(255,255,255,.025);text-align:center}
+.introLoreFact b{display:block;color:#f3d995;font:600 .88rem 'Philosopher',serif}
+.introLoreFact small{display:block;margin-top:.2rem;color:#a9a18f;font-size:.68rem}
+.introFactionGrid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:.55rem;margin:.2rem 0 .8rem}
+.introFactionCard{min-width:0;min-height:138px;position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.26rem;
+  padding:.65rem .35rem;border:1px solid color-mix(in srgb,var(--ifac,#9d8a5f) 42%,transparent);border-radius:12px;
+  background:linear-gradient(160deg,color-mix(in srgb,var(--ifac,#9d8a5f) 13%,#171821),rgba(11,13,19,.96));color:#e9e1d1;text-align:center;cursor:pointer;
+  transition:transform .18s,border-color .18s,box-shadow .18s}
+.introFactionCard:hover,.introFactionCard.selected{transform:translateY(-2px);border-color:var(--ifac,#e9c976);box-shadow:0 0 18px color-mix(in srgb,var(--ifac,#e9c976) 25%,transparent),inset 0 0 16px rgba(255,255,255,.035)}
+.introFactionCard.selected{outline:1px solid color-mix(in srgb,var(--ifac,#e9c976) 45%,transparent)}
+.introFactionSigil{width:43px;height:43px;display:grid;place-items:center;border-radius:50%;color:var(--ifac,#ffe2a0);font-size:1.48rem;
+  background:radial-gradient(circle at 36% 28%,color-mix(in srgb,var(--ifac,#e9c976) 33%,#171820),#11131a 75%);border:1px solid color-mix(in srgb,var(--ifac,#e9c976) 60%,transparent);text-shadow:0 0 12px currentColor}
+.introFactionCard b{font:600 .84rem 'Philosopher',serif}
+.introFactionCard small{font-size:.59rem;line-height:1.3;color:#b8ad98}
+.introFactionCard .seenMark{position:absolute;top:.35rem;right:.45rem;color:#9ce4ba;font-size:.7rem}
+.introFactionDetail{min-height:124px;padding:.75rem .9rem;border:1px solid rgba(229,194,119,.25);border-radius:11px;background:rgba(255,255,255,.035)}
+.introFactionDetail h3{margin:0 0 .3rem;color:#f4d995;font:600 1rem 'Philosopher',serif}
+.introFactionDetail p{margin:.25rem 0;color:#d1c8b7;font-size:.77rem;line-height:1.52}
+.introMechanic{padding:.48rem .65rem;margin-top:.5rem;border-left:2px solid #d5b15f;background:rgba(209,174,96,.07);color:#ead9ad;font-size:.74rem}
+.introMeetCount{display:flex;justify-content:space-between;gap:.6rem;align-items:center;margin:.5rem .05rem;color:#b8ac94;font-size:.68rem}
+.introRuleGrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.58rem;margin:.6rem 0}
+.introRule{display:flex;gap:.65rem;padding:.68rem .72rem;border:1px solid rgba(230,199,135,.2);border-radius:11px;background:rgba(255,255,255,.027)}
+.introRule .ruleNum{width:28px;height:28px;flex:none;display:grid;place-items:center;border-radius:50%;background:rgba(215,175,87,.14);color:#f5d987;font-weight:800}
+.introRule b{display:block;color:#f1d79a;font:600 .85rem 'Philosopher',serif}
+.introRule p{margin:.16rem 0 0;color:#bdb5a5;font-size:.7rem;line-height:1.42}
+.introLessonList{display:grid;gap:.48rem;margin:.7rem 0}
+.introLesson{display:grid;grid-template-columns:36px minmax(0,1fr) auto;align-items:center;gap:.7rem;padding:.66rem .75rem;border:1px solid rgba(225,194,129,.18);border-radius:11px;background:rgba(255,255,255,.025)}
+.introLesson.current{border-color:rgba(246,206,119,.7);background:linear-gradient(90deg,rgba(193,147,48,.14),rgba(255,255,255,.025));box-shadow:0 0 16px rgba(215,174,78,.08)}
+.introLesson.done{border-color:rgba(114,203,153,.3)}
+.introLessonSeal{width:32px;height:32px;display:grid;place-items:center;border-radius:50%;background:rgba(213,176,92,.12);color:#f3d993;font-weight:800}
+.introLesson.done .introLessonSeal{background:rgba(94,199,139,.12);color:#9fe7b9}
+.introLesson h3{margin:0;color:#f1dba8;font:600 .86rem 'Philosopher',serif}
+.introLesson p{margin:.16rem 0 0;color:#b8b09f;font-size:.67rem;line-height:1.4}
+.introLesson .btn{min-width:104px;padding:.42rem .7rem;font-size:.65rem}
+.introDeckGrid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:.5rem;margin:.7rem 0}
+.introDeckChoice{min-height:94px;padding:.65rem .45rem;border:1px solid rgba(222,191,126,.27);border-radius:11px;background:rgba(255,255,255,.028);color:#ddd2bc;cursor:pointer;text-align:center}
+.introDeckChoice.selected{border-color:#f1ce78;background:linear-gradient(160deg,rgba(194,151,66,.18),rgba(24,24,30,.92));box-shadow:0 0 16px rgba(227,185,88,.15)}
+.introDeckChoice b{display:block;color:#f3d995;font:600 .78rem 'Philosopher',serif}
+.introDeckChoice small{display:block;margin-top:.25rem;color:#a59b88;font-size:.61rem;line-height:1.35}
+.introRewardLine{padding:.55rem .7rem;border-radius:9px;background:rgba(76,158,112,.1);border:1px solid rgba(118,214,159,.28);color:#bcebc9;font-size:.74rem;text-align:center}
+.introFoot{display:flex;justify-content:space-between;align-items:center;gap:.65rem;border-top:1px solid rgba(255,221,151,.13);padding-top:.72rem}
+.introFoot .left,.introFoot .right{display:flex;gap:.5rem;align-items:center}
+.introFoot .btn{min-height:42px;padding:.5rem 1rem;font-size:.75rem}
+.introFoot .btn.primary{border-color:#e8c777;color:#fff0c3;background:linear-gradient(180deg,#635026,#29200f);box-shadow:0 0 18px rgba(223,177,76,.17)}
+.introFoot .btn:focus-visible,.introFactionCard:focus-visible,.introDeckChoice:focus-visible{outline:2px solid #ffe49c;outline-offset:3px}
+body.introOpen{overflow:hidden}
+@media(max-width:760px){.introPanel{max-height:96vh;padding:.9rem;gap:.58rem}.introFactionGrid{grid-template-columns:repeat(3,minmax(0,1fr))}.introDeckGrid{grid-template-columns:repeat(3,minmax(0,1fr))}.introFactionCard{min-height:112px}.introRuleGrid{gap:.42rem}.introRule{padding:.55rem}.introLesson{grid-template-columns:30px minmax(0,1fr);gap:.5rem}.introLesson .btn{grid-column:2;justify-self:start}}
+@media(max-width:480px){.introMast{padding-bottom:.5rem}.introCrest{width:42px;height:42px}.introFactionGrid{grid-template-columns:repeat(2,minmax(0,1fr))}.introRuleGrid{grid-template-columns:1fr}.introLoreFacts{grid-template-columns:1fr}.introDeckGrid{grid-template-columns:repeat(2,minmax(0,1fr))}.introFoot .btn{min-height:40px;padding:.4rem .65rem;font-size:.67rem}.introLesson p{font-size:.62rem}}
+@media(prefers-reduced-motion:reduce){#introProgressFill,.introFactionCard{transition:none!important}}
 #tutCoach{position:fixed;left:50%;transform:translateX(-50%);top:52px;z-index:310;
   max-width:min(680px,92vw);padding:.5rem .9rem;border-radius:10px;background:rgba(10,8,3,.92);
   border:1px solid var(--gold);color:#ffe9b0;font-size:.78rem;font-family:'Philosopher',serif;
@@ -3220,6 +3305,27 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
   #bpModal .bpTile:not(:disabled):hover{transform:none!important}
 }
 
+
+/* v3.21: Arena-подобный прогноз боя — урон и ответный удар до подтверждения цели. */
+#battle .unit.targetable{z-index:35}
+#battle .unit .combatForecast{position:absolute;left:50%;top:-21px;transform:translateX(-50%);z-index:38;
+  min-width:max-content;max-width:min(190px,55vw);display:grid;gap:2px;justify-items:center;padding:.24rem .48rem;
+  border:1px solid rgba(230,201,137,.62);border-radius:7px;background:linear-gradient(180deg,rgba(36,32,27,.98),rgba(12,13,17,.98));
+  color:#f2e8d1;font:700 .56rem/1.15 'Alegreya',serif;text-align:center;white-space:nowrap;
+  box-shadow:0 4px 14px rgba(0,0,0,.68),0 0 12px rgba(245,197,92,.2);pointer-events:none;animation:forecastReveal .18s ease-out both}
+#battle .unit .combatForecast .cfMain{font-size:.59rem;letter-spacing:.015em}
+#battle .unit .combatForecast .cfSub{font:500 .49rem/1.15 'Alegreya',serif;color:#c8c3b7;white-space:normal}
+#battle .unit .combatForecast.lethal{border-color:rgba(255,113,83,.9);background:linear-gradient(180deg,rgba(85,28,23,.98),rgba(24,12,13,.98));box-shadow:0 4px 16px rgba(0,0,0,.72),0 0 14px rgba(255,88,66,.36)}
+#battle .unit .combatForecast.trade{border-color:rgba(255,205,101,.95);background:linear-gradient(180deg,rgba(81,57,20,.98),rgba(24,17,11,.98));box-shadow:0 0 16px rgba(255,190,70,.32)}
+#battle .unit .combatForecast.danger{border-color:rgba(255,98,98,.95);background:linear-gradient(180deg,rgba(87,25,36,.98),rgba(20,11,17,.98));box-shadow:0 0 16px rgba(255,65,83,.34)}
+#battle .unit .combatForecast.neutral{border-color:rgba(125,203,228,.75);box-shadow:0 0 13px rgba(82,183,218,.2)}
+#battle #enemyHero .heroCombatForecast{position:absolute;left:50%;top:-21px;transform:translateX(-50%);z-index:38;min-width:max-content;
+  padding:.28rem .62rem;border:1px solid rgba(255,133,115,.88);border-radius:999px;background:linear-gradient(180deg,rgba(94,34,28,.98),rgba(24,12,13,.98));
+  color:#ffe4d5;font:700 .62rem/1.15 'Alegreya',serif;text-align:center;white-space:nowrap;
+  box-shadow:0 4px 14px rgba(0,0,0,.62),0 0 15px rgba(255,95,75,.28);pointer-events:none;animation:forecastReveal .18s ease-out both}
+@keyframes forecastReveal{from{opacity:0;transform:translate(-50%,5px) scale(.94)}to{opacity:1;transform:translate(-50%,0) scale(1)}}
+@media(prefers-reduced-motion:reduce){#battle .unit .combatForecast,#battle #enemyHero .heroCombatForecast{animation:none}}
+body.fxLite #battle .unit .combatForecast,body.fxLite #battle #enemyHero .heroCombatForecast{animation:none}
 </style>
 </head>
 <body>
@@ -3325,7 +3431,7 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
 
 <!-- Контекстный нав-док под верхней панелью: быстрые разделы и понятный возврат без открытия бургера. -->
 <nav id="ecQuickNav" class="ecQuickNav hidden" aria-label="Быстрые переходы" aria-hidden="true">
-  <button type="button" class="ecQuickBack" data-route="back" title="Назад к предыдущему разделу" aria-label="Назад">
+  <button type="button" class="ecQuickBack" data-route="back" title="Вы на первом экране" aria-label="Назад" disabled aria-disabled="true">
     <span class="ecQuickIcon" aria-hidden="true">←</span><span class="ecQuickLabel">Назад</span>
   </button>
   <span class="ecQuickDivider" aria-hidden="true"></span>
@@ -3339,6 +3445,8 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
   <button type="button" data-route="rules" title="Правила игры" aria-label="Правила"><span class="ecQuickIcon" aria-hidden="true">📜</span><span class="ecQuickLabel">Правила</span></button>
   <button type="button" data-route="profile" title="Профиль" aria-label="Профиль"><span class="ecQuickIcon" aria-hidden="true">◉</span><span class="ecQuickLabel">Профиль</span></button>
 </nav>
+<div id="ecRouteTransitionFx" aria-hidden="true"></div>
+<div id="ecRouteLive" class="ecVisuallyHidden" role="status" aria-live="polite" aria-atomic="true"></div>
 
 <!-- ======================= ГЛАВНОЕ МЕНЮ · ХАБ (макет) ======================= -->
 <div id="menu">
@@ -3650,14 +3758,54 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
   </div>
 </div>
 
-<div id="replayModal" class="hidden" role="dialog" aria-label="Реплей матча">
-  <div class="packPanel" style="width:min(640px,94vw)">
-    <h3 id="replayTitle" class="ecModalH">▶ Реплей</h3>
-    <div id="replayBody" class="journalList" style="max-height:46vh;overflow:auto"></div>
-    <div class="ecModalFoot">
-      <button class="btn" id="btnReplayPlay">▶ Играть / пауза</button>
-      <button class="btn" id="btnReplayClose">Закрыть</button></div>
-  </div>
+<div id="replayModal" class="hidden" role="dialog" aria-modal="true" aria-labelledby="replayTitle" aria-describedby="replayMetaLine" tabindex="-1">
+  <section class="packPanel replayPanel">
+    <header class="replayHead">
+      <span class="replayCrest" aria-hidden="true">✦</span>
+      <div class="replayHeadCopy">
+        <span class="replayEyebrow">ПОСЛЕМАТЧЕВЫЙ РАЗБОР</span>
+        <h3 id="replayTitle">Разбор матча</h3>
+        <p id="replayMetaLine"></p>
+      </div>
+      <span id="replayResult" class="replayResultBadge">Победа</span>
+    </header>
+    <div id="replaySummary" class="replaySummary"></div>
+    <section class="replayTimelineSection" aria-label="Хронология матча">
+      <div class="replayTimelineHead"><div><span class="replayEyebrow">ХРОНОЛОГИЯ</span><b>События матча</b></div>
+        <span id="replayCount" aria-live="polite">События не загружены</span></div>
+      <div class="replayFilterBar">
+        <label class="replaySearch"><span aria-hidden="true">⌕</span><input type="search" id="replaySearch" placeholder="Найти карту, эффект или событие…" aria-label="Поиск в хронологии"></label>
+        <label class="replaySelect"><span>Тип</span><select id="replayKind" aria-label="Фильтр по типу события">
+          <option value="all">Все события</option><option value="play">Розыгрыши</option><option value="combat">Бой</option>
+          <option value="effect">Эффекты</option><option value="resource">Ресурсы</option><option value="system">Системные</option>
+        </select></label>
+        <label class="replaySelect replayTurnSelect"><span>Ход</span><select id="replayTurn" aria-label="Фильтр по ходу"><option value="all">Все ходы</option></select></label>
+        <button class="btn replayReset" id="btnReplayReset" type="button">Сбросить</button>
+      </div>
+      <div id="replayBody" class="replayTimeline" role="list" aria-label="События матча"></div>
+    </section>
+    <footer class="replayFooter">
+      <div class="replayPlayback">
+        <button class="btn primary" id="btnReplayPlay" type="button" aria-controls="replayBody" aria-pressed="false">▶ Воспроизвести</button>
+        <label class="replaySpeed"><span>Скорость</span><select id="replaySpeed" aria-label="Скорость воспроизведения">
+          <option value="0.6">0,6×</option><option value="1" selected>1×</option><option value="1.6">1,6×</option><option value="2.4">2,4×</option>
+        </select></label>
+      </div>
+      <button class="btn" id="btnReplayClose" type="button">Закрыть</button>
+    </footer>
+  </section>
+</div>
+
+<div id="introModal" class="hidden" role="dialog" aria-modal="true" aria-labelledby="introTitle" aria-describedby="introBody" tabindex="-1">
+  <section class="introPanel">
+    <div class="introMast">
+      <div><div class="introEyebrow">ПРОЛОГ · ЭХО-ЦИТАДЕЛЬ</div><h2 id="introTitle">Пробуждение у Врат</h2></div>
+      <span class="introCrest" aria-hidden="true">✦</span>
+    </div>
+    <div class="introProgress"><span id="introStepText">ГЛАВА 1 / 5</span><div><i id="introProgressFill"></i></div></div>
+    <div id="introBody" aria-live="polite"></div>
+    <div id="introFoot" class="introFoot"></div>
+  </section>
 </div>
 
 <div id="tutModal" class="hidden" role="dialog" aria-label="Обучение">
@@ -3672,7 +3820,7 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
 
 <div id="instantDock" class="hidden" role="status">
   <div class="idTitle">⚡ Окно отклика</div>
-  <div class="idSub">ход противника: <b id="instantLabel"></b> — мгновенные заклинания из руки играются сейчас</div>
+  <div class="idSub" id="instantSub">ход противника: мгновенные заклинания из руки играются сейчас</div>
   <div class="cdRing" title="Время приоритета"><b id="instantCd">20 с</b></div>
   <div id="ropeBar" class="hidden" title="Время вашего хода"><div id="ropeFill"></div></div>
   <button class="btn" id="btnInstantPass">Передать приоритет</button>
@@ -3775,6 +3923,7 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
   </div>
   <div id="actionDock">
     <div id="turnPill" title="Чей сейчас ход">Ход противника</div>
+    <button class="btn fullControl" id="btnFullControl" aria-pressed="false" title="Останавливать приоритет в каждом окне отклика, даже если нет доступных мгновенных заклинаний.">◯ Полный контроль</button>
     <button class="btn primary" id="btnEndTurn" data-i18n="ui_battle_endturn">Завершить ход</button>
     <button class="btn" id="btnJournal" data-i18n="ui_battle_journal" title="Журнал боя (J)">📜 Журнал</button>
     <button class="btn" id="btnEcho">◈ Эхо</button>
@@ -3867,7 +4016,12 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
       <div class="setRow">
         <input type="checkbox" id="setAutoPass">
         <label for="setAutoPass">Авто-приоритет
-          <span class="setHint">Не ждать в окнах отклика: приоритет передаётся сразу</span></label>
+          <span class="setHint">Не ждать в окнах отклика: приоритет передаётся сразу; Full Control имеет приоритет</span></label>
+      </div>
+      <div class="setRow">
+        <input type="checkbox" id="setFullControl">
+        <label for="setFullControl">Полный контроль
+          <span class="setHint">Останавливать игру на каждом окне приоритета, даже без доступного ответа. Только локальные матчи.</span></label>
       </div>
       <div class="setRow">
         <input type="checkbox" id="setHints" checked>
@@ -3995,6 +4149,14 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
           <button class="btn dbAvatarGalleryBtn" id="btnDbAvatarGallery" type="button" title="Открыть галерею артов карт этой колоды" disabled>Выбрать арт</button>
         </span>
       </label>
+      <div class="dbHeroField" title="Портрет игрока для этой колоды — отдельно от карточной обложки">
+        <span class="dbHeroLabel">Визуальный герой</span>
+        <span class="dbHeroPicker">
+          <span id="dbHeroPreview" class="dbHeroPreview" aria-hidden="true"></span>
+          <span class="dbHeroSummary"><b id="dbHeroName">Стандартный герой</b><small id="dbHeroTier"></small></span>
+          <button class="btn dbHeroPickerBtn" id="btnDbHeroPicker" type="button" title="Выбрать героя этой фракции">Выбрать героя</button>
+        </span>
+      </div>
       <button class="btn" id="btnDbExport" title="Скопировать код колоды">Экспорт</button>
       <button class="btn" id="btnDbImport" title="Вставить код колоды">Импорт</button>
       <button class="btn primary" id="btnDbSave">Сохранить</button>
@@ -4007,7 +4169,10 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
   <div id="colGrid" class="collectionGrid" role="region" aria-label="Карты коллекции"></div>
   <div id="dbMain" class="builderMain hidden">
     <section id="dbDeckCol" aria-label="Состав колоды">
-      <div class="dbHead">Колода <span id="dbDeckFaction" style="color:var(--muted)"></span></div>
+      <div class="dbHead"><span>Колода <span id="dbDeckFaction" style="color:var(--muted)"></span></span>
+        <button class="btn dbHandOpen" id="btnDbHandTest" type="button" disabled aria-haspopup="dialog" aria-controls="dbHandModal"
+          title="Пробная раздача из текущей колоды">♢ Тест руки</button>
+      </div>
       <div id="dbDeckList" role="region" aria-label="Карты в колоде"></div>
       <div class="dbCurve" id="dbCurve" role="img" aria-label="Кривая стоимости карт" title="Кривая маны"></div>
     </section>
@@ -4065,6 +4230,7 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
     </div>
     <div class="decksFooterRight">
       <span id="decksSelInfo" style="font-size:.68rem;color:#cbb98a;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+      <button class="btn deckHeroFooterBtn" id="btnDecksHero" type="button" disabled title="Выбрать визуального героя колоды">✦ Герой</button>
       <button class="btn primary" id="btnDecksPlay" disabled>Играть</button>
       <button class="btn" id="btnDecksEdit" disabled>Редактировать</button>
     </div>
@@ -4085,6 +4251,47 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
       <span>На обложку можно поставить любую карту этой колоды.</span>
       <button class="btn" id="btnDeckArtPickerDone" type="button">Готово</button>
     </footer>
+  </section>
+</div>
+<div id="deckHeroPickerModal" class="deckHeroPickerModal hidden" role="dialog" aria-modal="true" aria-labelledby="deckHeroPickerTitle" aria-describedby="deckHeroPickerHint" tabindex="-1">
+  <section class="deckHeroPickerPanel" role="document">
+    <header class="deckHeroPickerHeader">
+      <div class="deckHeroPickerHeading">
+        <span class="deckHeroPickerEyebrow">ГЕРОЙ КОЛОДЫ · НЕ ОБЛОЖКА КАРТ</span>
+        <h2 id="deckHeroPickerTitle">Выберите героя</h2>
+        <p id="deckHeroPickerHint">Герой влияет только на портрет колоды и медальон игрока в бою.</p>
+      </div>
+      <button class="deckHeroPickerClose" id="btnDeckHeroPickerClose" type="button" aria-label="Закрыть выбор героя" title="Закрыть">×</button>
+    </header>
+    <div id="deckHeroPickerGrid" class="deckHeroPickerGrid" role="list" aria-label="Герои фракции колоды"></div>
+    <footer class="deckHeroPickerFooter">
+      <span id="deckHeroWallet" aria-live="polite"></span>
+      <button class="btn" id="btnDeckHeroPickerDone" type="button">Готово</button>
+    </footer>
+  </section>
+</div>
+<div id="dbHandModal" class="dbHandModal hidden" role="dialog" aria-modal="true"
+  aria-labelledby="dbHandTitle" aria-describedby="dbHandDesc" tabindex="-1">
+  <section class="dbHandPanel" role="document">
+    <header class="dbHandHeader">
+      <div class="dbHandHeading">
+        <span class="dbHandEyebrow">КОЛОДОСТРОИТЕЛЬ · ПРОБНАЯ РАЗДАЧА</span>
+        <h2 id="dbHandTitle">Стартовая рука</h2>
+        <p id="dbHandDesc">Пять карт, как в обычной партии. Нажмите на карту, чтобы отметить её для единственного муллигана.</p>
+      </div>
+      <button class="dbHandClose" id="btnDbHandClose" type="button" aria-label="Закрыть тест руки" title="Закрыть">×</button>
+    </header>
+    <div class="dbHandContent">
+      <div id="dbHandDeckStats" class="dbHandMetrics" role="group" aria-label="Статистика колоды"></div>
+      <div class="dbHandSummary" id="dbHandSummary" aria-live="polite">Новая рука ещё не роздана.</div>
+      <div id="dbHandCards" class="dbHandCards" role="group" aria-label="Карты пробной стартовой руки"></div>
+      <p id="dbHandStatus" class="dbHandStatus" role="status" aria-live="polite">Симуляция не меняет колоду и не запускает матч.</p>
+      <footer class="dbHandActions">
+        <button class="btn" id="btnDbHandMulligan" type="button" disabled>Пересдать выбранные</button>
+        <button class="btn primary" id="btnDbHandDeal" type="button">Новая раздача</button>
+        <button class="btn" id="btnDbHandDone" type="button">Готово</button>
+      </footer>
+    </div>
   </section>
 </div>
 <!-- ======================= HOME ARENA (как на скрине 3) ======================= -->
@@ -4162,8 +4369,9 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
 <div id="gameover" class="hidden">
   <h2 id="goTitle">Победа</h2>
   <div id="goStats"></div>
-  <div style="display:flex;gap:.6rem">
-    <button class="btn primary" id="btnAgain">Ещё бой</button>
+  <div class="goActions">
+    <button class="btn primary goRecapBtn" id="btnGoRecap">✧ Разбор матча</button>
+    <button class="btn" id="btnAgain">Ещё бой</button>
     <button class="btn" id="btnGoMenu">В меню</button>
   </div>
 </div>
@@ -4236,7 +4444,8 @@ body.fxLite .packSlot:not(.flip).r-legendary{animation:none}
   </div>
 </div>
 
+<script src="./runtime-config.js"></script>
 <script>window.addEventListener("error",function(e){var n=document.getElementById("subsLine");if(n){n.textContent="\u26A0 Ошибка интерфейса: "+(e.message||e.error||"");n.classList.add("on");setTimeout(function(){n.classList.remove("on")},5000);}});</script>
-<script src="./prototype.js?v=3.17.6"></script>
+<script src="./prototype.js?v=3.24.0"></script>
 </body>
 </html>

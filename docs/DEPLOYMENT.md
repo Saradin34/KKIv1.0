@@ -22,6 +22,12 @@
   восстановление БД: `gunzip -c backups/db_<stamp>.sql.gz | docker compose exec -T db psql -U echo -d echo_citadel`.
 - Хостинг старта: **Render / Railway / Fly.io** (docker buildpack, health-check `/`),
   масштабирование: **Cloud Run / AWS ECS** (stateless-веб; состояние матчей — ниже).
+- Клиентские URL API/WS задаются без пересборки через env `META_API_URL`,
+  `MATCH_API_URL` и `MATCH_WS_PUBLIC_URL` (`EC_META_API_URL`, `EC_MATCH_API_URL` и
+  `EC_MATCH_WS_URL` тоже поддерживаются).
+  Для HTTPS укажите публичный HTTPS/WSS URL или проксируйте `/api/*` и `/match` на том же
+  origin; браузер не сможет использовать plain HTTP/WS со страницы HTTPS. Для ручной
+  диагностики доступны `?api=https%3A%2F%2Fapi.example.com&matchApi=https%3A%2F%2Fmatch.example.com&matchWs=wss%3A%2F%2Fmatch.example.com%2Fmatch`.
 
 ## 2. База данных
 - **PostgreSQL** (Supabase / Neon на старте): `server/schema.sql` — profiles, factions_dict,
@@ -61,7 +67,7 @@
 
 ## 5. Пайплайн ассетов (art_raw → _processed)
 - `npm run art:process` (`tools/process_art.py`, Pillow): карты cover-crop 3:4 → 512×720
-  в `_processed/cards/<Faction>/` + `Assets/Resources/Cards/<Faction>/`; герои 512×512 →
+  в `_processed/cards/<Faction>[/<Subfamily>]/` + `Assets/Resources/Cards/<Faction>[/<Subfamily>]/`; герои 512×512 →
   `_processed/heroes/` + `Assets/Resources/Heroes/`; фоны/UI ≤2048 → `_processed/ui/`.
   Идемпотентен (sha256 в `_processed/.state.json`), пишет `_processed/manifest.csv`.
   В CI не запускается (ассеты — артифакт релиза), в релиз-пайпе Unity — обязателен перед билдом.

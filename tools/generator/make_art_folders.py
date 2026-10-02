@@ -1,27 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ЭХО-ЦИТАДЕЛЬ — папки под арт карт (по фракциям) + манифесты.
+ЭХО-ЦИТАДЕЛЬ — папки под арт карт (фракции + подфракции) и манифесты.
 =====================================================================
-Создаёт структуру, в которую художник/генерация скидывают PNG-арты:
+Создаёт корневые папки шести фракций и тематические подпапки по tags/id:
 
-    unity/EchoCitadel/Assets/Resources/Cards/
-      ├── Aurites/        Ауриты      (30 карт)
-      ├── Necrus/         Некрусы     (30 карт)
-      ├── Terramorph/     Терраморфы  (30 карт)
-      ├── Pyromancer/     Пироманты   (30 карт)
-      ├── Ethereal/       Эфирные     (30 карт)
-      ├── Neutral/        Нейтральные (6 карт)
-      └── _Tokens/        Токены      (7 карт)
+    Cards/Aurites/Mechanoids/       meh_*.png
+    Cards/Aurites/PaladinBrotherhood/ pal_*.png
+    Cards/Pyromancer/Gremlins/      grm_*.png
+    Cards/Necrus/Vampires/          vmp_*.png
+    Cards/Neutral/SacredBrotherhood/ sbd_*.png
+    ... + остальные племена Расширения II и Наёмники.
 
-В каждой папке:
-    README.md    — куда класть, какой размер, как называется файл;
-    manifest.csv — список всех нужных файлов этой фракции и статус
-                   (OK / НЕТ ФАЙЛА), чтобы видеть прогресс одним взглядом.
-
-Имя файла = id карты из Cards.json (например aur_01.png). Путь уже
-прописан в Cards.json → поле artworkPath, поэтому Unity подхватит арт
-автоматически: Resources.Load<CardArt>(...) или AssetDatabase по пути.
+В каждой папке лежат README.md и manifest.csv со списком ожидаемых файлов,
+папка назначения берётся из artworkPath в Cards.json. PNG не создаются и
+не перемещаются: пользователь добавляет их сам. Синк/сервер используют тот
+же путь для Unity Resources и прототипа.
 
 Скрипт идемпотентен: манифесты пересчитываются, существующие PNG не трогаются.
 
@@ -36,11 +30,12 @@ import io
 import json
 import os
 import sys
+from art_layout import SUBFACTIONS, resource_card_path, subfaction_code
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 CARDS_JSON = os.path.join(ROOT, "unity", "EchoCitadel", "Assets", "StreamingAssets", "Cards.json")
 ART_ROOT = os.path.join(ROOT, "unity", "EchoCitadel", "Assets", "Resources", "Cards")
-WEB_ROOT = "art"          # прототип отдаёт арты по адресу /art/<Faction>/<id>.png
+WEB_ROOT = "art"          # прототип отдаёт /art/<Faction>[/<Subfamily>]/<id>.png
 SIZE = "512x720"
 
 FACTIONS = ["Aurites", "Necrus", "Terramorph", "Pyromancer", "Ethereal", "Neutral"]
@@ -62,6 +57,7 @@ FACTION_STYLE = {
     "Neutral": "Нейтральные карты: без фракционной символики, приглушённая палитра #9aa3ad.",
     "_Tokens": "Токены — мелкие призываемые существа. Тот же стиль, что у фракции-владельца.",
 }
+SUBFAMILY_BY_FOLDER = {spec["folder"]: {"code": code, **spec} for code, spec in SUBFACTIONS.items()}
 TYPE_RU = {"Creature": "Существо", "Spell": "Заклинание", "Rune": "Руна"}
 
 
@@ -74,6 +70,7 @@ def load_cards():
             "id": c["id"],
             "name": c["name"],
             "faction": c.get("faction", "Neutral"),
+            "tags": c.get("tags", []) or [],
             "type": c.get("type", "Creature"),
             "rarity": c.get("rarity", "Common"),
             "cost": c.get("cost", 0),
@@ -83,7 +80,7 @@ def load_cards():
             "keywords": ",".join(c.get("keywords", []) or []),
             "prompt": c.get("artPrompt", ""),
             "negative": c.get("negativePrompt", ""),
-            "file": c.get("artworkPath") or "",
+            "file": c.get("artworkPath") or resource_card_path(c.get("faction", "Neutral"), c["id"], subfaction_code(c)),
         })
     for t in d.get("tokens", []):
         entries.append({
@@ -112,82 +109,86 @@ def load_cards():
 
 
 def folder_for(entry):
-    """Папка внутри Assets/Resources/Cards — совпадает с artworkPath из Cards.json."""
-    rel = entry["file"] or f"Resources/Cards/{entry['faction']}/{entry['id']}.png"
-    parts = rel.split("/")
-    if parts[0] == "Resources" and parts[1] == "Cards":
-        return parts[2] if len(parts) > 3 else entry["faction"]
+    """Папка внутри Assets/Resources/Cards — вся ветка из artworkPath."""
+    rel = entry["file"] or resource_card_path(entry["faction"], entry["id"], subfaction_code(entry))
+    parts = rel.replace("\\", "/").split("/")
+    try:
+        cards_i = parts.index("Cards")
+        if cards_i + 2 < len(parts):
+            return "/".join(parts[cards_i + 1:-1])
+    except ValueError:
+        pass
     return entry["faction"]
 
 
-README_TMPL = """# {title} — арт карт
+README_TMPL = """# {title} — арты карт
 
-Папка для PNG-артов карт фракции **{faction_ru}**.
+Папка назначения: `unity/EchoCitadel/Assets/Resources/Cards/{folder}/`.
+Основная фракция: **{faction_ru}**. {family_line}
 
 ## Куда класть
 
-Прямо сюда, в эту папку. Имя файла — **id карты** из `Cards.json`:
+Добавьте сюда PNG с **id карты** из `Cards.json` в имени:
 
 ```
 {folder}/{example_id}.png
 ```
 
-Путь уже прописан в `Cards.json` → поле `artworkPath`, поэтому ничего
-переименовывать и регистрировать не нужно: положил файл — игра его подхватила.
+`artworkPath` уже указывает на эту папку. Арты не генерируются и не копируются
+этим скриптом — достаточно положить свой файл, после чего его увидят Unity и прототип.
 
 ## Требования к файлу
 
 | Параметр | Значение |
 |---|---|
-| Размер | **{size} px** (портретная карта), допустимо 1024×1440 с тем же соотношением |
-| Формат | `.png` (24 бит + альфа не нужна) или `.jpg` качества ≥ 90 |
+| Размер | **{size} px**, допустимо 1024×1440 с тем же соотношением |
+| Формат | PNG; JPG/JPEG/WebP сначала пропустите через `tools/process_art.py` или `normalize_art.py` |
 | Цветовое пространство | sRGB |
 | Композиция | объект по центру, верхняя треть — «воздух» под рамку и стоимость |
-| Текст на арте | **запрещён** (имя, стоимость и правила рисует интерфейс) |
+| Текст на арте | **запрещён** — имя, стоимость и правила рисует интерфейс |
 
-## Стиль фракции
+## Стиль
 
 {style}
 
-Общий стиль проекта — тёмное фэнтези, painterly, драматический rim-light,
-как в MTG Arena и Hearthstone. Полные промпты для Midjourney/Stable Diffusion:
+Общий стиль проекта — тёмное фэнтези, painterly, драматический rim-light.
+В `manifest.csv` есть id, статус, промпт и negative prompt для каждой карты.
 
-* в этой папке — `manifest.csv` (колонки `prompt` и `negative`);
-* сводно по всей игре — `docs/art_prompts.csv`.
-
-## Как проверить прогресс
+## Проверка и адрес прототипа
 
 ```bash
 python3 tools/generator/make_art_folders.py --check
 ```
 
-Скрипт пересчитает `manifest.csv` и покажет, сколько артов есть и каких не хватает.
-Статус `OK` ставится, если файл `<id>.png` лежит в папке.
+URL карты: `/{web}/{folder}/{example_id}.png`. Пока PNG отсутствует, остаётся
+процедурное оформление карты (`src/ui/art.ts`).
 
-## Прототип в браузере
-
-Сервер прототипа отдаёт эту папку по адресу `/{web}/{folder}/<id>.png`,
-пока арта нет — карта рисуется процедурной заглушкой (`src/ui/art.ts`).
-То есть достаточно просто положить PNG сюда и обновить страницу.
-
-## Сколько карт
-
-{count} шт. Список — в `manifest.csv`.
+В этой папке ожидается **{count} карт**.
 """
+
+
+def folder_details(folder_name):
+    parts = folder_name.split("/")
+    root = parts[0]
+    family = SUBFAMILY_BY_FOLDER.get(parts[1]) if len(parts) > 1 else None
+    faction_name = FACTION_RU.get(root, root)
+    if root == "_Tokens":
+        return "Токены", faction_name, "Токены призываемых существ.", FACTION_STYLE[root]
+    if family:
+        title = family["name"]
+        family_line = f"Подфракция: **{family['name']}** · направление {family['direction']}."
+        style = f"{FACTION_STYLE.get(root, '')} Семейство: {family['name']} ({family['direction']})."
+        return title, faction_name, family_line, style
+    return faction_name, faction_name, "Ядро основной фракции; подфракции находятся в соседних подпапках.", FACTION_STYLE.get(root, "")
 
 
 def write_readme(folder_abs, folder_name, entries):
     example = entries[0]["id"] if entries else "card_id"
-    title = "Токены" if folder_name == "_Tokens" else FACTION_RU.get(folder_name, folder_name)
+    title, faction_name, family_line, style = folder_details(folder_name)
     text = README_TMPL.format(
-        title=title,
-        faction_ru=FACTION_RU.get(folder_name, folder_name),
-        folder=folder_name,
-        example_id=example,
-        size=SIZE,
-        style=FACTION_STYLE.get(folder_name, ""),
-        web=WEB_ROOT,
-        count=len(entries),
+        title=title, faction_ru=faction_name, family_line=family_line,
+        folder=folder_name, example_id=example, size=SIZE, style=style,
+        web=WEB_ROOT, count=len(entries),
     )
     with io.open(os.path.join(folder_abs, "README.md"), "w", encoding="utf-8") as f:
         f.write(text)
@@ -196,18 +197,72 @@ def write_readme(folder_abs, folder_name, entries):
 def write_manifest(folder_abs, folder_name, entries):
     path = os.path.join(folder_abs, "manifest.csv")
     with io.open(path, "w", encoding="utf-8", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["file", "id", "name", "type", "rarity", "cost", "element",
-                    "attack", "health", "keywords", "status", "size", "prompt", "negative"])
+        w = csv.writer(f, lineterminator="\n")
+        w.writerow(["file", "resource_path", "id", "name", "type", "rarity", "cost", "element",
+                    "attack", "health", "keywords", "tags", "status", "size", "prompt", "negative"])
         for e in entries:
             exists = os.path.exists(os.path.join(folder_abs, e["id"] + ".png"))
+            resource_path = f"Resources/Cards/{folder_name}/{e['id']}.png"
             w.writerow([
-                e["id"] + ".png", e["id"], e["name"], TYPE_RU.get(e["type"], e["type"]),
+                e["id"] + ".png", resource_path, e["id"], e["name"], TYPE_RU.get(e["type"], e["type"]),
                 e["rarity"], e["cost"], e["element"], e["attack"], e["health"], e["keywords"],
-                "OK" if exists else "НЕТ ФАЙЛА", SIZE,
+                ",".join(e.get("tags", []) or []), "OK" if exists else "НЕТ ФАЙЛА", SIZE,
                 e["prompt"].replace('"', "'"), e["negative"].replace('"', "'"),
             ])
     return path
+
+
+def folder_sort_key(folder):
+    parts = folder.split("/")
+    root = parts[0]
+    root_order = FACTIONS.index(root) if root in FACTIONS else len(FACTIONS)
+    if len(parts) == 1:
+        return root_order, 0, 0
+    family = SUBFAMILY_BY_FOLDER.get(parts[1], {})
+    code = family.get("code", "")
+    family_order = list(SUBFACTIONS).index(code) if code in SUBFACTIONS else 999
+    return root_order, 1, family_order
+
+
+def write_root_readme(by_folder):
+    lines = [
+        "# Арты карт: структура папок",
+        "",
+        "Пути заданы в `Assets/StreamingAssets/Cards.json` (`artworkPath`) и общих",
+        "метаданных `meta.artLayout`. Карты основного набора лежат прямо в папке",
+        "фракции; карты подфракций — в подпапках. Отдельные категории: `Neutral` и `_Tokens`.",
+        "",
+        "| Фракция | Семейство | Код | Папка внутри `Cards/` | Карт |",
+        "|---|---|---|---|---:|",
+    ]
+    for faction in FACTIONS:
+        count = len(by_folder.get(faction, []))
+        if count:
+            lines.append(f"| {FACTION_RU.get(faction, faction)} | Основной набор | — | `{faction}/` | {count} |")
+        for code, spec in SUBFACTIONS.items():
+            if spec["faction"] != faction:
+                continue
+            folder = f"{faction}/{spec['folder']}"
+            family_count = len(by_folder.get(folder, []))
+            lines.append(f"| {FACTION_RU.get(faction, faction)} | {spec['name']} | `{code}` | `{folder}/` | {family_count} |")
+    token_count = len(by_folder.get("_Tokens", []))
+    lines.append(f"| Токены | Отдельная категория | — | `_Tokens/` | {token_count} |")
+    lines.extend([
+        "",
+        "## Добавление арта",
+        "",
+        "Файл назначения — `<id>.png`; точная папка показана в `artworkPath` карты и в",
+        "локальном `manifest.csv`. PNG не генерируются этим скриптом.",
+        "Плоский drop-in `art_raw/<id>.png` сохранён: `npm run art:sync` или",
+        "`npm run art:process` положит обработанную копию по вложенному `artworkPath`.",
+        "Прототип отдаёт файл через `/art/<Faction>[/<Family>]/<id>.png`.",
+        "",
+        "Пересоздать папки и манифесты: `python3 tools/generator/make_art_folders.py`.",
+        "Проверить наличие PNG: `python3 tools/generator/make_art_folders.py --check`.",
+        "",
+    ])
+    with io.open(os.path.join(ART_ROOT, "README.md"), "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
 
 
 def main():
@@ -216,42 +271,42 @@ def main():
     args = ap.parse_args()
 
     _, entries = load_cards()
-
     by_folder = {}
-    for e in entries:
-        by_folder.setdefault(folder_for(e), []).append(e)
-
-    # порядок вывода: фракции как в ТЗ, токены последними
-    order = [f for f in FACTIONS if f in by_folder] + [f for f in by_folder if f not in FACTIONS]
+    for entry in entries:
+        by_folder.setdefault(folder_for(entry), []).append(entry)
+    order = sorted(by_folder, key=folder_sort_key)
 
     total_ok = 0
     print("Папки артов: unity/EchoCitadel/Assets/Resources/Cards/")
-    print("-" * 74)
-    print(f"{'папка':<14} {'фракция':<14} {'карт':>5} {'есть':>5} {'нет':>5}  прогресс")
-    print("-" * 74)
+    print("-" * 96)
+    print(f"{'папка':<43} {'карт':>5} {'есть':>5} {'нет':>5}  прогресс")
+    print("-" * 96)
 
     for folder in order:
         items = by_folder[folder]
-        folder_abs = os.path.join(ART_ROOT, folder)
+        folder_abs = os.path.join(ART_ROOT, *folder.split("/"))
         if not args.check:
             os.makedirs(folder_abs, exist_ok=True)
             write_readme(folder_abs, folder, items)
             write_manifest(folder_abs, folder, items)
 
-        ok = sum(1 for e in items if os.path.exists(os.path.join(folder_abs, e["id"] + ".png")))
+        ok = sum(1 for entry in items if os.path.exists(os.path.join(folder_abs, entry["id"] + ".png")))
         missing = len(items) - ok
         total_ok += ok
         bar_len = 22
         filled = int(round(bar_len * ok / max(1, len(items))))
         bar = "█" * filled + "·" * (bar_len - filled)
-        print(f"{folder:<14} {FACTION_RU.get(folder, folder):<14} {len(items):>5} {ok:>5} {missing:>5}  {bar} {ok/len(items)*100:.0f}%")
+        print(f"{folder:<43} {len(items):>5} {ok:>5} {missing:>5}  {bar} {ok/len(items)*100:.0f}%")
 
-    print("-" * 74)
+    if not args.check:
+        write_root_readme(by_folder)
+
+    print("-" * 96)
     print(f"всего карт {len(entries)}, артов на месте {total_ok}, не хватает {len(entries) - total_ok}")
     if args.check:
         print("(режим --check: файлы не изменялись)")
     else:
-        print("созданы/обновлены README.md и manifest.csv в каждой папке")
+        print("созданы/обновлены корневой README, README.md и manifest.csv во всех папках")
     return 0
 
 

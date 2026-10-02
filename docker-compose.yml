@@ -21,6 +21,11 @@ services:
       context: .
       target: runtime-proto
     ports: ["5173:5173"]
+    environment:
+      # Optional public browser URLs; empty values use secure same-origin defaults in production.
+      META_API_URL: ${META_API_URL:-}
+      MATCH_API_URL: ${MATCH_API_URL:-}
+      MATCH_WS_PUBLIC_URL: ${MATCH_WS_PUBLIC_URL:-}
     depends_on: [meta]
     restart: unless-stopped
 

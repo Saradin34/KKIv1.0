@@ -98,7 +98,8 @@ export enum Keyword {
   SpellDamage = 'SpellDamage',  // +N к урону заклинаний владельца
   DivineShield= 'DivineShield', // Божественный щит: входит со Щитом (1 заряд), поглощает первое повреждение
   Poisonous   = 'Poisonous',    // Ядовитый: при нанесении урона существу накладывает Яд (любая рана смертельна)
-  Freezing    = 'Freezing',     // Ледяное касание: при нанесении урона замораживает цель на 1 ход
+  Freezing   = 'Freezing',    // Ледяное касание: при нанесении урона замораживает цель на 1 ход
+  Vigilance  = 'Vigilance',   // Бдительность: не поворачивается при атаке
 }
 
 /* ------------------------------ ЦЕЛИ --------------------------------- */
@@ -282,7 +283,8 @@ export interface CardData {
   ritualDelay?: number;        // для ритуалов: ходов подготовки (default 1)
   abilityText: string;         // текст способности (показывается на карте)
   flavor: string;              // лоровая фраза
-  art: string;                 // путь к арту: Resources/Cards/<file>
+  art: string;                 // Resources/Cards/<Faction>[/<Subfamily>]/<id>.png
+  artworkPath?: string;        // совпадает с art; Unity/прототип используют вложенный путь
   artPrompt?: string;          // промпт для Midjourney / Stable Diffusion
   tags?: string[];             // для поиска в коллекции и драфта
 }
@@ -311,6 +313,7 @@ export interface EntityCreature {
   statuses: StatusInstance[];
   summonedOnTurn: number;
   attacksThisTurn: number;
+  tapped: boolean;              // остаётся до Untap владельца; отдельно от числа атак (Буря)
   canAttackThisTurn: boolean;
   silenced: boolean;
   frozen: boolean;

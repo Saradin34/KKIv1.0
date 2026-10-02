@@ -90,7 +90,7 @@ TMP **не читает woff2** (в прототипе Philosopher/Alegreya ле
 
 ## 6. Арт и визуал
 
-- Арты карт: `Assets/Resources/Cards/<Faction>/<id>.png` 512×720 (окно арта y 10–70% —
+- Арты карт: `Assets/Resources/Cards/<Faction>[/<Subfamily>]/<id>.png` 512×720 (ядро фракции — в корне, семейства — в подпапках; окно арта y 10–70% —
   docs/ART_SPEC.md); превью 256×360 для списков; загрузка в UI — `Resources.Load` или
   Addressables позже (на 300 карт Resources достаточно).
 - Фоны/иконки UI (Часть 1 арт-задач): `prototype/img/*` — переложите в `Assets/Art/UI/`
